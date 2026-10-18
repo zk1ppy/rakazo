@@ -196,7 +196,7 @@ describe("Neo4j memory client", () => {
     expect(cypher).toContain(`queryNodes('${NEO4J_FACT_FULLTEXT_INDEX}'`);
     expect(cypher).toContain(`queryNodes('${NEO4J_ENTITY_FULLTEXT_INDEX}'`);
     expect(cypher).toContain("[:ABOUT]");
-    expect(cypher).toContain("[rel:REL]");
+    expect(cypher).toContain("[rel:RKZ_REL]");
     expect(cypher).toContain("expiredAt IS NULL");
     expect(cypher).toContain("score * 0.9");
     expect(cypher).toContain("score * 0.7");
@@ -270,7 +270,7 @@ describe("Neo4j memory client", () => {
     });
     expect(driver.calls[1]?.cypher).toContain("MERGE (f)-[:ABOUT]->(e)");
     expect(driver.calls[2]?.cypher).toContain(
-      "MERGE (a)-[r:REL {type: $type, factId: $factId}]->(b)",
+      "MERGE (a)-[r:RKZ_REL {type: $type, factId: $factId}]->(b)",
     );
     expect(driver.calls[2]?.cypher).toContain("r.validFrom = $now");
   });

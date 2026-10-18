@@ -300,34 +300,79 @@ function safeMemoryError(error: unknown): string {
   return message.replace(/password[=:][^\s,)]+/gi, "password=(redacted)").slice(0, 500);
 }
 
-// One pool per connection. Resolving memory for each run would otherwise open a driver and never close it.
-const driverPools = new Map<string, Promise<Neo4jMemoryDriver>>();
-const schemaReady = new WeakMap<Neo4jMemoryDriver, Promise<void>>();
+// One driver per uri, username, and password. A new password or username for that
+// uri, or the same username and password on a new uri, closes the driver it replaces.
+interface PooledDriver {
+  uri: string;
+  username: string;
+  passwordHash: string;
+  endpointTrust: Neo4jMemoryConnection["endpointTrust"];
+  driver: Promise<Neo4jMemoryDriver>;
+}
+
+const driverPools = new Map<string, PooledDriver>();
+const schemaReady = new WeakMap<Neo4jMemoryDriver, Map<string, Promise<void>>>();
 
 function poolKey(connection: Neo4jMemoryConnection): string {
   return createHash("sha256")
-    .update(
-      [
-        connection.uri,
-        connection.database,
-        connection.username,
-        connection.endpointTrust,
-        connection.password,
-      ].join("\n"),
-    )
+    .update([connection.uri, connection.username, connection.password].join("\n"))
     .digest("hex");
 }
 
-function sharedDriver(connection: Neo4jMemoryConnection): Promise<Neo4jMemoryDriver> {
+function hashPassword(password: string): string {
+  return createHash("sha256").update(password).digest("hex");
+}
+
+function replacesCachedDriver(entry: PooledDriver, connection: Neo4jMemoryConnection): boolean {
+  const sameUri = entry.uri === connection.uri;
+  const sameUser = entry.username === connection.username;
+  const samePassword = entry.passwordHash === hashPassword(connection.password);
+  if (sameUri && (!sameUser || !samePassword)) return true;
+  if (!sameUri && sameUser && samePassword) return true;
+  return sameUri && sameUser && samePassword && entry.endpointTrust !== connection.endpointTrust;
+}
+
+function closePooledDriver(entry: PooledDriver): Promise<void> {
+  return entry.driver
+    .then((driver) => driver.close())
+    .then(
+      () => undefined,
+      () => undefined,
+    );
+}
+
+/** Reuse the driver for this uri, username, and password, closing the one a change replaces. */
+export function acquireNeo4jMemoryDriver(
+  connection: Neo4jMemoryConnection,
+  open: Neo4jMemoryDriverFactory = openNeo4jMemoryDriver,
+): Promise<Neo4jMemoryDriver> {
   const key = poolKey(connection);
   const existing = driverPools.get(key);
-  if (existing) return existing;
-  const created = Promise.resolve(openNeo4jMemoryDriver(connection)).catch((error: unknown) => {
-    driverPools.delete(key);
+  if (existing && existing.endpointTrust === connection.endpointTrust) return existing.driver;
+
+  const driver = (async () => {
+    const closing: Promise<void>[] = [];
+    if (existing) closing.push(closePooledDriver(existing));
+    for (const [oldKey, entry] of driverPools) {
+      if (oldKey === key || !replacesCachedDriver(entry, connection)) continue;
+      driverPools.delete(oldKey);
+      closing.push(closePooledDriver(entry));
+    }
+    await Promise.all(closing);
+    return open(connection);
+  })().catch((error: unknown) => {
+    const current = driverPools.get(key);
+    if (current?.driver === driver) driverPools.delete(key);
     throw error;
   });
-  driverPools.set(key, created);
-  return created;
+  driverPools.set(key, {
+    uri: connection.uri,
+    username: connection.username,
+    passwordHash: hashPassword(connection.password),
+    endpointTrust: connection.endpointTrust,
+    driver,
+  });
+  return driver;
 }
 
 export class Neo4jMemoryProvider implements SemanticMemoryProvider {
@@ -508,7 +553,7 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
   }
 
   private driver() {
-    if (this.openDriver === openNeo4jMemoryDriver) return sharedDriver(this.connection);
+    if (this.openDriver === openNeo4jMemoryDriver) return acquireNeo4jMemoryDriver(this.connection);
     this.driverTask ??= Promise.resolve(this.openDriver(this.connection)).catch(
       (error: unknown) => {
         this.driverTask = undefined;
@@ -519,15 +564,16 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
   }
 
   private schema(driver: Neo4jMemoryDriver, signal?: AbortSignal) {
-    const existing = schemaReady.get(driver);
+    const databases = schemaReady.get(driver) ?? new Map<string, Promise<void>>();
+    schemaReady.set(driver, databases);
+    const database = this.connection.database;
+    const existing = databases.get(database);
     if (existing) return existing;
-    const ready = ensureNeo4jMemorySchema(driver, this.connection.database, signal).catch(
-      (error: unknown) => {
-        schemaReady.delete(driver);
-        throw error;
-      },
-    );
-    schemaReady.set(driver, ready);
+    const ready = ensureNeo4jMemorySchema(driver, database, signal).catch((error: unknown) => {
+      if (databases.get(database) === ready) databases.delete(database);
+      throw error;
+    });
+    databases.set(database, ready);
     return ready;
   }
 }

@@ -12,6 +12,8 @@ import { isCloudMetadataAddress, isPrivateAddress } from "./network-address.js";
 
 export const NEO4J_FACT_FULLTEXT_INDEX = "rkz_fact_text";
 export const NEO4J_ENTITY_FULLTEXT_INDEX = "rkz_entity_name";
+/** Entity-to-entity edges. Prefixed so they do not share another application's relationship type. */
+export const NEO4J_ENTITY_RELATIONSHIP = "RKZ_REL";
 
 const ENTITY_LABELS = {
   Person: "Person",
@@ -75,7 +77,7 @@ export const NEO4J_MEMORY_SCHEMA_STATEMENTS = [
   `CREATE INDEX rkz_source_chat IF NOT EXISTS
    FOR (n:Rkz) ON (n.spaceId, n.botId, n.kind, n.generation)`,
   `CREATE INDEX rkz_rel_fact IF NOT EXISTS
-   FOR ()-[r:REL]-() ON (r.factId)`,
+   FOR ()-[r:${NEO4J_ENTITY_RELATIONSHIP}]-() ON (r.factId)`,
   `CREATE FULLTEXT INDEX ${NEO4J_FACT_FULLTEXT_INDEX} IF NOT EXISTS
    FOR (n:Rkz) ON EACH [n.text]`,
   `CREATE FULLTEXT INDEX ${NEO4J_ENTITY_FULLTEXT_INDEX} IF NOT EXISTS
@@ -116,7 +118,7 @@ CALL {
   WITH entity, score
   ORDER BY score DESC
   LIMIT 10
-  MATCH (entity)-[rel:REL]-(neighbor:Rkz:Entity)
+  MATCH (entity)-[rel:${NEO4J_ENTITY_RELATIONSHIP}]-(neighbor:Rkz:Entity)
   WHERE neighbor.spaceId = $spaceId AND neighbor.ns IN $namespaces AND rel.validTo IS NULL
   MATCH (fact:Rkz:Fact)-[:ABOUT]->(neighbor)
   WHERE ${ACTIVE_FACT}
@@ -130,7 +132,7 @@ CALL {
   WITH hit, score
   ORDER BY score DESC
   LIMIT 10
-  MATCH (hit)-[:ABOUT]->(:Rkz:Entity)-[rel:REL]-(neighbor:Rkz:Entity)
+  MATCH (hit)-[:ABOUT]->(:Rkz:Entity)-[rel:${NEO4J_ENTITY_RELATIONSHIP}]-(neighbor:Rkz:Entity)
   WHERE neighbor.spaceId = $spaceId AND neighbor.ns IN $namespaces AND rel.validTo IS NULL
   MATCH (fact:Rkz:Fact)-[:ABOUT]->(neighbor)
   WHERE ${ACTIVE_FACT} AND fact.id <> hit.id
@@ -439,7 +441,7 @@ export async function purgeNeo4jChatSources(
      UNWIND endpoints AS endpoint
      WITH endpoint WHERE endpoint IS NOT NULL
      MATCH (f:Rkz:Fact)-[:FROM]->(endpoint)
-     OPTIONAL MATCH ()-[rel:REL {factId: f.id}]-()
+     OPTIONAL MATCH ()-[rel:${NEO4J_ENTITY_RELATIONSHIP} {factId: f.id}]-()
      DELETE rel
      DETACH DELETE f`,
     input,
@@ -543,7 +545,7 @@ export async function linkNeo4jEntities(
   const result = await driver.run(
     `MATCH (a:Rkz:Entity {id: $fromId, spaceId: $spaceId, ns: $ns})
      MATCH (b:Rkz:Entity {id: $toId, spaceId: $spaceId, ns: $ns})
-     MERGE (a)-[r:REL {type: $type, factId: $factId}]->(b)
+     MERGE (a)-[r:${NEO4J_ENTITY_RELATIONSHIP} {type: $type, factId: $factId}]->(b)
      ON CREATE SET r.validFrom = $now, r.validTo = null
      RETURN a.id AS id`,
     input,

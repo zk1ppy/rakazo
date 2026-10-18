@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { AdapterContext } from "@rakazo/adapter-kit";
 import { describe, expect, it } from "vitest";
 import {
@@ -7,6 +8,7 @@ import {
 import type { Neo4jMemoryDriver, Neo4jMemoryRows, Neo4jRunOptions } from "./neo4j-memory-client.js";
 import { NEO4J_MEMORY_SCHEMA_STATEMENTS } from "./neo4j-memory-client.js";
 import {
+  acquireNeo4jMemoryDriver,
   classifyNeo4jConnectionSettings,
   createNeo4jProvider,
   Neo4jMemoryProvider,
@@ -382,6 +384,53 @@ describe("Neo4jMemoryProvider", () => {
     const idle = new FakeDriver();
     await providerFor(idle).purgeHistory({ botId: "bot-1", generations: [] }, context);
     expect(idle.calls).toHaveLength(0);
+  });
+
+  it("closes the cached driver when the password or uri changes", async () => {
+    const stamp = randomUUID();
+    const opened: FakeDriver[] = [];
+    const open = () => {
+      const driver = new FakeDriver();
+      opened.push(driver);
+      return driver;
+    };
+    const base = {
+      uri: `bolt://db-${stamp}.internal:7687`,
+      database: "neo4j",
+      username: "neo4j",
+      password: `pool-one-${stamp}`,
+      endpointTrust: "private" as const,
+    };
+    const first = await acquireNeo4jMemoryDriver(base, open);
+    expect(await acquireNeo4jMemoryDriver({ ...base, database: "graphs" }, open)).toBe(first);
+    expect(opened).toHaveLength(1);
+    expect((first as FakeDriver).closed).toBe(false);
+
+    const rotated = await acquireNeo4jMemoryDriver(
+      { ...base, password: `pool-two-${stamp}` },
+      open,
+    );
+    expect(rotated).not.toBe(first);
+    expect((first as FakeDriver).closed).toBe(true);
+
+    const moved = await acquireNeo4jMemoryDriver(
+      { ...base, password: `pool-two-${stamp}`, uri: `bolt://other-${stamp}.internal:7687` },
+      open,
+    );
+    expect((rotated as FakeDriver).closed).toBe(true);
+    expect((moved as FakeDriver).closed).toBe(false);
+
+    const separate = await acquireNeo4jMemoryDriver(
+      {
+        ...base,
+        uri: `bolt://elsewhere-${stamp}.internal:7687`,
+        username: "other",
+        password: `pool-three-${stamp}`,
+      },
+      open,
+    );
+    expect((moved as FakeDriver).closed).toBe(false);
+    expect((separate as FakeDriver).closed).toBe(false);
   });
 
   it("returns driver failures without the password", async () => {
