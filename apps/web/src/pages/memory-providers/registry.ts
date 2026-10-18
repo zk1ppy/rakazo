@@ -1,5 +1,7 @@
 import type { SpaceMemoryConfig } from "@rakazo/contracts";
 import type { ComponentType } from "react";
+import { Neo4jSettingsForm } from "./Neo4jSettingsForm";
+import { neo4jConnectedHost } from "./neo4j-settings";
 import { SerenitySettingsForm } from "./SerenitySettingsForm";
 import { SupermemorySettingsForm } from "./SupermemorySettingsForm";
 
@@ -40,6 +42,16 @@ export const MEMORY_PROVIDER_SETTINGS: readonly MemoryProviderSettingsRegistrati
       const endpoint = config.settings.endpoint ?? "Serenity";
       const mode = config.settings.allowWrites === "true" ? "read/write" : "recall only";
       return label ? `Serenity · ${label} · ${mode}` : `Serenity · ${endpoint} · ${mode}`;
+    },
+  },
+  {
+    id: "neo4j",
+    name: "Neo4j",
+    description: "Graph memory stored in Neo4j.",
+    SettingsForm: Neo4jSettingsForm,
+    connectedLabel: (config) => {
+      const database = config.settings.database?.trim() || "neo4j";
+      return `Neo4j · ${database} · ${neo4jConnectedHost(config.settings.uri ?? "")}`;
     },
   },
 ];
