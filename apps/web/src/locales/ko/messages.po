@@ -1229,6 +1229,7 @@ msgid "Confirm the URL is reachable from this browser session, then test again."
 msgstr "이 브라우저 세션에서 URL에 연결할 수 있는지 확인한 뒤 다시 테스트하세요."
 
 #: src/components/integrations/IntegrationSetup.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/memory-providers/SerenitySettingsForm.tsx
 #: src/pages/memory-providers/SupermemorySettingsForm.tsx
 #: src/pages/VoiceSettingsOverlay.tsx
@@ -1298,6 +1299,7 @@ msgstr "연결되었습니다. 다음 메시지부터 이 도구를 사용할 �
 
 #: src/components/integrations/IntegrationSetup.tsx
 #: src/pages/McpServersOverlay.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/memory-providers/SerenitySettingsForm.tsx
 #: src/pages/memory-providers/SupermemorySettingsForm.tsx
 #: src/pages/shell/message-cards.tsx
@@ -1908,6 +1910,10 @@ msgstr "봇 아바타 맞춤설정"
 #: src/pages/AccountSettingsOverlay.tsx
 msgid "Dark"
 msgstr "다크"
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Database"
+msgstr ""
 
 #: src/lib/billing.ts
 #: src/pages/RoutineSchedule.tsx
@@ -3085,6 +3091,10 @@ msgstr "인수 필요"
 msgid "Needs you"
 msgstr ""
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Neo4j URI is required."
+msgstr ""
+
 #: src/pages/shell/bot-panel.tsx
 msgid "New bot"
 msgstr "새 Bot 만들기"
@@ -3433,6 +3443,7 @@ msgstr "보류"
 #: src/components/AskCard.tsx
 #: src/pages/AccountSettingsOverlay.tsx
 #: src/pages/Auth.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/shell/bot-credentials.tsx
 msgid "Password"
 msgstr "비밀번호"
@@ -4783,6 +4794,10 @@ msgstr "업로드"
 msgid "Urgent"
 msgstr ""
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "URI"
+msgstr ""
+
 #: src/pages/AccountSettingsOverlay.tsx
 #: src/pages/SettingsOverlay.tsx
 #: src/pages/Shell.tsx
@@ -4819,6 +4834,7 @@ msgid "Use your own key"
 msgstr "내 키 사용"
 
 #: src/components/AskCard.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/shell/bot-credentials.tsx
 msgid "Username"
 msgstr ""

@@ -1,0 +1,78 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import {
+  NEO4J_URI_PLACEHOLDER,
+  neo4jConnectedHost,
+  neo4jConnectionDraft,
+  neo4jUriError,
+} from "./neo4j-settings";
+
+describe("Neo4j memory provider settings", () => {
+  it("registers Neo4j without a default URI", () => {
+    const registry = readFileSync(fileURLToPath(new URL("./registry.ts", import.meta.url)), "utf8");
+    expect(registry).toContain('id: "neo4j"');
+    expect(registry).toContain("Graph memory stored in Neo4j.");
+    expect(registry).not.toContain("useState(NEO4J_URI_PLACEHOLDER)");
+
+    const form = readFileSync(
+      fileURLToPath(new URL("./Neo4jSettingsForm.tsx", import.meta.url)),
+      "utf8",
+    );
+    expect(form).toContain('const [uri, setUri] = useState("");');
+    expect(form).toContain("placeholder={NEO4J_URI_PLACEHOLDER}");
+    expect(form).toContain("required");
+    expect(NEO4J_URI_PLACEHOLDER).toBe("bolt://localhost:7687");
+  });
+
+  it("requires an explicit URI and leaves URL validity to the backend", () => {
+    expect(neo4jUriError("")).toBe("required");
+    expect(neo4jUriError("   ")).toBe("required");
+    expect(neo4jUriError("not a url")).toBeNull();
+    expect(neo4jUriError(NEO4J_URI_PLACEHOLDER)).toBeNull();
+
+    expect(
+      neo4jConnectionDraft({ uri: "", database: "", username: "neo4j", password: "secret" }),
+    ).toEqual({ ok: false, error: "required" });
+
+    expect(
+      neo4jConnectionDraft({
+        uri: " bolt://localhost:7687 ",
+        database: " ",
+        username: " neo4j ",
+        password: "secret",
+      }),
+    ).toEqual({
+      ok: true,
+      draft: {
+        settings: { uri: "bolt://localhost:7687", username: "neo4j" },
+        credentials: { password: "secret" },
+      },
+    });
+
+    expect(
+      neo4jConnectionDraft({
+        uri: "neo4j+s://example.databases.neo4j.io",
+        database: " graph ",
+        username: "reader",
+        password: " secret ",
+      }),
+    ).toEqual({
+      ok: true,
+      draft: {
+        settings: {
+          uri: "neo4j+s://example.databases.neo4j.io",
+          username: "reader",
+          database: "graph",
+        },
+        credentials: { password: " secret " },
+      },
+    });
+  });
+
+  it("shows the host without credentials in the connected label", () => {
+    expect(neo4jConnectedHost("")).toBe("Neo4j");
+    expect(neo4jConnectedHost("bolt://localhost:7687")).toBe("localhost:7687");
+    expect(neo4jConnectedHost("not a url")).toBe("not a url");
+  });
+});

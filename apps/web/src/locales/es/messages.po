@@ -1229,6 +1229,7 @@ msgid "Confirm the URL is reachable from this browser session, then test again."
 msgstr "Confirma que la URL es accesible desde esta sesión del navegador y vuelve a probar."
 
 #: src/components/integrations/IntegrationSetup.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/memory-providers/SerenitySettingsForm.tsx
 #: src/pages/memory-providers/SupermemorySettingsForm.tsx
 #: src/pages/VoiceSettingsOverlay.tsx
@@ -1298,6 +1299,7 @@ msgstr "Conectado: sus herramientas estarán disponibles desde tu próximo mensa
 
 #: src/components/integrations/IntegrationSetup.tsx
 #: src/pages/McpServersOverlay.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/memory-providers/SerenitySettingsForm.tsx
 #: src/pages/memory-providers/SupermemorySettingsForm.tsx
 #: src/pages/shell/message-cards.tsx
@@ -1908,6 +1910,10 @@ msgstr "Personalizar avatar del bot"
 #: src/pages/AccountSettingsOverlay.tsx
 msgid "Dark"
 msgstr "Oscuro"
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Database"
+msgstr ""
 
 #: src/lib/billing.ts
 #: src/pages/RoutineSchedule.tsx
@@ -3085,6 +3091,10 @@ msgstr "Necesita toma de control"
 msgid "Needs you"
 msgstr ""
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Neo4j URI is required."
+msgstr ""
+
 #: src/pages/shell/bot-panel.tsx
 msgid "New bot"
 msgstr "Nuevo bot"
@@ -3433,6 +3443,7 @@ msgstr "Aparcar"
 #: src/components/AskCard.tsx
 #: src/pages/AccountSettingsOverlay.tsx
 #: src/pages/Auth.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/shell/bot-credentials.tsx
 msgid "Password"
 msgstr "Contraseña"
@@ -4783,6 +4794,10 @@ msgstr "Subir"
 msgid "Urgent"
 msgstr ""
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "URI"
+msgstr ""
+
 #: src/pages/AccountSettingsOverlay.tsx
 #: src/pages/SettingsOverlay.tsx
 #: src/pages/Shell.tsx
@@ -4819,6 +4834,7 @@ msgid "Use your own key"
 msgstr "Usar tu propia clave"
 
 #: src/components/AskCard.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/shell/bot-credentials.tsx
 msgid "Username"
 msgstr ""

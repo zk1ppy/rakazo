@@ -1229,6 +1229,7 @@ msgid "Confirm the URL is reachable from this browser session, then test again."
 msgstr "पुष्टि करें कि यह URL इस ब्राउज़र सत्र से पहुँच योग्य है, फिर फिर से परीक्षण करें।"
 
 #: src/components/integrations/IntegrationSetup.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/memory-providers/SerenitySettingsForm.tsx
 #: src/pages/memory-providers/SupermemorySettingsForm.tsx
 #: src/pages/VoiceSettingsOverlay.tsx
@@ -1298,6 +1299,7 @@ msgstr "कनेक्टेड। इसके टूल आपके अग�
 
 #: src/components/integrations/IntegrationSetup.tsx
 #: src/pages/McpServersOverlay.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/memory-providers/SerenitySettingsForm.tsx
 #: src/pages/memory-providers/SupermemorySettingsForm.tsx
 #: src/pages/shell/message-cards.tsx
@@ -1908,6 +1910,10 @@ msgstr "बॉट अवतार अनुकूलित करें"
 #: src/pages/AccountSettingsOverlay.tsx
 msgid "Dark"
 msgstr "डार्क"
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Database"
+msgstr ""
 
 #: src/lib/billing.ts
 #: src/pages/RoutineSchedule.tsx
@@ -3085,6 +3091,10 @@ msgstr "नियंत्रण लेना ज़रूरी"
 msgid "Needs you"
 msgstr ""
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Neo4j URI is required."
+msgstr ""
+
 #: src/pages/shell/bot-panel.tsx
 msgid "New bot"
 msgstr "नया बॉट"
@@ -3433,6 +3443,7 @@ msgstr "पार्क करें"
 #: src/components/AskCard.tsx
 #: src/pages/AccountSettingsOverlay.tsx
 #: src/pages/Auth.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/shell/bot-credentials.tsx
 msgid "Password"
 msgstr "पासवर्ड"
@@ -4783,6 +4794,10 @@ msgstr "अपलोड"
 msgid "Urgent"
 msgstr ""
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "URI"
+msgstr ""
+
 #: src/pages/AccountSettingsOverlay.tsx
 #: src/pages/SettingsOverlay.tsx
 #: src/pages/Shell.tsx
@@ -4819,6 +4834,7 @@ msgid "Use your own key"
 msgstr "अपनी कुंजी इस्तेमाल करें"
 
 #: src/components/AskCard.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/shell/bot-credentials.tsx
 msgid "Username"
 msgstr ""

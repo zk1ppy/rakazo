@@ -1,6 +1,13 @@
 import type { DurableMemoryScope, SecretStore, SemanticMemoryProvider } from "@rakazo/adapter-kit";
 import type { PrismaClient } from "@rakazo/db";
 import {
+  classifyNeo4jConnectionSettings,
+  createNeo4jProvider,
+  NEO4J_PROVIDER_ID,
+  neo4jRequiresDeploymentOwner,
+  prepareNeo4jConnection,
+} from "./neo4j-memory-provider.js";
+import {
   classifySerenityConnectionSettings,
   createSerenityProvider,
   prepareSerenityConnection,
@@ -79,6 +86,19 @@ const MEMORY_PROVIDER_ADAPTERS: ReadonlyMap<string, MemoryProviderAdapter> = new
         options?: { allowPrivateEndpoint?: boolean },
       ) => prepareSerenityConnection(settings, credentials, undefined, options),
       create: createSerenityProvider,
+    },
+  ],
+  [
+    NEO4J_PROVIDER_ID,
+    {
+      requiresDeploymentOwner: neo4jRequiresDeploymentOwner,
+      classifySettings: classifyNeo4jConnectionSettings,
+      prepare: (
+        settings: Record<string, string>,
+        credentials: Record<string, string>,
+        options?: { allowPrivateEndpoint?: boolean },
+      ) => prepareNeo4jConnection(settings, credentials, undefined, options),
+      create: createNeo4jProvider,
     },
   ],
 ]);

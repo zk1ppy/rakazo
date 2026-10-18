@@ -90,6 +90,7 @@ export * from "./messaging-team-chat-emulator.js";
 export * from "./model-connect.js";
 export * from "./model-selection.js";
 export * from "./model-vision.js";
+export { Neo4jMemoryProvider } from "./neo4j-memory-provider.js";
 export * from "./none-sandbox.js";
 export * from "./openai-compatible-url.js";
 export * from "./openai-voice.js";
