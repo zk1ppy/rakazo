@@ -139,7 +139,12 @@ export function MemorySettingsOverlay({
     }
   }
 
-  async function updateExtraction(input: { extract: boolean; maxChunkChars?: string }) {
+  async function updateExtraction(input: {
+    extract: boolean;
+    maxChunkChars?: string;
+    extractModelProvider?: string;
+    extractModelId?: string;
+  }) {
     setError(null);
     markPending("extract");
     try {

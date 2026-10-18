@@ -505,4 +505,82 @@ describe("updateNeo4jExtraction", () => {
     await expect(updateNeo4jExtraction(other.deps, actor, { extract: false })).rejects.toThrow();
     expect(other.update).not.toHaveBeenCalled();
   });
+
+  it("stores and clears the extraction model without touching the secret", async () => {
+    const stored = {
+      uri: "bolt://localhost:7687",
+      username: "neo4j",
+      extract: "true",
+    };
+    const { deps, update, findUnique, secretCreate } = makeDeps({
+      existing: { id: "cfg-1", secretId: "secret-existing" },
+    });
+    findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: stored,
+    });
+
+    await updateNeo4jExtraction(deps, actor, {
+      extract: true,
+      extractModelProvider: " synthetic ",
+      extractModelId: " model-a ",
+    });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "cfg-1" },
+      data: {
+        settings: {
+          ...stored,
+          extractModelProvider: "synthetic",
+          extractModelId: "model-a",
+        },
+      },
+    });
+    expect(secretCreate).not.toHaveBeenCalled();
+
+    findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: { ...stored, extractModelProvider: "synthetic", extractModelId: "model-a" },
+    });
+    await updateNeo4jExtraction(deps, actor, {
+      extract: true,
+      extractModelProvider: " ",
+      extractModelId: "",
+    });
+    expect(update).toHaveBeenLastCalledWith({
+      where: { id: "cfg-1" },
+      data: { settings: stored },
+    });
+  });
+
+  it("rejects one side of an extraction model and leaves an omitted model in place", async () => {
+    const stored = {
+      uri: "bolt://localhost:7687",
+      username: "neo4j",
+      extractModelProvider: "synthetic",
+      extractModelId: "model-a",
+    };
+    const { deps, update, findUnique } = makeDeps({
+      existing: { id: "cfg-1", secretId: "secret-existing" },
+    });
+    findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: stored,
+    });
+    await expect(
+      updateNeo4jExtraction(deps, actor, { extract: true, extractModelProvider: "synthetic" }),
+    ).rejects.toThrow(/provider and a model/);
+    expect(update).not.toHaveBeenCalled();
+
+    await updateNeo4jExtraction(deps, actor, { extract: false });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "cfg-1" },
+      data: { settings: { ...stored, extract: "false" } },
+    });
+  });
 });

@@ -15,13 +15,18 @@ import type {
 import { memoryExtractJob } from "@rakazo/adapter-kit";
 import { isCloudMetadataHost, isLocalMcpHost } from "@rakazo/contracts";
 import { getLogger } from "@rakazo/logging";
-import type { ExtractedEntityWrite, ExtractedRelationWrite } from "./memory-extract.js";
+import type {
+  ExtractedEntityWrite,
+  ExtractedRelationWrite,
+  Neo4jExtractionModel,
+} from "./memory-extract.js";
 import {
   assertNeo4jMaxChunkChars,
   isTrivialMemoryText,
   neo4jExtractionEnabled,
   neo4jMaxChunkChars,
   planExtractionChunks,
+  readNeo4jExtractionModel,
 } from "./memory-extract.js";
 import type {
   Neo4jMemoryConnection,
@@ -34,6 +39,7 @@ import {
   forgetNeo4jFact,
   linkNeo4jEntities,
   linkNeo4jFactEntity,
+  listUnextractedNeo4jFacts,
   mergeExtractedNeo4jEntity,
   openNeo4jMemoryDriver,
   purgeNeo4jChatSources,
@@ -220,6 +226,11 @@ export async function classifyNeo4jConnectionSettings(
   }
   const maxChunkChars = assertNeo4jMaxChunkChars(settings.maxChunkChars);
   if (maxChunkChars) classified.maxChunkChars = maxChunkChars;
+  const extractionModel = readNeo4jExtractionModel(settings);
+  if (extractionModel) {
+    classified.extractModelProvider = extractionModel.provider;
+    classified.extractModelId = extractionModel.id;
+  }
   return classified;
 }
 
@@ -281,6 +292,7 @@ export function createNeo4jProvider(
       jobs: deps?.jobs,
       extract: neo4jExtractionEnabled(settings),
       maxChunkChars: neo4jMaxChunkChars(settings),
+      extractionModel: readNeo4jExtractionModel(settings),
     },
   );
 }
@@ -361,6 +373,12 @@ function replacesCachedDriver(entry: PooledDriver, connection: Neo4jMemoryConnec
   return sameUri && sameUser && samePassword && entry.endpointTrust !== connection.endpointTrust;
 }
 
+export async function closeNeo4jMemoryDrivers(): Promise<void> {
+  const entries = [...driverPools.values()];
+  driverPools.clear();
+  await Promise.all(entries.map((entry) => closePooledDriver(entry)));
+}
+
 function closePooledDriver(entry: PooledDriver): Promise<void> {
   return entry.driver
     .then((driver) => driver.close())
@@ -408,6 +426,7 @@ export interface Neo4jProviderOptions {
   jobs?: JobPublisher;
   extract?: boolean;
   maxChunkChars?: number;
+  extractionModel?: Neo4jExtractionModel | null;
 }
 
 export class Neo4jMemoryProvider implements SemanticMemoryProvider {
@@ -415,6 +434,7 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
   private readonly jobs?: JobPublisher;
   private readonly extractEnabled: boolean;
   private readonly maxChunkChars: number;
+  private readonly pinnedModel: Neo4jExtractionModel | null;
 
   constructor(
     private readonly connection: Neo4jMemoryConnection,
@@ -424,10 +444,19 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
     this.jobs = options?.jobs;
     this.extractEnabled = options?.extract ?? true;
     this.maxChunkChars = options?.maxChunkChars ?? neo4jMaxChunkChars({});
+    this.pinnedModel = options?.extractionModel ?? null;
   }
 
   extractionEnabled(): boolean {
     return this.extractEnabled;
+  }
+
+  extractionModel(): Neo4jExtractionModel | null {
+    return this.pinnedModel;
+  }
+
+  extractionChunkChars(): number {
+    return this.maxChunkChars;
   }
 
   describe() {
@@ -599,6 +628,19 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
     } catch (error) {
       return { ok: false, error: safeMemoryError(error) };
     }
+  }
+
+  async listUnextractedFacts(
+    spaceId: string,
+    input: { limit: number; skip: number },
+    signal?: AbortSignal,
+  ) {
+    return listUnextractedNeo4jFacts(
+      await this.ready(signal),
+      this.connection.database,
+      { spaceId, limit: input.limit, skip: input.skip },
+      signal,
+    );
   }
 
   async readFactText(

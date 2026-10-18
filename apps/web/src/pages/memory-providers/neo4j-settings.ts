@@ -25,6 +25,8 @@ export function neo4jConnectionDraft(input: {
   password: string;
   extract?: boolean;
   maxChunkChars?: string;
+  extractModelProvider?: string;
+  extractModelId?: string;
 }):
   | {
       ok: true;
@@ -36,6 +38,8 @@ export function neo4jConnectionDraft(input: {
   const database = input.database.trim();
   const username = input.username.trim();
   const maxChunkChars = input.maxChunkChars?.trim();
+  const extractModelProvider = input.extractModelProvider?.trim() ?? "";
+  const extractModelId = input.extractModelId?.trim() ?? "";
   return {
     ok: true,
     draft: {
@@ -45,6 +49,7 @@ export function neo4jConnectionDraft(input: {
         ...(database ? { database } : {}),
         ...(input.extract === undefined ? {} : { extract: input.extract ? "true" : "false" }),
         ...(maxChunkChars ? { maxChunkChars } : {}),
+        ...(extractModelProvider && extractModelId ? { extractModelProvider, extractModelId } : {}),
       },
       credentials: { password: input.password },
     },

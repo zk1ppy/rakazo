@@ -2316,6 +2316,10 @@ msgstr ""
 msgid "Extract entities"
 msgstr ""
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Extraction model"
+msgstr ""
+
 #: src/components/CloudAgentCard.tsx
 msgid "failed"
 msgstr "başarısız"
@@ -4319,6 +4323,7 @@ msgstr "Alan değişti. Yedek listesini yüklemek için Modelleri yeniden açın
 msgid "Space changed. Reopen Models to save its backup list."
 msgstr "Alan değişti. Yedek listesini kaydetmek için Modelleri yeniden açın."
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/shell/bot-panel.tsx
 msgid "Space default"
 msgstr "Alan varsayılanı"

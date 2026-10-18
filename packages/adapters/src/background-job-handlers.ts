@@ -114,6 +114,9 @@ export function createBackgroundJobHandlers(deps: {
           prisma: deps.prisma,
           jobs: deps.jobs,
           ...(deps.executor.resolveModel ? { resolveModel: deps.executor.resolveModel } : {}),
+          ...(deps.executor.resolveConnectedModel
+            ? { resolveConnectedModel: deps.executor.resolveConnectedModel }
+            : {}),
           ...(deps.deploymentModelKey ? { deploymentModelKey: deps.deploymentModelKey } : {}),
           ...(deps.deploymentModelConfigured !== undefined
             ? { deploymentModelConfigured: deps.deploymentModelConfigured }

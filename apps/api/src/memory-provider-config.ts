@@ -138,7 +138,12 @@ export async function persistMemoryProviderConfig(
 export async function updateNeo4jExtraction(
   deps: MemoryProviderConfigDeps,
   actor: Actor,
-  input: { extract: boolean; maxChunkChars?: string },
+  input: {
+    extract: boolean;
+    maxChunkChars?: string;
+    extractModelProvider?: string;
+    extractModelId?: string;
+  },
 ) {
   await requireSpaceOwner(deps.prisma, actor);
   const existing = await findSpaceMemoryConfig(deps.prisma, actor.spaceId);
@@ -161,6 +166,21 @@ export async function updateNeo4jExtraction(
       });
     }
     if (validated) settings.maxChunkChars = validated;
+  }
+  if (input.extractModelProvider !== undefined || input.extractModelId !== undefined) {
+    const provider = input.extractModelProvider?.trim() ?? "";
+    const modelId = input.extractModelId?.trim() ?? "";
+    if (!provider && !modelId) {
+      delete settings.extractModelProvider;
+      delete settings.extractModelId;
+    } else if (!provider || !modelId) {
+      throw new ORPCError("BAD_REQUEST", {
+        message: "Extraction model needs a provider and a model.",
+      });
+    } else {
+      settings.extractModelProvider = provider;
+      settings.extractModelId = modelId;
+    }
   }
   const updated = await deps.prisma.spaceMemoryConfig.update({
     where: { id: existing.id },

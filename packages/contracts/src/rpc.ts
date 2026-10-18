@@ -506,6 +506,8 @@ export const appContract = {
         z.object({
           extract: z.boolean(),
           maxChunkChars: z.string().max(8).optional(),
+          extractModelProvider: z.string().max(80).optional(),
+          extractModelId: z.string().max(200).optional(),
         }),
       )
       .output(SpaceMemoryConfigSchema),

@@ -41,6 +41,25 @@ export function neo4jExtractionEnabled(settings: Record<string, string>): boolea
   return value !== "false" && value !== "off" && value !== "0";
 }
 
+export interface Neo4jExtractionModel {
+  provider: string;
+  id: string;
+}
+
+/**
+ * The model stored on the Neo4j provider config. Incomplete or oversized values
+ * are ignored so a bad row falls back to the Space default instead of breaking recall.
+ */
+export function readNeo4jExtractionModel(
+  settings: Record<string, string>,
+): Neo4jExtractionModel | null {
+  const provider = settings.extractModelProvider?.trim() ?? "";
+  const id = settings.extractModelId?.trim() ?? "";
+  if (!provider || !id) return null;
+  if (provider.length > 80 || id.length > 200) return null;
+  return { provider, id };
+}
+
 /** Read path. Invalid or missing values use the default so a stored row cannot break recall. */
 export function neo4jMaxChunkChars(settings: Record<string, string>): number {
   const raw = settings.maxChunkChars?.trim();
@@ -184,6 +203,8 @@ export interface ExtractedRelationWrite {
 
 export interface MemoryExtractStore {
   extractionEnabled(): boolean;
+  /** Null uses the Space default model, not the bot's model. */
+  extractionModel(): Neo4jExtractionModel | null;
   readFactText(
     input: { factId: string; spaceId: string; ns: string },
     signal?: AbortSignal,
@@ -210,6 +231,12 @@ export interface MemoryExtractDeps {
     spaceId: string;
     botId?: string;
   }) => Promise<AgentRunRequest["model"]>;
+  /** A connected provider and model id. Used only when the Neo4j config pins one. */
+  resolveConnectedModel?: (
+    scope: { userId: string; spaceId: string },
+    provider: string,
+    modelId: string,
+  ) => Promise<AgentRunRequest["model"]>;
   deploymentModelKey?: string;
   deploymentModelConfigured?: boolean;
 }
@@ -238,7 +265,7 @@ export async function extractMemoryGraph(
   const { chunks } = planExtractionChunks(text, payload.maxChunkChars);
   if (payload.chunkIndex >= chunks.length) return;
 
-  const model = await resolveExtractModel(deps, payload);
+  const model = await resolveExtractModel(deps, payload, store);
   if (!model || model.provider === "scripted" || deps.runtime.describe().capabilities.scripted) {
     getLogger().info("memory.extract skipped: no usable model");
     return;
@@ -431,16 +458,30 @@ async function recordExtractUsage(
   }
 }
 
+/**
+ * A pinned extraction model is resolved from the Space's connected providers.
+ * Anything else, including a pin whose credential is gone, uses the Space default.
+ * The bot's own model is not the fallback.
+ */
 async function resolveExtractModel(
   deps: MemoryExtractDeps,
   payload: BackgroundJobPayloads["memory.extract"],
+  store: MemoryExtractStore,
 ): Promise<AgentRunRequest["model"] | null> {
+  const pinned = store.extractionModel();
+  if (pinned && deps.resolveConnectedModel) {
+    try {
+      return await deps.resolveConnectedModel(
+        { userId: payload.userId, spaceId: payload.spaceId },
+        pinned.provider,
+        pinned.id,
+      );
+    } catch (error) {
+      getLogger().error("memory.extract model fell back to the space default", error);
+    }
+  }
   if (deps.resolveModel) {
-    return deps.resolveModel({
-      userId: payload.userId,
-      spaceId: payload.spaceId,
-      botId: payload.botId,
-    });
+    return deps.resolveModel({ userId: payload.userId, spaceId: payload.spaceId });
   }
   if (!deps.deploymentModelConfigured) return null;
   const deployment = resolveDeploymentModel();

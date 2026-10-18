@@ -1,10 +1,100 @@
-import { Trans } from "@lingui/react/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import type { SpaceMemoryConfig } from "@rakazo/contracts";
-import { Button, Field, FieldError, FieldLabel, Input, Label, Switch } from "@rakazo/ui-web";
+import {
+  Button,
+  Field,
+  FieldError,
+  FieldLabel,
+  Input,
+  Label,
+  NativeSelect,
+  NativeSelectOption,
+  Switch,
+} from "@rakazo/ui-web";
 import { useEffect, useId, useState } from "react";
+import {
+  connectedModelOptions,
+  modelOptionKey,
+  parseModelOptionKey,
+} from "../../lib/model-catalog";
+import { rpc } from "../../lib/rpc";
 import type { Neo4jSettingsFieldError } from "./neo4j-settings";
 import { NEO4J_URI_PLACEHOLDER, neo4jConnectionDraft, neo4jExtractEnabled } from "./neo4j-settings";
 import type { MemoryProviderSettingsFormProps, Neo4jExtractionUpdate } from "./registry";
+
+function useExtractionModelChoices() {
+  const [choices, setChoices] = useState<ReturnType<typeof connectedModelOptions>>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([rpc.models.credentials(), rpc.models.list()])
+      .then(([credentials, catalog]) => {
+        if (!cancelled) setChoices(connectedModelOptions(credentials, catalog));
+      })
+      .catch(() => {
+        if (!cancelled) setChoices([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return choices;
+}
+
+function extractionModelKey(settings: Record<string, string>): string {
+  const provider = settings.extractModelProvider?.trim() ?? "";
+  const id = settings.extractModelId?.trim() ?? "";
+  if (!provider || !id) return "";
+  return modelOptionKey(provider, id);
+}
+
+function extractionModelPatch(
+  key: string,
+): Pick<Neo4jExtractionUpdate, "extractModelProvider" | "extractModelId"> {
+  const parsed = parseModelOptionKey(key);
+  return {
+    extractModelProvider: parsed?.provider ?? "",
+    extractModelId: parsed?.modelId ?? "",
+  };
+}
+
+function ExtractionModelSelect({
+  id,
+  value,
+  disabled,
+  choices,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  disabled: boolean;
+  choices: ReturnType<typeof connectedModelOptions>;
+  onChange: (value: string) => void;
+}) {
+  const { t } = useLingui();
+  const known = choices.some((choice) => choice.key === value);
+  return (
+    <Field className="mt-4">
+      <FieldLabel htmlFor={id}>
+        <Trans>Extraction model</Trans>
+      </FieldLabel>
+      <NativeSelect
+        id={id}
+        className="w-full"
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        <NativeSelectOption value="">{t`Space default`}</NativeSelectOption>
+        {value && !known ? <NativeSelectOption value={value}>{value}</NativeSelectOption> : null}
+        {choices.map((choice) => (
+          <NativeSelectOption key={choice.key} value={choice.key}>
+            {choice.label}
+          </NativeSelectOption>
+        ))}
+      </NativeSelect>
+    </Field>
+  );
+}
 
 export function Neo4jSettingsForm({ busy, onConnect }: MemoryProviderSettingsFormProps) {
   const uriId = useId();
@@ -19,8 +109,12 @@ export function Neo4jSettingsForm({ busy, onConnect }: MemoryProviderSettingsFor
   const [password, setPassword] = useState("");
   const [extract, setExtract] = useState(true);
   const [chunkSize, setChunkSize] = useState("");
+  const [modelKey, setModelKey] = useState("");
   const extractId = useId();
   const chunkId = useId();
+  const modelSelectId = useId();
+  const modelChoices = useExtractionModelChoices();
+  const selectedModel = parseModelOptionKey(modelKey);
 
   async function connect() {
     const result = neo4jConnectionDraft({
@@ -30,6 +124,12 @@ export function Neo4jSettingsForm({ busy, onConnect }: MemoryProviderSettingsFor
       password,
       extract,
       maxChunkChars: extract ? chunkSize : "",
+      ...(extract && selectedModel
+        ? {
+            extractModelProvider: selectedModel.provider,
+            extractModelId: selectedModel.modelId,
+          }
+        : {}),
     });
     if (!result.ok) {
       setUriError(result.error);
@@ -140,6 +240,15 @@ export function Neo4jSettingsForm({ busy, onConnect }: MemoryProviderSettingsFor
           />
         </Field>
       ) : null}
+      {extract ? (
+        <ExtractionModelSelect
+          id={modelSelectId}
+          value={modelKey}
+          disabled={busy}
+          choices={modelChoices}
+          onChange={setModelKey}
+        />
+      ) : null}
 
       <Button
         type="button"
@@ -166,16 +275,24 @@ export function Neo4jExtractionSettings({
 }) {
   const extractId = useId();
   const chunkId = useId();
+  const modelSelectId = useId();
+  const modelChoices = useExtractionModelChoices();
   const [extract, setExtract] = useState(() => neo4jExtractEnabled(config.settings));
   const [chunkSize, setChunkSize] = useState(config.settings.maxChunkChars ?? "");
+  const [modelKey, setModelKey] = useState(() => extractionModelKey(config.settings));
 
   useEffect(() => {
     setExtract(neo4jExtractEnabled(config.settings));
     setChunkSize(config.settings.maxChunkChars ?? "");
+    setModelKey(extractionModelKey(config.settings));
   }, [config.settings]);
 
-  async function save(nextExtract: boolean, nextChunk: string) {
-    return onUpdateExtraction({ extract: nextExtract, maxChunkChars: nextChunk });
+  async function save(nextExtract: boolean, nextChunk: string, nextModel: string) {
+    return onUpdateExtraction({
+      extract: nextExtract,
+      maxChunkChars: nextChunk,
+      ...extractionModelPatch(nextModel),
+    });
   }
 
   return (
@@ -189,7 +306,7 @@ export function Neo4jExtractionSettings({
           onCheckedChange={(checked) => {
             const previous = extract;
             setExtract(checked);
-            void save(checked, chunkSize).then((ok) => {
+            void save(checked, chunkSize, modelKey).then((ok) => {
               if (!ok) setExtract(previous);
             });
           }}
@@ -211,7 +328,7 @@ export function Neo4jExtractionSettings({
             onChange={(event) => setChunkSize(event.target.value)}
             onBlur={() => {
               if (chunkSize.trim() === (config.settings.maxChunkChars ?? "")) return;
-              void save(extract, chunkSize).then((ok) => {
+              void save(extract, chunkSize, modelKey).then((ok) => {
                 if (!ok) setChunkSize(config.settings.maxChunkChars ?? "");
               });
             }}
@@ -219,6 +336,21 @@ export function Neo4jExtractionSettings({
             autoComplete="off"
           />
         </Field>
+      ) : null}
+      {extract ? (
+        <ExtractionModelSelect
+          id={modelSelectId}
+          value={modelKey}
+          disabled={busy}
+          choices={modelChoices}
+          onChange={(next) => {
+            const previous = modelKey;
+            setModelKey(next);
+            void save(extract, chunkSize, next).then((ok) => {
+              if (!ok) setModelKey(previous);
+            });
+          }}
+        />
       ) : null}
     </div>
   );

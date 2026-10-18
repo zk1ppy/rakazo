@@ -87,6 +87,11 @@ export {
   neo4jExtractionEnabled,
   neo4jMaxChunkChars,
 } from "./memory-extract.js";
+export {
+  backfillMemoryExtraction,
+  loadNeo4jBackfillSpaces,
+  parseBackfillExtractArgs,
+} from "./memory-extract-backfill.js";
 export * from "./memory-provider-factory.js";
 export * from "./messaging-context.js";
 export * from "./messaging-delivery.js";
@@ -95,7 +100,7 @@ export * from "./messaging-team-chat-emulator.js";
 export * from "./model-connect.js";
 export * from "./model-selection.js";
 export * from "./model-vision.js";
-export { Neo4jMemoryProvider } from "./neo4j-memory-provider.js";
+export { closeNeo4jMemoryDrivers, Neo4jMemoryProvider } from "./neo4j-memory-provider.js";
 export * from "./none-sandbox.js";
 export * from "./openai-compatible-url.js";
 export * from "./openai-voice.js";

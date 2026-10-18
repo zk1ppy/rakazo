@@ -182,6 +182,45 @@ describe("Neo4jMemoryProvider", () => {
     ).rejects.toThrow(/maxChunkChars/);
   });
 
+  it("keeps a complete extraction model and drops a partial or oversized one", async () => {
+    const publicHost = { resolveHostname: async () => [{ address: "203.0.113.10", family: 4 }] };
+    const classified = await classifyNeo4jConnectionSettings(
+      {
+        uri: "neo4j+s://db.example.test",
+        username: "neo4j",
+        extractModelProvider: " synthetic ",
+        extractModelId: " model-a ",
+      },
+      publicHost,
+    );
+    expect(classified).toMatchObject({
+      extractModelProvider: "synthetic",
+      extractModelId: "model-a",
+    });
+
+    const partial = await classifyNeo4jConnectionSettings(
+      {
+        uri: "neo4j+s://db.example.test",
+        username: "neo4j",
+        extractModelProvider: "synthetic",
+      },
+      publicHost,
+    );
+    expect(partial.extractModelProvider).toBeUndefined();
+    expect(partial.extractModelId).toBeUndefined();
+
+    const oversized = await classifyNeo4jConnectionSettings(
+      {
+        uri: "neo4j+s://db.example.test",
+        username: "neo4j",
+        extractModelProvider: "x".repeat(81),
+        extractModelId: "model-a",
+      },
+      publicHost,
+    );
+    expect(oversized.extractModelProvider).toBeUndefined();
+  });
+
   it("refuses a private endpoint before connecting when the caller is not the owner", async () => {
     const driver = new FakeDriver();
     await expect(

@@ -18,6 +18,8 @@ export interface MemoryProviderSettingsFormProps {
 export interface Neo4jExtractionUpdate {
   extract: boolean;
   maxChunkChars?: string;
+  extractModelProvider?: string;
+  extractModelId?: string;
 }
 
 export interface MemoryProviderConnectedSettingsProps {

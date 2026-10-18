@@ -124,4 +124,39 @@ describe("Neo4j memory provider settings", () => {
       },
     });
   });
+
+  it("includes an extraction model only when both sides are set", () => {
+    expect(
+      neo4jConnectionDraft({
+        uri: "bolt://localhost:7687",
+        database: "",
+        username: "neo4j",
+        password: "secret",
+        extract: true,
+        extractModelProvider: " synthetic ",
+        extractModelId: " model-a ",
+      }),
+    ).toEqual({
+      ok: true,
+      draft: {
+        settings: {
+          uri: "bolt://localhost:7687",
+          username: "neo4j",
+          extract: "true",
+          extractModelProvider: "synthetic",
+          extractModelId: "model-a",
+        },
+        credentials: { password: "secret" },
+      },
+    });
+
+    const partial = neo4jConnectionDraft({
+      uri: "bolt://localhost:7687",
+      database: "",
+      username: "neo4j",
+      password: "secret",
+      extractModelProvider: "synthetic",
+    });
+    expect(partial.ok && partial.draft.settings.extractModelProvider).toBeUndefined();
+  });
 });

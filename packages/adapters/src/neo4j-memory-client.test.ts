@@ -8,6 +8,7 @@ import {
   escapeLuceneQuery,
   linkNeo4jEntities,
   linkNeo4jFactEntity,
+  listUnextractedNeo4jFacts,
   mergeExtractedNeo4jEntity,
   NEO4J_ENTITY_FULLTEXT_INDEX,
   NEO4J_FACT_FULLTEXT_INDEX,
@@ -318,5 +319,24 @@ describe("Neo4j memory client", () => {
       }),
     ).resolves.toBe("Ada founded the lab.");
     expect(driver.calls.at(-1)?.cypher).toContain("expiredAt IS NULL");
+  });
+
+  it("lists live facts that have no ABOUT edge", async () => {
+    const driver = new FakeDriver();
+    driver.rows.push({
+      records: [
+        row({ factId: "fact-1", ns: "shared", botId: "bot-1", text: "Ada founded the lab." }),
+        row({ factId: "fact-2", ns: "shared", text: "missing bot" }),
+      ],
+    });
+    await expect(
+      listUnextractedNeo4jFacts(driver, "neo4j", { spaceId: "space-1", limit: 10, skip: 0 }),
+    ).resolves.toEqual([
+      { factId: "fact-1", ns: "shared", botId: "bot-1", text: "Ada founded the lab." },
+    ]);
+    const cypher = driver.calls[0]?.cypher ?? "";
+    expect(cypher).toContain("expiredAt IS NULL");
+    expect(cypher).toContain("NOT (f)-[:ABOUT]->()");
+    expect(cypher).toContain("ORDER BY f.id");
   });
 });

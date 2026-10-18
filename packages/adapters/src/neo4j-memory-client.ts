@@ -566,6 +566,42 @@ export async function linkNeo4jEntities(
   if (result.records.length === 0) throw new Error("Neo4j entities were not found.");
 }
 
+export interface Neo4jUnextractedFact {
+  factId: string;
+  ns: string;
+  botId: string;
+  text: string;
+}
+
+/** Facts in one space that have not been linked to an entity yet. */
+export async function listUnextractedNeo4jFacts(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string; limit: number; skip: number },
+  signal?: AbortSignal,
+): Promise<Neo4jUnextractedFact[]> {
+  const result = await driver.run(
+    `MATCH (f:Rkz:Fact {spaceId: $spaceId})
+     WHERE f.expiredAt IS NULL AND NOT (f)-[:ABOUT]->()
+     RETURN f.id AS factId, f.ns AS ns, f.botId AS botId, f.text AS text
+     ORDER BY f.id
+     SKIP $skip
+     LIMIT $limit`,
+    input,
+    { database, access: "read", signal },
+  );
+  const facts: Neo4jUnextractedFact[] = [];
+  for (const record of result.records) {
+    const factId = asString(record.get("factId"));
+    const ns = asString(record.get("ns"));
+    const botId = asString(record.get("botId"));
+    const text = asString(record.get("text"));
+    if (!factId || !ns || !botId) continue;
+    facts.push({ factId, ns, botId, text });
+  }
+  return facts;
+}
+
 export async function readNeo4jFactText(
   driver: Neo4jMemoryDriver,
   database: string,

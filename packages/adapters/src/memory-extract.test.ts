@@ -13,6 +13,7 @@ import {
   isTrivialMemoryText,
   parseMemoryExtraction,
   planExtractionChunks,
+  readNeo4jExtractionModel,
 } from "./memory-extract.js";
 
 const payload = (
@@ -54,10 +55,11 @@ function jobs(): JobPublisher & {
 
 function store(
   text: string | null,
-  options?: { enabled?: boolean },
+  options?: { enabled?: boolean; model?: { provider: string; id: string } | null },
 ): MemoryExtractStore & { applyExtraction: ReturnType<typeof vi.fn> } {
   return {
     extractionEnabled: () => options?.enabled ?? true,
+    extractionModel: () => options?.model ?? null,
     readFactText: vi.fn(async () => text),
     applyExtraction: vi.fn(
       async (_input: Parameters<MemoryExtractStore["applyExtraction"]>[0]) => undefined,
@@ -101,6 +103,22 @@ describe("memory extraction planning", () => {
     const wide = planExtractionChunks("word ".repeat(4_000), 400);
     expect(wide.chunks.length).toBeLessThanOrEqual(8);
     expect(wide.maxChunkChars).toBeGreaterThan(400);
+  });
+
+  it("ignores an extraction model that is incomplete or too long", () => {
+    expect(
+      readNeo4jExtractionModel({
+        extractModelProvider: " synthetic ",
+        extractModelId: " model-a ",
+      }),
+    ).toEqual({ provider: "synthetic", id: "model-a" });
+    expect(readNeo4jExtractionModel({ extractModelProvider: "synthetic" })).toBeNull();
+    expect(
+      readNeo4jExtractionModel({
+        extractModelProvider: "x".repeat(81),
+        extractModelId: "model-a",
+      }),
+    ).toBeNull();
   });
 
   it("drops invalid entities and relations that do not resolve", () => {
@@ -236,5 +254,60 @@ describe("extractMemoryGraph", () => {
     );
     await extractMemoryGraph(deps(run), payload(), store("ok"));
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("uses the pinned extraction model and falls back to the space default", async () => {
+    const text = "Ada Lovelace founded the Analytical Society in London.";
+    const reply = '{"entities":[],"relations":[]}';
+    const pinned = {
+      provider: "synthetic",
+      id: "extract-model",
+      apiKey: "pin-key",
+    } satisfies AgentRunRequest["model"];
+
+    const pinnedRun = vi.fn<AgentRuntime["run"]>(done(reply));
+    const resolveConnectedModel = vi.fn(async () => pinned);
+    const resolveModel = vi.fn(async () => model);
+    await extractMemoryGraph(
+      { ...deps(pinnedRun), resolveConnectedModel, resolveModel },
+      payload(),
+      store(text, { model: { provider: "synthetic", id: "extract-model" } }),
+    );
+    expect(resolveConnectedModel).toHaveBeenCalledWith(
+      { userId: "user-1", spaceId: "space-1" },
+      "synthetic",
+      "extract-model",
+    );
+    expect(resolveModel).not.toHaveBeenCalled();
+    expect(pinnedRun.mock.calls[0]?.[0].model).toMatchObject({
+      provider: "synthetic",
+      id: "extract-model",
+    });
+
+    const fallbackRun = vi.fn<AgentRuntime["run"]>(done(reply));
+    const missing = vi.fn(async () => {
+      throw new Error("Connect that model provider first");
+    });
+    const spaceDefault = vi.fn<NonNullable<MemoryExtractDeps["resolveModel"]>>(async () => model);
+    await extractMemoryGraph(
+      { ...deps(fallbackRun), resolveConnectedModel: missing, resolveModel: spaceDefault },
+      payload(),
+      store(text, { model: { provider: "synthetic", id: "gone" } }),
+    );
+    expect(spaceDefault).toHaveBeenCalledWith({ userId: "user-1", spaceId: "space-1" });
+    expect(spaceDefault.mock.calls[0]?.[0]).not.toHaveProperty("botId");
+    expect(fallbackRun.mock.calls[0]?.[0].model).toMatchObject({ id: "gpt-test" });
+
+    const unsetRun = vi.fn<AgentRuntime["run"]>(done(reply));
+    const unusedPin = vi.fn(async () => pinned);
+    const unsetDefault = vi.fn<NonNullable<MemoryExtractDeps["resolveModel"]>>(async () => model);
+    await extractMemoryGraph(
+      { ...deps(unsetRun), resolveConnectedModel: unusedPin, resolveModel: unsetDefault },
+      payload(),
+      store(text),
+    );
+    expect(unusedPin).not.toHaveBeenCalled();
+    expect(unsetDefault).toHaveBeenCalledWith({ userId: "user-1", spaceId: "space-1" });
+    expect(unsetDefault.mock.calls[0]?.[0]).not.toHaveProperty("botId");
   });
 });
