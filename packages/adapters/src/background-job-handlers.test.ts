@@ -133,6 +133,36 @@ describe("createBackgroundJobHandlers", () => {
     },
   );
 
+  it("does not call the model when the space has no Neo4j provider", async () => {
+    const runtime = { run: vi.fn() } as unknown as AgentRuntime;
+    const handlers = createBackgroundJobHandlers({
+      executor: { resolveModel: vi.fn() } as unknown as ReturnType<typeof createRunExecutor>,
+      prisma: {} as unknown as PrismaClient,
+      sandbox: {} as unknown as SandboxProvider,
+      home: {} as unknown as AgentHomeStore,
+      jobs: {} as unknown as JobPublisher,
+      events: {} as unknown as ThreadEvents,
+      workerId: "worker-1",
+      runtime,
+      secretStore: {} as unknown as EncryptedSecretStore,
+      memoryProviders: { resolve: vi.fn(async () => null) },
+    });
+
+    await handlers["memory.extract"]({
+      spaceId: "space-1",
+      userId: "user-1",
+      botId: "bot-1",
+      factId: "fact-1",
+      ns: "shared",
+      maxChunkChars: 4_000,
+      chunkIndex: 0,
+      attempt: 0,
+      scheduleGeneration: 0,
+    });
+
+    expect(runtime.run).not.toHaveBeenCalled();
+  });
+
   it("resolves the deployment model when no user credential is configured", async () => {
     const prisma = {
       spaceModelPreference: { findFirst: vi.fn(async () => null) },

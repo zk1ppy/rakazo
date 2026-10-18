@@ -78,7 +78,9 @@ export function MemorySettingsOverlay({
   const [defaultScope, setDefaultScope] = useState<"isolated" | "shared">(
     config?.defaultMemoryScope ?? "isolated",
   );
-  const [pending, setPending] = useState<"connect" | "disconnect" | "scope" | null>(null);
+  const [pending, setPending] = useState<"connect" | "disconnect" | "scope" | "extract" | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -99,7 +101,7 @@ export function MemorySettingsOverlay({
     return () => onBusyChange?.(false);
   }, [onBusyChange]);
 
-  function markPending(next: "connect" | "disconnect" | "scope" | null) {
+  function markPending(next: "connect" | "disconnect" | "scope" | "extract" | null) {
     setPending(next);
     onBusyChange?.(next !== null);
   }
@@ -132,6 +134,26 @@ export function MemorySettingsOverlay({
       onConfigChange(null);
     } catch (err) {
       setError(errorText(err, t`Could not disconnect memory provider`));
+    } finally {
+      markPending(null);
+    }
+  }
+
+  async function updateExtraction(input: {
+    extract: boolean;
+    maxChunkChars?: string;
+    extractModelProvider?: string;
+    extractModelId?: string;
+  }) {
+    setError(null);
+    markPending("extract");
+    try {
+      const next = await rpc.memory.updateNeo4jExtraction(input);
+      onConfigChange(next);
+      return true;
+    } catch (err) {
+      setError(errorText(err, t`Could not update extraction`));
+      return false;
     } finally {
       markPending(null);
     }
@@ -201,6 +223,13 @@ export function MemorySettingsOverlay({
                 onChange={(scope) => void updateDefaultScope(scope)}
               />
             </div>
+            {registration?.ConnectedSettings ? (
+              <registration.ConnectedSettings
+                config={config}
+                busy={busy}
+                onUpdateExtraction={updateExtraction}
+              />
+            ) : null}
             <Button
               type="button"
               variant="outline"

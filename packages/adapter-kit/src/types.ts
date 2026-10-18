@@ -482,6 +482,11 @@ export interface AgentRunRequest {
    * When set, skip synthetic empty-turn fallbacks (including after tools).
    */
   allowSilentEmpty?: boolean;
+  /**
+   * When 0, a provider error ends the run instead of being retried inside it.
+   * Memory extraction sets this so a 429 is rescheduled by the job queue.
+   */
+  providerRetries?: 0;
   /** Contextual fallback when a non-silent run produces no written response. */
   emptyResponseText?: string;
   executeTool?: (
@@ -640,6 +645,22 @@ export interface BackgroundJobPayloads {
   "messaging.deliver": { runId?: string };
   /** Reconcile durable remote-agent intent; scope is loaded from the database. */
   "cloud_agent.poll": { agentId: string };
+  /**
+   * Extract POLE+O entities for one saved fact. Chunks run inside this job,
+   * starting at chunkIndex. attempt counts rate-limit reschedules for that chunk.
+   * scheduleGeneration alternates the job key so a follow-up is a new row.
+   */
+  "memory.extract": {
+    spaceId: string;
+    userId: string;
+    botId: string;
+    factId: string;
+    ns: string;
+    maxChunkChars: number;
+    chunkIndex: number;
+    attempt: number;
+    scheduleGeneration: number;
+  };
 }
 
 export type BackgroundJobName = keyof BackgroundJobPayloads;
@@ -658,6 +679,11 @@ export type BackgroundJob = {
     keepExisting?: boolean;
     /** Cap retried executions; omit to use the job queue's default. */
     maxAttempts?: number;
+    /**
+     * Graphile named queue. Jobs that share a queue name run one at a time on
+     * every worker. Graphile has no per-queue concurrency setting.
+     */
+    queueName?: string;
   };
 }[BackgroundJobName];
 

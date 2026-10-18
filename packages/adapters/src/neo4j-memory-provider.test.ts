@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { AdapterContext } from "@rakazo/adapter-kit";
-import { describe, expect, it } from "vitest";
+import type { AdapterContext, BackgroundJob, JobPublisher } from "@rakazo/adapter-kit";
+import { describe, expect, it, vi } from "vitest";
 import {
   createMemoryProvider,
   memoryProviderRequiresDeploymentOwner,
@@ -66,7 +66,7 @@ function queries(driver: FakeDriver) {
   return driver.calls.filter((call) => !call.options.schema);
 }
 
-function providerFor(driver: FakeDriver) {
+function providerFor(driver: FakeDriver, options?: { jobs?: JobPublisher; extract?: boolean }) {
   return new Neo4jMemoryProvider(
     {
       uri: "bolt://127.0.0.1:7687",
@@ -76,6 +76,7 @@ function providerFor(driver: FakeDriver) {
       endpointTrust: "private",
     },
     () => driver,
+    options,
   );
 }
 
@@ -156,6 +157,68 @@ describe("Neo4jMemoryProvider", () => {
     });
     expect(opened).toBe(false);
     expect(memoryProviderRequiresDeploymentOwner("neo4j", classified)).toBe(true);
+  });
+
+  it("keeps extraction settings and rejects an invalid chunk size", async () => {
+    const classified = await classifyNeo4jConnectionSettings(
+      {
+        uri: "neo4j+s://db.example.test",
+        username: "neo4j",
+        extract: "false",
+        maxChunkChars: "800",
+      },
+      { resolveHostname: async () => [{ address: "203.0.113.10", family: 4 }] },
+    );
+    expect(classified).toMatchObject({
+      uri: "neo4j+s://db.example.test:7687",
+      extract: "false",
+      maxChunkChars: "800",
+    });
+    await expect(
+      classifyNeo4jConnectionSettings(
+        { uri: "neo4j+s://db.example.test", username: "neo4j", maxChunkChars: "10" },
+        { resolveHostname: async () => [{ address: "203.0.113.10", family: 4 }] },
+      ),
+    ).rejects.toThrow(/maxChunkChars/);
+  });
+
+  it("keeps a complete extraction model and drops a partial or oversized one", async () => {
+    const publicHost = { resolveHostname: async () => [{ address: "203.0.113.10", family: 4 }] };
+    const classified = await classifyNeo4jConnectionSettings(
+      {
+        uri: "neo4j+s://db.example.test",
+        username: "neo4j",
+        extractModelProvider: " synthetic ",
+        extractModelId: " model-a ",
+      },
+      publicHost,
+    );
+    expect(classified).toMatchObject({
+      extractModelProvider: "synthetic",
+      extractModelId: "model-a",
+    });
+
+    const partial = await classifyNeo4jConnectionSettings(
+      {
+        uri: "neo4j+s://db.example.test",
+        username: "neo4j",
+        extractModelProvider: "synthetic",
+      },
+      publicHost,
+    );
+    expect(partial.extractModelProvider).toBeUndefined();
+    expect(partial.extractModelId).toBeUndefined();
+
+    const oversized = await classifyNeo4jConnectionSettings(
+      {
+        uri: "neo4j+s://db.example.test",
+        username: "neo4j",
+        extractModelProvider: "x".repeat(81),
+        extractModelId: "model-a",
+      },
+      publicHost,
+    );
+    expect(oversized.extractModelProvider).toBeUndefined();
   });
 
   it("refuses a private endpoint before connecting when the caller is not the owner", async () => {
@@ -442,5 +505,48 @@ describe("Neo4jMemoryProvider", () => {
     );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).not.toContain("secret");
+  });
+
+  it("enqueues one extraction job on the serial queue and omits the memory text", async () => {
+    const driver = new FakeDriver();
+    const enqueue = vi.fn(async (_job: BackgroundJob) => undefined);
+    const jobs: JobPublisher = { enqueue, cancel: vi.fn(), close: vi.fn() };
+    const provider = providerFor(driver, { jobs });
+    driver.rows.push({ records: [row({ id: "fact-a" })] });
+    const text = "Ada Lovelace founded the Analytical Society in London.";
+    await expect(
+      provider.save(
+        { content: text, scope: "isolated", botId: "bot-1", source: { kind: "durable" } },
+        context,
+      ),
+    ).resolves.toEqual({ ok: true, value: undefined });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    const job = enqueue.mock.calls[0]?.[0];
+    expect(job?.queueName).toBe("memory-extract");
+    expect(job?.payload).toMatchObject({ chunkIndex: 0, attempt: 0, scheduleGeneration: 0 });
+    expect(JSON.stringify(job?.payload)).not.toContain("Lovelace");
+    expect(job?.payload).not.toHaveProperty("text");
+  });
+
+  it("does not enqueue trivial text or a disabled extractor", async () => {
+    const driver = new FakeDriver();
+    const enqueue = vi.fn(async () => undefined);
+    const jobs: JobPublisher = { enqueue, cancel: vi.fn(), close: vi.fn() };
+    driver.rows.push({ records: [row({ id: "fact-ok" })] });
+    await providerFor(driver, { jobs }).save(
+      { content: "ok", scope: "isolated", botId: "bot-1", source: { kind: "durable" } },
+      context,
+    );
+    driver.rows.push({ records: [row({ id: "fact-off" })] });
+    await providerFor(driver, { jobs, extract: false }).save(
+      {
+        content: "Ada Lovelace founded the Analytical Society in London.",
+        scope: "isolated",
+        botId: "bot-1",
+        source: { kind: "durable" },
+      },
+      context,
+    );
+    expect(enqueue).not.toHaveBeenCalled();
   });
 });

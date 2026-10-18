@@ -12,11 +12,21 @@ export function neo4jUriError(uri: string): Neo4jSettingsFieldError | null {
   return null;
 }
 
+export function neo4jExtractEnabled(settings: Record<string, string>): boolean {
+  const value = settings.extract?.trim().toLowerCase();
+  if (!value) return true;
+  return value !== "false" && value !== "off" && value !== "0";
+}
+
 export function neo4jConnectionDraft(input: {
   uri: string;
   database: string;
   username: string;
   password: string;
+  extract?: boolean;
+  maxChunkChars?: string;
+  extractModelProvider?: string;
+  extractModelId?: string;
 }):
   | {
       ok: true;
@@ -27,6 +37,9 @@ export function neo4jConnectionDraft(input: {
   if (error) return { ok: false, error };
   const database = input.database.trim();
   const username = input.username.trim();
+  const maxChunkChars = input.maxChunkChars?.trim();
+  const extractModelProvider = input.extractModelProvider?.trim() ?? "";
+  const extractModelId = input.extractModelId?.trim() ?? "";
   return {
     ok: true,
     draft: {
@@ -34,6 +47,9 @@ export function neo4jConnectionDraft(input: {
         uri: input.uri.trim(),
         username,
         ...(database ? { database } : {}),
+        ...(input.extract === undefined ? {} : { extract: input.extract ? "true" : "false" }),
+        ...(maxChunkChars ? { maxChunkChars } : {}),
+        ...(extractModelProvider && extractModelId ? { extractModelProvider, extractModelId } : {}),
       },
       credentials: { password: input.password },
     },

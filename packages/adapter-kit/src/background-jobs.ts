@@ -23,6 +23,17 @@ const payloadSchemas = {
   "history.compact": z.object({ threadId: z.string().min(1) }),
   "messaging.deliver": z.object({ runId: z.string().min(1).optional() }),
   "cloud_agent.poll": z.object({ agentId: z.string().min(1) }),
+  "memory.extract": z.object({
+    spaceId: z.string().min(1),
+    userId: z.string().min(1),
+    botId: z.string().min(1),
+    factId: z.string().min(1),
+    ns: z.string().min(1),
+    maxChunkChars: z.number().int().min(400).max(20_000),
+    chunkIndex: z.number().int().min(0).max(7),
+    attempt: z.number().int().min(0).max(8),
+    scheduleGeneration: z.number().int().min(0).max(80),
+  }),
 } satisfies { [Name in BackgroundJobName]: z.ZodType<BackgroundJobPayloads[Name]> };
 
 export function parseBackgroundJob(name: string, payload: unknown): BackgroundJob {
@@ -154,6 +165,40 @@ export function historyCompactJob(threadId: string): BackgroundJob {
 
 export function cloudAgentPollJobKey(agentId: string): string {
   return `cloud_agent.poll:${agentId}`;
+}
+
+/**
+ * One global queue for every space. Graphile runs a single job from a named
+ * queue at a time, including across worker replicas, and TaskSpec has no
+ * concurrency field for that queue. Worker `concurrency` still applies to
+ * other jobs; it cannot run two `memory-extract` jobs together.
+ */
+export const MEMORY_EXTRACT_QUEUE_NAME = "memory-extract";
+
+/**
+ * Rate limits reschedule a new row instead of failing this one, so graphile
+ * must not also retry it. The key alternates with scheduleGeneration because
+ * a successful attempt deletes its own row: the follow-up has to be a different
+ * key or that delete removes the reschedule.
+ */
+export const MEMORY_EXTRACT_MAX_ATTEMPTS = 1;
+
+export function memoryExtractJobKey(factId: string, scheduleGeneration: number): string {
+  return `memory.extract:${factId}:${scheduleGeneration % 2}`;
+}
+
+export function memoryExtractJob(
+  payload: BackgroundJobPayloads["memory.extract"],
+  availableAt?: Date,
+): BackgroundJob {
+  return {
+    name: "memory.extract",
+    payload,
+    replaceKey: memoryExtractJobKey(payload.factId, payload.scheduleGeneration),
+    queueName: MEMORY_EXTRACT_QUEUE_NAME,
+    maxAttempts: MEMORY_EXTRACT_MAX_ATTEMPTS,
+    ...(availableAt ? { availableAt } : {}),
+  };
 }
 
 export function cloudAgentPollJob(

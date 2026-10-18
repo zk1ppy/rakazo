@@ -4,6 +4,10 @@ import {
   HISTORY_COMPACT_MAX_ATTEMPTS,
   historyCompactJob,
   historyCompactJobKey,
+  MEMORY_EXTRACT_MAX_ATTEMPTS,
+  MEMORY_EXTRACT_QUEUE_NAME,
+  memoryExtractJob,
+  memoryExtractJobKey,
   messagingDeliverJob,
   parseBackgroundJob,
   routineRetryJob,
@@ -22,6 +26,7 @@ function handlers(): BackgroundJobHandlers {
     "history.compact": vi.fn(async () => undefined),
     "messaging.deliver": vi.fn(async () => undefined),
     "cloud_agent.poll": vi.fn(async () => undefined),
+    "memory.extract": vi.fn(async () => undefined),
   };
 }
 
@@ -95,6 +100,42 @@ describe("background job contracts", () => {
       computerId: "computer-1",
       leaseId: "lease-1",
     });
+  });
+});
+
+describe("memoryExtractJob", () => {
+  const payload = {
+    spaceId: "space-1",
+    userId: "user-1",
+    botId: "bot-1",
+    factId: "fact-1",
+    ns: "shared",
+    maxChunkChars: 4_000,
+    chunkIndex: 0,
+    attempt: 0,
+    scheduleGeneration: 0,
+  };
+
+  it("uses one global serial queue and a single attempt", () => {
+    expect(memoryExtractJob(payload)).toEqual({
+      name: "memory.extract",
+      payload,
+      replaceKey: memoryExtractJobKey("fact-1", 0),
+      queueName: MEMORY_EXTRACT_QUEUE_NAME,
+      maxAttempts: MEMORY_EXTRACT_MAX_ATTEMPTS,
+    });
+    expect(MEMORY_EXTRACT_QUEUE_NAME).toBe("memory-extract");
+    expect(MEMORY_EXTRACT_MAX_ATTEMPTS).toBe(1);
+  });
+
+  it("alternates the replace key so a successful attempt can reschedule", () => {
+    expect(memoryExtractJobKey("fact-1", 0)).toBe("memory.extract:fact-1:0");
+    expect(memoryExtractJobKey("fact-1", 1)).toBe("memory.extract:fact-1:1");
+    expect(memoryExtractJobKey("fact-1", 2)).toBe(memoryExtractJobKey("fact-1", 0));
+    const availableAt = new Date("2030-01-01T00:00:15.000Z");
+    expect(
+      memoryExtractJob({ ...payload, scheduleGeneration: 1, attempt: 1 }, availableAt).availableAt,
+    ).toBe(availableAt);
   });
 });
 

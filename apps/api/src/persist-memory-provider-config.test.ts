@@ -5,6 +5,7 @@ import {
   disconnectMemoryProvider,
   persistMemoryProviderConfig,
   updateMemoryProviderDefaultScope,
+  updateNeo4jExtraction,
 } from "./memory-provider-config.js";
 
 const actor = {
@@ -442,5 +443,144 @@ describe("updateMemoryProviderDefaultScope", () => {
 
     await expect(updateMemoryProviderDefaultScope(deps, actor, "shared")).rejects.toThrow();
     expect(update).not.toHaveBeenCalled();
+  });
+});
+
+describe("updateNeo4jExtraction", () => {
+  it("patches extract and chunk size without touching the secret", async () => {
+    const { deps, update, findUnique, secretCreate, secretDeleteMany } = makeDeps({
+      existing: { id: "cfg-1", secretId: "secret-existing" },
+      updateResult: {
+        provider: "neo4j",
+        settings: { uri: "bolt://localhost:7687", extract: "false" },
+        defaultMemoryScope: "isolated",
+        updatedAt: new Date("2026-08-20T00:00:00.000Z"),
+      },
+    });
+    findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: {
+        uri: "bolt://localhost:7687",
+        username: "neo4j",
+        extract: "true",
+        maxChunkChars: "800",
+      },
+    });
+
+    const result = await updateNeo4jExtraction(deps, actor, { extract: false, maxChunkChars: " " });
+
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "cfg-1" },
+      data: {
+        settings: { uri: "bolt://localhost:7687", username: "neo4j", extract: "false" },
+      },
+    });
+    expect(secretCreate).not.toHaveBeenCalled();
+    expect(secretDeleteMany).not.toHaveBeenCalled();
+    expect(result.settings.extract).toBe("false");
+  });
+
+  it("rejects a chunk size outside the allowed range and a non-Neo4j provider", async () => {
+    const neo4j = makeDeps({ existing: { id: "cfg-1", secretId: "secret-existing" } });
+    neo4j.findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: { uri: "bolt://localhost:7687" },
+    });
+    await expect(
+      updateNeo4jExtraction(neo4j.deps, actor, { extract: true, maxChunkChars: "10" }),
+    ).rejects.toThrow(/maxChunkChars/);
+    expect(neo4j.update).not.toHaveBeenCalled();
+
+    const other = makeDeps({ existing: { id: "cfg-1", secretId: "secret-existing" } });
+    other.findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "supermemory",
+      settings: { mode: "cloud" },
+    });
+    await expect(updateNeo4jExtraction(other.deps, actor, { extract: false })).rejects.toThrow();
+    expect(other.update).not.toHaveBeenCalled();
+  });
+
+  it("stores and clears the extraction model without touching the secret", async () => {
+    const stored = {
+      uri: "bolt://localhost:7687",
+      username: "neo4j",
+      extract: "true",
+    };
+    const { deps, update, findUnique, secretCreate } = makeDeps({
+      existing: { id: "cfg-1", secretId: "secret-existing" },
+    });
+    findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: stored,
+    });
+
+    await updateNeo4jExtraction(deps, actor, {
+      extract: true,
+      extractModelProvider: " synthetic ",
+      extractModelId: " model-a ",
+    });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "cfg-1" },
+      data: {
+        settings: {
+          ...stored,
+          extractModelProvider: "synthetic",
+          extractModelId: "model-a",
+        },
+      },
+    });
+    expect(secretCreate).not.toHaveBeenCalled();
+
+    findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: { ...stored, extractModelProvider: "synthetic", extractModelId: "model-a" },
+    });
+    await updateNeo4jExtraction(deps, actor, {
+      extract: true,
+      extractModelProvider: " ",
+      extractModelId: "",
+    });
+    expect(update).toHaveBeenLastCalledWith({
+      where: { id: "cfg-1" },
+      data: { settings: stored },
+    });
+  });
+
+  it("rejects one side of an extraction model and leaves an omitted model in place", async () => {
+    const stored = {
+      uri: "bolt://localhost:7687",
+      username: "neo4j",
+      extractModelProvider: "synthetic",
+      extractModelId: "model-a",
+    };
+    const { deps, update, findUnique } = makeDeps({
+      existing: { id: "cfg-1", secretId: "secret-existing" },
+    });
+    findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: stored,
+    });
+    await expect(
+      updateNeo4jExtraction(deps, actor, { extract: true, extractModelProvider: "synthetic" }),
+    ).rejects.toThrow(/provider and a model/);
+    expect(update).not.toHaveBeenCalled();
+
+    await updateNeo4jExtraction(deps, actor, { extract: false });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "cfg-1" },
+      data: { settings: { ...stored, extract: "false" } },
+    });
   });
 });

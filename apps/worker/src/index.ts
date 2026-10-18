@@ -164,11 +164,11 @@ async function main() {
   const connector = stack.destination;
   await connector.start();
   integrationSettings.warmDirectories();
-  const memoryProviders = new SpaceMemoryProviderResolver(prisma, secrets);
   const home = new LocalAgentHomeStore(dataDir);
   const artifacts = new LocalArtifactStore(dataDir);
   const inMemoryJobs = process.env.WAKEUP_DRIVER === "memory" ? new InMemoryJobQueue() : undefined;
   const jobs: JobPublisher = inMemoryJobs ?? new GraphileJobPublisher(pool);
+  const memoryProviders = new SpaceMemoryProviderResolver(prisma, secrets, jobs);
   const ticketChanges = createTicketChangeNotifier({
     boardEvents,
     jobs,

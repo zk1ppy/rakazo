@@ -2,6 +2,7 @@ import type { BackgroundJobHandlers } from "@rakazo/adapter-kit";
 import {
   HISTORY_COMPACT_MAX_ATTEMPTS,
   historyCompactJob,
+  memoryExtractJob,
   messagingDeliverJob,
 } from "@rakazo/adapter-kit";
 import { createLogger, createTestSink, installLogger, wrapJobPayload } from "@rakazo/logging";
@@ -36,6 +37,7 @@ function handlers(): BackgroundJobHandlers {
     "history.compact": vi.fn(async () => undefined),
     "messaging.deliver": vi.fn(async () => undefined),
     "cloud_agent.poll": vi.fn(async () => undefined),
+    "memory.extract": vi.fn(async () => undefined),
   };
 }
 
@@ -97,6 +99,39 @@ describe("GraphileJobPublisher.enqueue", () => {
       "history.compact",
       expect.anything(),
       expect.objectContaining({ maxAttempts: HISTORY_COMPACT_MAX_ATTEMPTS }),
+    );
+    await publisher.close();
+  });
+
+  it("puts memory extraction on the global serial queue", async () => {
+    const addJob = vi.fn(async () => undefined);
+    const publisher = publisherWith(addJob);
+    const runAt = new Date("2030-01-01T00:00:15.000Z");
+    await publisher.enqueue(
+      memoryExtractJob(
+        {
+          spaceId: "space-1",
+          userId: "user-1",
+          botId: "bot-1",
+          factId: "fact-1",
+          ns: "shared",
+          maxChunkChars: 4_000,
+          chunkIndex: 0,
+          attempt: 0,
+          scheduleGeneration: 0,
+        },
+        runAt,
+      ),
+    );
+    expect(addJob).toHaveBeenCalledWith(
+      "memory.extract",
+      expect.anything(),
+      expect.objectContaining({
+        queueName: "memory-extract",
+        maxAttempts: 1,
+        jobKey: "memory.extract:fact-1:0",
+        runAt,
+      }),
     );
     await publisher.close();
   });

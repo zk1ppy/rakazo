@@ -357,7 +357,7 @@ export class PiAgentRuntime implements AgentRuntime {
               target.models,
               target.model,
               ctx,
-              withCloudflareGatewayAuth(target.config, options),
+              withCloudflareGatewayAuth(target.config, withoutProviderRetry(options, request)),
               target.config.maxTokens,
               () => target.credentials?.accessToken ?? target.apiKey,
               (preparedOptions) =>
@@ -1460,7 +1460,7 @@ async function executeSubagent(host: ToolHost, executionId: string, args: Record
         target.models,
         target.model,
         ctx,
-        withCloudflareGatewayAuth(requestModel, options),
+        withCloudflareGatewayAuth(requestModel, withoutProviderRetry(options, host.request)),
         requestModel.maxTokens,
         () => selectedModel.credentials?.accessToken ?? selectedModel.apiKey,
         (preparedOptions) =>
@@ -2419,6 +2419,15 @@ function fallbackSupportsContext(
   return !requiresReasoning || candidate.model.reasoning;
 }
 
+/** One provider attempt. Memory extraction reschedules a 429 on the job queue. */
+function withoutProviderRetry(
+  options: ModelsSimpleStreamOptions | undefined,
+  request: { providerRetries?: 0 },
+): ModelsSimpleStreamOptions | undefined {
+  if (request.providerRetries !== 0) return options;
+  return { ...options, maxRetries: 0 };
+}
+
 function fallbackAwareModelStream(
   state: FallbackStreamState,
   context: TranscriptContext,
@@ -2566,9 +2575,10 @@ function fallbackAwareModelStream(
                 break;
               }
               firstRetryableError ??= event;
-              const delay = isProviderTimeout(event.error)
-                ? undefined
-                : MODEL_PROVIDER_RETRY_DELAYS_MS[retries];
+              const delay =
+                state.request.providerRetries === 0 || isProviderTimeout(event.error)
+                  ? undefined
+                  : MODEL_PROVIDER_RETRY_DELAYS_MS[retries];
               if (delay !== undefined) {
                 retries += 1;
                 await abortableDelay(delay, signal);

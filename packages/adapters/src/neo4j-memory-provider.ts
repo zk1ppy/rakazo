@@ -3,6 +3,7 @@ import { isIP } from "node:net";
 import type {
   AdapterContext,
   DurableMemoryScope,
+  JobPublisher,
   SemanticMemoryForgetRequest,
   SemanticMemoryProvider,
   SemanticMemoryPurgeHistoryRequest,
@@ -11,7 +12,22 @@ import type {
   SemanticMemoryResult,
   SemanticMemorySaveRequest,
 } from "@rakazo/adapter-kit";
+import { memoryExtractJob } from "@rakazo/adapter-kit";
 import { isCloudMetadataHost, isLocalMcpHost } from "@rakazo/contracts";
+import { getLogger } from "@rakazo/logging";
+import type {
+  ExtractedEntityWrite,
+  ExtractedRelationWrite,
+  Neo4jExtractionModel,
+} from "./memory-extract.js";
+import {
+  assertNeo4jMaxChunkChars,
+  isTrivialMemoryText,
+  neo4jExtractionEnabled,
+  neo4jMaxChunkChars,
+  planExtractionChunks,
+  readNeo4jExtractionModel,
+} from "./memory-extract.js";
 import type {
   Neo4jMemoryConnection,
   Neo4jMemoryDriver,
@@ -21,8 +37,13 @@ import {
   ensureNeo4jMemorySchema,
   escapeLuceneQuery,
   forgetNeo4jFact,
+  linkNeo4jEntities,
+  linkNeo4jFactEntity,
+  listUnextractedNeo4jFacts,
+  mergeExtractedNeo4jEntity,
   openNeo4jMemoryDriver,
   purgeNeo4jChatSources,
+  readNeo4jFactText,
   recallNeo4jFacts,
   saveNeo4jFact,
 } from "./neo4j-memory-client.js";
@@ -200,6 +221,16 @@ export async function classifyNeo4jConnectionSettings(
     username: parseUsername(settings.username),
   };
   if (endpointTrust === "private") classified.endpointTrust = "private";
+  if (settings.extract?.trim()) {
+    classified.extract = neo4jExtractionEnabled(settings) ? "true" : "false";
+  }
+  const maxChunkChars = assertNeo4jMaxChunkChars(settings.maxChunkChars);
+  if (maxChunkChars) classified.maxChunkChars = maxChunkChars;
+  const extractionModel = readNeo4jExtractionModel(settings);
+  if (extractionModel) {
+    classified.extractModelProvider = extractionModel.provider;
+    classified.extractModelId = extractionModel.id;
+  }
   return classified;
 }
 
@@ -235,6 +266,7 @@ export async function prepareNeo4jConnection(
 export function createNeo4jProvider(
   settings: Record<string, string>,
   credentials: Record<string, string>,
+  deps?: { jobs?: JobPublisher },
 ): SemanticMemoryProvider {
   const parsed = parseNeo4jUri(requiredValue(settings, "uri"));
   if (isMetadataHost(parsed.hostname)) throw new Error("Neo4j URI targets a blocked address.");
@@ -247,13 +279,22 @@ export function createNeo4jProvider(
       "Neo4j cleartext URIs are limited to loopback and private hosts; use neo4j+s:// or bolt+s:// for public hosts.",
     );
   }
-  return new Neo4jMemoryProvider({
-    uri: parsed.uri,
-    database: parseDatabase(settings.database),
-    username: parseUsername(settings.username),
-    password: parsePassword(credentials.password),
-    endpointTrust,
-  });
+  return new Neo4jMemoryProvider(
+    {
+      uri: parsed.uri,
+      database: parseDatabase(settings.database),
+      username: parseUsername(settings.username),
+      password: parsePassword(credentials.password),
+      endpointTrust,
+    },
+    openNeo4jMemoryDriver,
+    {
+      jobs: deps?.jobs,
+      extract: neo4jExtractionEnabled(settings),
+      maxChunkChars: neo4jMaxChunkChars(settings),
+      extractionModel: readNeo4jExtractionModel(settings),
+    },
+  );
 }
 
 function isolatedNs(botId: string): string {
@@ -332,6 +373,12 @@ function replacesCachedDriver(entry: PooledDriver, connection: Neo4jMemoryConnec
   return sameUri && sameUser && samePassword && entry.endpointTrust !== connection.endpointTrust;
 }
 
+export async function closeNeo4jMemoryDrivers(): Promise<void> {
+  const entries = [...driverPools.values()];
+  driverPools.clear();
+  await Promise.all(entries.map((entry) => closePooledDriver(entry)));
+}
+
 function closePooledDriver(entry: PooledDriver): Promise<void> {
   return entry.driver
     .then((driver) => driver.close())
@@ -375,13 +422,42 @@ export function acquireNeo4jMemoryDriver(
   return driver;
 }
 
+export interface Neo4jProviderOptions {
+  jobs?: JobPublisher;
+  extract?: boolean;
+  maxChunkChars?: number;
+  extractionModel?: Neo4jExtractionModel | null;
+}
+
 export class Neo4jMemoryProvider implements SemanticMemoryProvider {
   private driverTask?: Promise<Neo4jMemoryDriver>;
+  private readonly jobs?: JobPublisher;
+  private readonly extractEnabled: boolean;
+  private readonly maxChunkChars: number;
+  private readonly pinnedModel: Neo4jExtractionModel | null;
 
   constructor(
     private readonly connection: Neo4jMemoryConnection,
     private readonly openDriver: Neo4jMemoryDriverFactory = openNeo4jMemoryDriver,
-  ) {}
+    options?: Neo4jProviderOptions,
+  ) {
+    this.jobs = options?.jobs;
+    this.extractEnabled = options?.extract ?? true;
+    this.maxChunkChars = options?.maxChunkChars ?? neo4jMaxChunkChars({});
+    this.pinnedModel = options?.extractionModel ?? null;
+  }
+
+  extractionEnabled(): boolean {
+    return this.extractEnabled;
+  }
+
+  extractionModel(): Neo4jExtractionModel | null {
+    return this.pinnedModel;
+  }
+
+  extractionChunkChars(): number {
+    return this.maxChunkChars;
+  }
 
   describe() {
     return {
@@ -459,19 +535,20 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
           ? `rakazo://chat/${context.spaceId}/${request.botId}/${generation}`
           : `rakazo://memory/${context.spaceId}/${ns}/${contentHash}`;
       const runScope = context.runId ?? context.operationId;
+      const factId = digest([
+        "fact",
+        context.spaceId,
+        ns,
+        runScope,
+        kind,
+        generation == null ? "" : String(generation),
+        text,
+      ]);
       const saved = await saveNeo4jFact(
         await this.ready(context.signal),
         this.connection.database,
         {
-          factId: digest([
-            "fact",
-            context.spaceId,
-            ns,
-            runScope,
-            kind,
-            generation == null ? "" : String(generation),
-            text,
-          ]),
+          factId,
           sourceId: digest(["source", context.spaceId, kind, uri]),
           spaceId: context.spaceId,
           ns,
@@ -488,9 +565,16 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
         },
         context.signal,
       );
-      return saved.id
-        ? { ok: true, value: undefined }
-        : { ok: false, error: "Neo4j did not store the fact." };
+      if (!saved.id) return { ok: false, error: "Neo4j did not store the fact." };
+      await this.enqueueExtraction({
+        spaceId: context.spaceId,
+        userId: context.userId,
+        botId: request.botId,
+        factId,
+        ns,
+        text,
+      });
+      return { ok: true, value: undefined };
     } catch (error) {
       return { ok: false, error: safeMemoryError(error) };
     }
@@ -543,6 +627,119 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
       };
     } catch (error) {
       return { ok: false, error: safeMemoryError(error) };
+    }
+  }
+
+  async listUnextractedFacts(
+    spaceId: string,
+    input: { limit: number; skip: number },
+    signal?: AbortSignal,
+  ) {
+    return listUnextractedNeo4jFacts(
+      await this.ready(signal),
+      this.connection.database,
+      { spaceId, limit: input.limit, skip: input.skip },
+      signal,
+    );
+  }
+
+  async readFactText(
+    input: { factId: string; spaceId: string; ns: string },
+    signal?: AbortSignal,
+  ): Promise<string | null> {
+    return readNeo4jFactText(await this.ready(signal), this.connection.database, input, signal);
+  }
+
+  async applyExtraction(
+    input: {
+      factId: string;
+      spaceId: string;
+      ns: string;
+      entities: ExtractedEntityWrite[];
+      relations: ExtractedRelationWrite[];
+      now: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const driver = await this.ready(signal);
+    const database = this.connection.database;
+    const ids = new Map<string, string>();
+    for (const entity of input.entities) {
+      const id = await mergeExtractedNeo4jEntity(
+        driver,
+        database,
+        {
+          id: entity.id,
+          type: entity.type,
+          spaceId: input.spaceId,
+          ns: input.ns,
+          name: entity.name,
+          normName: entity.normName,
+          aliases: entity.aliases,
+          aliasNorms: entity.aliasNorms,
+          summary: entity.summary,
+          now: input.now,
+        },
+        signal,
+      );
+      ids.set(entity.normName, id);
+      for (const alias of entity.aliasNorms) ids.set(alias, id);
+      await linkNeo4jFactEntity(
+        driver,
+        database,
+        { factId: input.factId, entityId: id, spaceId: input.spaceId },
+        signal,
+      );
+    }
+    for (const relation of input.relations) {
+      const fromId = ids.get(relation.fromNorm);
+      const toId = ids.get(relation.toNorm);
+      if (!fromId || !toId || fromId === toId) continue;
+      await linkNeo4jEntities(
+        driver,
+        database,
+        {
+          fromId,
+          toId,
+          spaceId: input.spaceId,
+          ns: input.ns,
+          type: relation.type,
+          factId: input.factId,
+          now: input.now,
+          time: relation.time,
+        },
+        signal,
+      );
+    }
+  }
+
+  private async enqueueExtraction(input: {
+    spaceId: string;
+    userId: string;
+    botId: string;
+    factId: string;
+    ns: string;
+    text: string;
+  }): Promise<void> {
+    if (!this.jobs || !this.extractEnabled || isTrivialMemoryText(input.text)) return;
+    const planned = planExtractionChunks(input.text, this.maxChunkChars);
+    if (planned.chunks.length === 0) return;
+    try {
+      await this.jobs.enqueue(
+        memoryExtractJob({
+          spaceId: input.spaceId,
+          userId: input.userId,
+          botId: input.botId,
+          factId: input.factId,
+          ns: input.ns,
+          maxChunkChars: planned.maxChunkChars,
+          chunkIndex: 0,
+          attempt: 0,
+          scheduleGeneration: 0,
+        }),
+      );
+    } catch (error) {
+      getLogger().error("memory.extract enqueue failed", error);
     }
   }
 

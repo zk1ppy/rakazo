@@ -1017,6 +1017,10 @@ msgstr "파일 선택"
 msgid "Choose which connected model Rakazo uses."
 msgstr "Rakazo에서 기본으로 사용할 연결된 모델을 선택하세요."
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Chunk size"
+msgstr ""
+
 #: src/pages/shell/dialogs.tsx
 msgid "Clear"
 msgstr "비우기"
@@ -1781,6 +1785,10 @@ msgstr "Bot의 서버 사용 권한을 변경하지 못했습니다."
 msgid "Could not update computer"
 msgstr "컴퓨터를 업데이트할 수 없습니다"
 
+#: src/pages/MemorySettingsOverlay.tsx
+msgid "Could not update extraction"
+msgstr ""
+
 #: src/pages/Shell.tsx
 msgid "Could not update reaction"
 msgstr "반응을 업데이트할 수 없습니다"
@@ -2302,6 +2310,14 @@ msgstr "매우 높음"
 #. js-lingui-explicit-id
 #: src/lib/model-catalog.ts
 msgid "Extra high"
+msgstr ""
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Extract entities"
+msgstr ""
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Extraction model"
 msgstr ""
 
 #: src/components/CloudAgentCard.tsx
@@ -4307,6 +4323,7 @@ msgstr "공간이 변경되었습니다. 백업 목록을 불러오려면 모델
 msgid "Space changed. Reopen Models to save its backup list."
 msgstr "공간이 변경되었습니다. 백업 목록을 저장하려면 모델 설정을 다시 여세요."
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/shell/bot-panel.tsx
 msgid "Space default"
 msgstr "스페이스 기본값"

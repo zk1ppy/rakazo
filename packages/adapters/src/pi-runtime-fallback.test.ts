@@ -394,6 +394,18 @@ describe("Pi runtime transient model retries", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("makes one provider attempt when the request disables retries", async () => {
+    providerState.stream.mockImplementation(() =>
+      stream(primary, message(primary, [], "error", "429 rate limit")),
+    );
+    const outcome = run({ ...request(), providerRetries: 0 }).catch((error: unknown) => error);
+    await expect(outcome).resolves.toEqual(expect.objectContaining({ message: "429 rate limit" }));
+    expect(providerState.stream).toHaveBeenCalledTimes(1);
+    expect(providerState.delay).not.toHaveBeenCalled();
+    const options = providerState.stream.mock.calls[0]?.[2] as { maxRetries?: number } | undefined;
+    expect(options?.maxRetries).toBe(0);
+  });
+
   it.each(["run", "turn"])(
     "stops promptly when the %s signal aborts during backoff",
     async (source) => {

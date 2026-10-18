@@ -1017,6 +1017,10 @@ msgstr "Choose file"
 msgid "Choose which connected model Rakazo uses."
 msgstr "Choose which connected model Rakazo uses."
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Chunk size"
+msgstr "Chunk size"
+
 #: src/pages/shell/dialogs.tsx
 msgid "Clear"
 msgstr "Clear"
@@ -1781,6 +1785,10 @@ msgstr "Could not update agent access"
 msgid "Could not update computer"
 msgstr "Could not update computer"
 
+#: src/pages/MemorySettingsOverlay.tsx
+msgid "Could not update extraction"
+msgstr "Could not update extraction"
+
 #: src/pages/Shell.tsx
 msgid "Could not update reaction"
 msgstr "Could not update reaction"
@@ -2303,6 +2311,14 @@ msgstr "Extra high"
 #: src/lib/model-catalog.ts
 msgid "Extra high"
 msgstr "Extra high"
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Extract entities"
+msgstr "Extract entities"
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Extraction model"
+msgstr "Extraction model"
 
 #: src/components/CloudAgentCard.tsx
 msgid "failed"
@@ -4307,6 +4323,7 @@ msgstr "Space changed. Reopen Models to load its backup list."
 msgid "Space changed. Reopen Models to save its backup list."
 msgstr "Space changed. Reopen Models to save its backup list."
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/shell/bot-panel.tsx
 msgid "Space default"
 msgstr "Space default"
