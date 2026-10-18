@@ -250,6 +250,7 @@ import {
   persistMemoryProviderConfig,
   serializeSpaceMemoryConfig,
   updateMemoryProviderDefaultScope,
+  updateNeo4jExtraction,
 } from "./memory-provider-config.js";
 import {
   chooseFocus,
@@ -3365,6 +3366,9 @@ export function createRouter(deps: RouterDeps) {
       ),
       setDefaultScope: authed.memory.setDefaultScope.handler(async ({ context, input }) =>
         updateMemoryProviderDefaultScope(deps, context.actor, input.defaultMemoryScope),
+      ),
+      updateNeo4jExtraction: authed.memory.updateNeo4jExtraction.handler(
+        async ({ context, input }) => updateNeo4jExtraction(deps, context.actor, input),
       ),
       disconnectProvider: authed.memory.disconnectProvider.handler(async ({ context }) =>
         disconnectMemoryProvider(deps, context.actor),

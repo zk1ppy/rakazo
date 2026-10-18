@@ -15,15 +15,23 @@ export const NEO4J_ENTITY_FULLTEXT_INDEX = "rkz_entity_name";
 /** Entity-to-entity edges. Prefixed so they do not share another application's relationship type. */
 export const NEO4J_ENTITY_RELATIONSHIP = "RKZ_REL";
 
-const ENTITY_LABELS = {
+export const NEO4J_ENTITY_TYPES = [
+  "Person",
+  "Object",
+  "Location",
+  "Event",
+  "Organization",
+] as const;
+
+export type Neo4jEntityType = (typeof NEO4J_ENTITY_TYPES)[number];
+
+const ENTITY_LABELS: Record<Neo4jEntityType, Neo4jEntityType> = {
   Person: "Person",
   Object: "Object",
   Location: "Location",
   Event: "Event",
   Organization: "Organization",
-} as const;
-
-export type Neo4jEntityType = keyof typeof ENTITY_LABELS;
+};
 
 export interface Neo4jMemoryConnection {
   uri: string;
@@ -90,6 +98,7 @@ const ACTIVE_FACT = `fact:Rkz AND fact:Fact
   AND fact.expiredAt IS NULL
   AND ($historyNs IS NULL OR fact.ns <> $historyNs OR fact.generation = $historyGeneration)`;
 
+/** Fulltext match, then one :RKZ_REL hop from the matched entities to their facts. */
 const RECALL_CYPHER = `
 CALL {
   CALL db.index.fulltext.queryNodes('${NEO4J_FACT_FULLTEXT_INDEX}', $q) YIELD node AS fact, score
@@ -539,6 +548,8 @@ export async function linkNeo4jEntities(
     type: string;
     factId: string;
     now: string;
+    /** Optional time from extraction. Null leaves an existing value alone. */
+    time?: string | null;
   },
   signal?: AbortSignal,
 ): Promise<void> {
@@ -546,12 +557,116 @@ export async function linkNeo4jEntities(
     `MATCH (a:Rkz:Entity {id: $fromId, spaceId: $spaceId, ns: $ns})
      MATCH (b:Rkz:Entity {id: $toId, spaceId: $spaceId, ns: $ns})
      MERGE (a)-[r:${NEO4J_ENTITY_RELATIONSHIP} {type: $type, factId: $factId}]->(b)
-     ON CREATE SET r.validFrom = $now, r.validTo = null
+     ON CREATE SET r.validFrom = $now, r.validTo = null, r.createdAt = $now, r.time = $time
+     ON MATCH SET r.time = CASE WHEN $time IS NULL THEN r.time ELSE $time END
      RETURN a.id AS id`,
-    input,
+    { ...input, time: input.time ?? null },
     { database, access: "write", signal },
   );
   if (result.records.length === 0) throw new Error("Neo4j entities were not found.");
+}
+
+export async function readNeo4jFactText(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { factId: string; spaceId: string; ns: string },
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const result = await driver.run(
+    `MATCH (f:Rkz:Fact {id: $factId, spaceId: $spaceId, ns: $ns})
+     WHERE f.expiredAt IS NULL
+     RETURN f.text AS text`,
+    input,
+    { database, access: "read", signal },
+  );
+  const text = result.records[0]?.get("text");
+  return typeof text === "string" && text.trim() ? text : null;
+}
+
+export interface Neo4jExtractedEntityMerge {
+  id: string;
+  type: Neo4jEntityType;
+  spaceId: string;
+  ns: string;
+  name: string;
+  normName: string;
+  aliases: string[];
+  aliasNorms: string[];
+  summary: string;
+  now: string;
+}
+
+/** MERGE by space, namespace, type, and normalized name or alias. Returns the kept id. */
+export async function mergeExtractedNeo4jEntity(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  entity: Neo4jExtractedEntityMerge,
+  signal?: AbortSignal,
+): Promise<string> {
+  const label = entityLabel(entity.type);
+  const keys = uniqueStrings([entity.normName, ...entity.aliasNorms]);
+  const options: Neo4jRunOptions = { database, access: "write", signal };
+  const found = await driver.run(
+    `MATCH (e:Rkz:Entity:${label} {spaceId: $spaceId, ns: $ns})
+     WHERE e.normName IN $keys
+        OR any(alias IN coalesce(e.aliasNorms, []) WHERE alias IN $keys)
+     RETURN e.id AS id, e.aliases AS aliases, e.aliasNorms AS aliasNorms, e.normName AS normName
+     ORDER BY CASE WHEN e.normName = $normName THEN 0 ELSE 1 END, e.id
+     LIMIT 1`,
+    { spaceId: entity.spaceId, ns: entity.ns, keys, normName: entity.normName },
+    options,
+  );
+  const record = found.records[0];
+  const existingId = record?.get("id");
+  const id = typeof existingId === "string" && existingId ? existingId : entity.id;
+  const keptNorm =
+    record && typeof record.get("normName") === "string"
+      ? String(record.get("normName"))
+      : entity.normName;
+  const aliasNorms = uniqueStrings(
+    [...asStringList(record?.get("aliasNorms")), entity.normName, ...entity.aliasNorms],
+    keptNorm,
+  );
+  const aliases = uniqueStrings(
+    [...asStringList(record?.get("aliases")), ...entity.aliases],
+    entity.name,
+  );
+  await driver.run(
+    `MERGE (e:Rkz:Entity:${label} {id: $id})
+     ON CREATE SET
+       e.spaceId = $spaceId,
+       e.ns = $ns,
+       e.entityType = $type,
+       e.name = $name,
+       e.normName = $normName,
+       e.aliases = $aliases,
+       e.aliasNorms = $aliasNorms,
+       e.summary = $summary,
+       e.firstSeen = $now,
+       e.lastSeen = $now
+     ON MATCH SET
+       e.entityType = $type,
+       e.aliases = $aliases,
+       e.aliasNorms = $aliasNorms,
+       e.summary = CASE WHEN $summary = "" THEN e.summary ELSE $summary END,
+       e.lastSeen = $now,
+       e.name = CASE WHEN e.normName = $normName THEN $name ELSE e.name END
+     RETURN e.id AS id`,
+    {
+      id,
+      type: entity.type,
+      spaceId: entity.spaceId,
+      ns: entity.ns,
+      name: entity.name,
+      normName: entity.normName,
+      aliases,
+      aliasNorms,
+      summary: entity.summary,
+      now: entity.now,
+    },
+    options,
+  );
+  return id;
 }
 
 export async function deleteNeo4jSpace(
@@ -566,11 +681,28 @@ export async function deleteNeo4jSpace(
   );
 }
 
-function entityLabel(type: string): string {
+function entityLabel(type: string): Neo4jEntityType {
   if (!Object.hasOwn(ENTITY_LABELS, type)) {
     throw new Error("entity type must be Person, Object, Location, Event, or Organization");
   }
   return ENTITY_LABELS[type as Neo4jEntityType];
+}
+
+function uniqueStrings(values: string[], exclude?: string): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === exclude || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+function asStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
 }
 
 function asString(value: unknown): string {

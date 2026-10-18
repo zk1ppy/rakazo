@@ -1,6 +1,7 @@
 import { ORPCError } from "@orpc/server";
 import type { SecretStore } from "@rakazo/adapter-kit";
 import {
+  assertNeo4jMaxChunkChars,
   classifyMemoryProviderSettings,
   MemoryProviderDeploymentOwnerRequiredError,
   memoryProviderRequiresDeploymentOwner,
@@ -132,6 +133,40 @@ export async function persistMemoryProviderConfig(
     ),
   );
   return serializeSpaceMemoryConfig(config);
+}
+
+export async function updateNeo4jExtraction(
+  deps: MemoryProviderConfigDeps,
+  actor: Actor,
+  input: { extract: boolean; maxChunkChars?: string },
+) {
+  await requireSpaceOwner(deps.prisma, actor);
+  const existing = await findSpaceMemoryConfig(deps.prisma, actor.spaceId);
+  if (!existing) throw new ORPCError("NOT_FOUND");
+  if (existing.provider !== "neo4j") {
+    throw new ORPCError("BAD_REQUEST", { message: "Extraction settings apply to Neo4j." });
+  }
+  const settings = { ...toStringRecord(existing.settings) };
+  settings.extract = input.extract ? "true" : "false";
+  const chunk = input.maxChunkChars?.trim() ?? "";
+  if (!chunk) {
+    delete settings.maxChunkChars;
+  } else {
+    let validated: string | undefined;
+    try {
+      validated = assertNeo4jMaxChunkChars(chunk);
+    } catch (error) {
+      throw new ORPCError("BAD_REQUEST", {
+        message: error instanceof Error ? error.message : "Chunk size is invalid",
+      });
+    }
+    if (validated) settings.maxChunkChars = validated;
+  }
+  const updated = await deps.prisma.spaceMemoryConfig.update({
+    where: { id: existing.id },
+    data: { settings },
+  });
+  return serializeSpaceMemoryConfig(updated);
 }
 
 export async function updateMemoryProviderDefaultScope(

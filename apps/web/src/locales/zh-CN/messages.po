@@ -1017,6 +1017,10 @@ msgstr "选择文件"
 msgid "Choose which connected model Rakazo uses."
 msgstr "选择 Rakazo 使用的已连接模型。"
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Chunk size"
+msgstr ""
+
 #: src/pages/shell/dialogs.tsx
 msgid "Clear"
 msgstr "清空"
@@ -1781,6 +1785,10 @@ msgstr "无法更新 Agent 权限"
 msgid "Could not update computer"
 msgstr "无法更新电脑"
 
+#: src/pages/MemorySettingsOverlay.tsx
+msgid "Could not update extraction"
+msgstr ""
+
 #: src/pages/Shell.tsx
 msgid "Could not update reaction"
 msgstr "无法更新反应"
@@ -2302,6 +2310,10 @@ msgstr "极高"
 #. js-lingui-explicit-id
 #: src/lib/model-catalog.ts
 msgid "Extra high"
+msgstr ""
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Extract entities"
 msgstr ""
 
 #: src/components/CloudAgentCard.tsx

@@ -1,4 +1,9 @@
-import type { DurableMemoryScope, SecretStore, SemanticMemoryProvider } from "@rakazo/adapter-kit";
+import type {
+  DurableMemoryScope,
+  JobPublisher,
+  SecretStore,
+  SemanticMemoryProvider,
+} from "@rakazo/adapter-kit";
 import type { PrismaClient } from "@rakazo/db";
 import {
   classifyNeo4jConnectionSettings,
@@ -61,6 +66,7 @@ interface MemoryProviderAdapter {
   create(
     settings: Record<string, string>,
     credentials: Record<string, string>,
+    deps?: { jobs?: JobPublisher },
   ): SemanticMemoryProvider;
   decodeLegacyCredentials?(plaintext: string): Record<string, string> | null;
 }
@@ -144,8 +150,9 @@ export function createMemoryProvider(
   provider: string,
   settings: Record<string, string>,
   credentials: Record<string, string>,
+  deps?: { jobs?: JobPublisher },
 ): SemanticMemoryProvider {
-  return memoryProviderAdapter(provider).create(settings, credentials);
+  return memoryProviderAdapter(provider).create(settings, credentials, deps);
 }
 
 export function toStringRecord(value: unknown): Record<string, string> {
@@ -173,6 +180,7 @@ export class SpaceMemoryProviderResolver implements MemoryProviderResolver {
   constructor(
     private readonly prisma: Pick<PrismaClient, "spaceMemoryConfig" | "deploymentSettings">,
     private readonly secrets: SecretStore,
+    private readonly jobs?: JobPublisher,
   ) {}
 
   async resolve(spaceId: string): Promise<ConfiguredMemoryProvider | null> {
@@ -202,7 +210,9 @@ export class SpaceMemoryProviderResolver implements MemoryProviderResolver {
       await this.secrets.load(config.secret.ciphertext, config.secret.id),
     );
     return {
-      provider: createMemoryProvider(config.provider, settings, credentials),
+      provider: createMemoryProvider(config.provider, settings, credentials, {
+        jobs: this.jobs,
+      }),
       defaultScope: config.defaultMemoryScope === "shared" ? "shared" : "isolated",
     };
   }

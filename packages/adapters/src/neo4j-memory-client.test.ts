@@ -8,10 +8,12 @@ import {
   escapeLuceneQuery,
   linkNeo4jEntities,
   linkNeo4jFactEntity,
+  mergeExtractedNeo4jEntity,
   NEO4J_ENTITY_FULLTEXT_INDEX,
   NEO4J_FACT_FULLTEXT_INDEX,
   NEO4J_MEMORY_SCHEMA_STATEMENTS,
   purgeNeo4jChatSources,
+  readNeo4jFactText,
   recallNeo4jFacts,
   resolveNeo4jBoltAddress,
   saveNeo4jFact,
@@ -273,5 +275,48 @@ describe("Neo4j memory client", () => {
       "MERGE (a)-[r:RKZ_REL {type: $type, factId: $factId}]->(b)",
     );
     expect(driver.calls[2]?.cypher).toContain("r.validFrom = $now");
+    expect(driver.calls[2]?.cypher).toContain("r.createdAt = $now");
+    expect(driver.calls[2]?.params).toMatchObject({ time: null });
+  });
+
+  it("merges an extracted entity onto an alias match and skips expired facts", async () => {
+    const driver = new FakeDriver();
+    driver.rows.push({
+      records: [
+        row({
+          id: "existing",
+          aliases: ["Ada"],
+          aliasNorms: ["ada"],
+          normName: "ada lovelace",
+        }),
+      ],
+    });
+    const id = await mergeExtractedNeo4jEntity(driver, "neo4j", {
+      id: "computed",
+      type: "Person",
+      spaceId: "space-1",
+      ns: "shared",
+      name: "Ada",
+      normName: "ada",
+      aliases: ["Ada Lovelace"],
+      aliasNorms: ["ada lovelace"],
+      summary: "Founder",
+      now: "2026-01-01T00:00:00.000Z",
+    });
+    expect(id).toBe("existing");
+    expect(driver.calls[0]?.cypher).toContain("aliasNorms");
+    expect(driver.calls[0]?.cypher).toContain("Entity:Person");
+    expect(driver.calls[1]?.params.id).toBe("existing");
+    expect(driver.calls[1]?.params.normName).toBe("ada");
+
+    driver.rows.push({ records: [row({ text: "Ada founded the lab." })] });
+    await expect(
+      readNeo4jFactText(driver, "neo4j", {
+        factId: "fact-1",
+        spaceId: "space-1",
+        ns: "shared",
+      }),
+    ).resolves.toBe("Ada founded the lab.");
+    expect(driver.calls.at(-1)?.cypher).toContain("expiredAt IS NULL");
   });
 });

@@ -17,8 +17,10 @@ import { scheduleComputerSleep, sleepComputerIfIdle } from "./computer-idle.js";
 import { performComputerUpdate } from "./computer-update.js";
 import type { createRunExecutor } from "./executor.js";
 import { compactHistory } from "./history-compaction.js";
+import { extractMemoryGraph } from "./memory-extract.js";
 import type { MemoryProviderResolver } from "./memory-provider-factory.js";
 import { deliverMessagingOutbound, mirrorMessagingOutbound } from "./messaging-delivery.js";
+import { Neo4jMemoryProvider } from "./neo4j-memory-provider.js";
 import { expireTaughtSkillTeaching } from "./teaching-session.js";
 
 export function createBackgroundJobHandlers(deps: {
@@ -100,6 +102,25 @@ export function createBackgroundJobHandlers(deps: {
           cloudAgent: deps.cloudAgent,
         },
         payload,
+      );
+    },
+    "memory.extract": async (payload) => {
+      const configured = await deps.memoryProviders.resolve(payload.spaceId);
+      const provider = configured?.provider;
+      if (!(provider instanceof Neo4jMemoryProvider)) return;
+      await extractMemoryGraph(
+        {
+          runtime: deps.runtime,
+          prisma: deps.prisma,
+          jobs: deps.jobs,
+          ...(deps.executor.resolveModel ? { resolveModel: deps.executor.resolveModel } : {}),
+          ...(deps.deploymentModelKey ? { deploymentModelKey: deps.deploymentModelKey } : {}),
+          ...(deps.deploymentModelConfigured !== undefined
+            ? { deploymentModelConfigured: deps.deploymentModelConfigured }
+            : {}),
+        },
+        payload,
+        provider,
       );
     },
     "history.compact": async (payload) => {

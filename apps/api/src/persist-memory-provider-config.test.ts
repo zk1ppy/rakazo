@@ -5,6 +5,7 @@ import {
   disconnectMemoryProvider,
   persistMemoryProviderConfig,
   updateMemoryProviderDefaultScope,
+  updateNeo4jExtraction,
 } from "./memory-provider-config.js";
 
 const actor = {
@@ -442,5 +443,66 @@ describe("updateMemoryProviderDefaultScope", () => {
 
     await expect(updateMemoryProviderDefaultScope(deps, actor, "shared")).rejects.toThrow();
     expect(update).not.toHaveBeenCalled();
+  });
+});
+
+describe("updateNeo4jExtraction", () => {
+  it("patches extract and chunk size without touching the secret", async () => {
+    const { deps, update, findUnique, secretCreate, secretDeleteMany } = makeDeps({
+      existing: { id: "cfg-1", secretId: "secret-existing" },
+      updateResult: {
+        provider: "neo4j",
+        settings: { uri: "bolt://localhost:7687", extract: "false" },
+        defaultMemoryScope: "isolated",
+        updatedAt: new Date("2026-08-20T00:00:00.000Z"),
+      },
+    });
+    findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: {
+        uri: "bolt://localhost:7687",
+        username: "neo4j",
+        extract: "true",
+        maxChunkChars: "800",
+      },
+    });
+
+    const result = await updateNeo4jExtraction(deps, actor, { extract: false, maxChunkChars: " " });
+
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "cfg-1" },
+      data: {
+        settings: { uri: "bolt://localhost:7687", username: "neo4j", extract: "false" },
+      },
+    });
+    expect(secretCreate).not.toHaveBeenCalled();
+    expect(secretDeleteMany).not.toHaveBeenCalled();
+    expect(result.settings.extract).toBe("false");
+  });
+
+  it("rejects a chunk size outside the allowed range and a non-Neo4j provider", async () => {
+    const neo4j = makeDeps({ existing: { id: "cfg-1", secretId: "secret-existing" } });
+    neo4j.findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: { uri: "bolt://localhost:7687" },
+    });
+    await expect(
+      updateNeo4jExtraction(neo4j.deps, actor, { extract: true, maxChunkChars: "10" }),
+    ).rejects.toThrow(/maxChunkChars/);
+    expect(neo4j.update).not.toHaveBeenCalled();
+
+    const other = makeDeps({ existing: { id: "cfg-1", secretId: "secret-existing" } });
+    other.findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "supermemory",
+      settings: { mode: "cloud" },
+    });
+    await expect(updateNeo4jExtraction(other.deps, actor, { extract: false })).rejects.toThrow();
+    expect(other.update).not.toHaveBeenCalled();
   });
 });

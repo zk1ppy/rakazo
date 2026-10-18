@@ -31,6 +31,7 @@ export class GraphileJobPublisher implements JobPublisher {
       runAt: job.availableAt,
       jobKey: job.replaceKey,
       maxAttempts: job.maxAttempts,
+      ...(job.queueName ? { queueName: job.queueName } : {}),
       ...(jobKeyMode ? { jobKeyMode } : {}),
     });
   }

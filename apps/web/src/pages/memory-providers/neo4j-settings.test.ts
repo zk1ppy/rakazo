@@ -5,6 +5,7 @@ import {
   NEO4J_URI_PLACEHOLDER,
   neo4jConnectedHost,
   neo4jConnectionDraft,
+  neo4jExtractEnabled,
   neo4jUriError,
 } from "./neo4j-settings";
 
@@ -74,5 +75,53 @@ describe("Neo4j memory provider settings", () => {
     expect(neo4jConnectedHost("")).toBe("Neo4j");
     expect(neo4jConnectedHost("bolt://localhost:7687")).toBe("localhost:7687");
     expect(neo4jConnectedHost("not a url")).toBe("not a url");
+  });
+
+  it("persists extraction only when the form sets it", () => {
+    expect(neo4jExtractEnabled({})).toBe(true);
+    expect(neo4jExtractEnabled({ extract: "false" })).toBe(false);
+    expect(neo4jExtractEnabled({ extract: "off" })).toBe(false);
+
+    expect(
+      neo4jConnectionDraft({
+        uri: "bolt://localhost:7687",
+        database: "",
+        username: "neo4j",
+        password: "secret",
+        extract: false,
+        maxChunkChars: " 500 ",
+      }),
+    ).toEqual({
+      ok: true,
+      draft: {
+        settings: {
+          uri: "bolt://localhost:7687",
+          username: "neo4j",
+          extract: "false",
+          maxChunkChars: "500",
+        },
+        credentials: { password: "secret" },
+      },
+    });
+
+    const enabled = neo4jConnectionDraft({
+      uri: "bolt://localhost:7687",
+      database: "",
+      username: "neo4j",
+      password: "secret",
+      extract: true,
+      maxChunkChars: "   ",
+    });
+    expect(enabled).toEqual({
+      ok: true,
+      draft: {
+        settings: {
+          uri: "bolt://localhost:7687",
+          username: "neo4j",
+          extract: "true",
+        },
+        credentials: { password: "secret" },
+      },
+    });
   });
 });

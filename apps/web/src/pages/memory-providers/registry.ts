@@ -1,6 +1,6 @@
 import type { SpaceMemoryConfig } from "@rakazo/contracts";
 import type { ComponentType } from "react";
-import { Neo4jSettingsForm } from "./Neo4jSettingsForm";
+import { Neo4jExtractionSettings, Neo4jSettingsForm } from "./Neo4jSettingsForm";
 import { neo4jConnectedHost } from "./neo4j-settings";
 import { SerenitySettingsForm } from "./SerenitySettingsForm";
 import { SupermemorySettingsForm } from "./SupermemorySettingsForm";
@@ -15,11 +15,23 @@ export interface MemoryProviderSettingsFormProps {
   onConnect: (draft: MemoryProviderConnectionDraft) => Promise<boolean>;
 }
 
+export interface Neo4jExtractionUpdate {
+  extract: boolean;
+  maxChunkChars?: string;
+}
+
+export interface MemoryProviderConnectedSettingsProps {
+  config: SpaceMemoryConfig;
+  busy: boolean;
+  onUpdateExtraction: (input: Neo4jExtractionUpdate) => Promise<boolean>;
+}
+
 export interface MemoryProviderSettingsRegistration {
   id: string;
   name: string;
   description: string;
   SettingsForm: ComponentType<MemoryProviderSettingsFormProps>;
+  ConnectedSettings?: ComponentType<MemoryProviderConnectedSettingsProps>;
   connectedLabel: (config: SpaceMemoryConfig) => string;
 }
 
@@ -49,6 +61,7 @@ export const MEMORY_PROVIDER_SETTINGS: readonly MemoryProviderSettingsRegistrati
     name: "Neo4j",
     description: "Graph memory stored in Neo4j.",
     SettingsForm: Neo4jSettingsForm,
+    ConnectedSettings: Neo4jExtractionSettings,
     connectedLabel: (config) => {
       const database = config.settings.database?.trim() || "neo4j";
       return `Neo4j · ${database} · ${neo4jConnectedHost(config.settings.uri ?? "")}`;

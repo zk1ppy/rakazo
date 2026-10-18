@@ -82,6 +82,11 @@ export * from "./mcp-server-tool.js";
 export * from "./mcp-transport.js";
 export * from "./media-generation-factory.js";
 export * from "./media-generation-provider.js";
+export {
+  assertNeo4jMaxChunkChars,
+  neo4jExtractionEnabled,
+  neo4jMaxChunkChars,
+} from "./memory-extract.js";
 export * from "./memory-provider-factory.js";
 export * from "./messaging-context.js";
 export * from "./messaging-delivery.js";
