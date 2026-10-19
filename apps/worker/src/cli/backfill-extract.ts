@@ -32,6 +32,8 @@ try {
     `failed ${counts.failed + loaded.failed}`,
     `skipped ${counts.skipped}`,
     `${options.dryRun ? "would-enqueue" : "enqueued"} ${counts.enqueued}`,
+    `valid-from ${options.dryRun ? "dry-run" : counts.relations}`,
+    `first-seen ${options.dryRun ? "dry-run" : counts.entities}`,
   ];
   process.stdout.write(`${lines.join("\n")}\n`);
 } finally {

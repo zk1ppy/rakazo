@@ -83,6 +83,8 @@ describe("backfillMemoryExtraction", () => {
       disabled: 1,
       skipped: 2,
       enqueued: 1,
+      relations: 0,
+      entities: 0,
       dryRun: false,
     });
     expect(queue.enqueue).toHaveBeenCalledTimes(1);
@@ -113,6 +115,39 @@ describe("backfillMemoryExtraction", () => {
     expect(counts.enqueued).toBe(2);
     expect(counts.dryRun).toBe(true);
     expect(queue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("realigns existing edges without enqueueing a model job", async () => {
+    const queue = jobs();
+    const realignTimes = vi.fn(async () => ({ relations: 4, entities: 2 }));
+    const skipped = vi.fn(async () => ({ relations: 9, entities: 9 }));
+    const counts = await backfillMemoryExtraction(
+      [
+        space(async () => [], { realignTimes }),
+        space(async () => [fact()], {
+          spaceId: "space-off",
+          extractionEnabled: false,
+          realignTimes: skipped,
+        }),
+      ],
+      queue,
+      { limit: 100, dryRun: false },
+    );
+    expect(realignTimes).toHaveBeenCalledOnce();
+    expect(skipped).not.toHaveBeenCalled();
+    expect(queue.enqueue).not.toHaveBeenCalled();
+    expect(counts).toMatchObject({ relations: 4, entities: 2, enqueued: 0, disabled: 1 });
+  });
+
+  it("does not write timestamps on a dry run", async () => {
+    const realignTimes = vi.fn(async () => ({ relations: 4, entities: 2 }));
+    const counts = await backfillMemoryExtraction(
+      [space(async () => [fact()], { realignTimes })],
+      jobs(),
+      { limit: 100, dryRun: true },
+    );
+    expect(realignTimes).not.toHaveBeenCalled();
+    expect(counts).toMatchObject({ enqueued: 1, relations: 0, entities: 0, dryRun: true });
   });
 
   it("keeps paging when a full page is trivial", async () => {

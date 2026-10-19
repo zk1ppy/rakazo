@@ -22,6 +22,8 @@ export interface BackfillSpace {
   extractionEnabled: boolean;
   maxChunkChars: number;
   listFacts(input: { limit: number; skip: number }): Promise<BackfillFact[]>;
+  /** Repair fact-time stamps on edges already written. No model call. */
+  realignTimes?(): Promise<{ relations: number; entities: number }>;
 }
 
 export interface BackfillExtractOptions {
@@ -35,6 +37,8 @@ export interface BackfillExtractCounts {
   failed: number;
   skipped: number;
   enqueued: number;
+  relations: number;
+  entities: number;
   dryRun: boolean;
 }
 
@@ -79,8 +83,9 @@ export function parseBackfillExtractArgs(argv: readonly string[]): {
 }
 
 /**
- * Enqueue extraction for facts that have no :ABOUT edge yet.
- * Each job uses the global memory-extract queue and the fact's replace key.
+ * Repair fact-time stamps, then enqueue extraction for facts that have no
+ * :ABOUT edge yet. Each job uses the global memory-extract queue and the
+ * fact's replace key. The repair does not call a model.
  */
 export async function backfillMemoryExtraction(
   spaces: readonly BackfillSpace[],
@@ -93,15 +98,37 @@ export async function backfillMemoryExtraction(
     failed: 0,
     skipped: 0,
     enqueued: 0,
+    relations: 0,
+    entities: 0,
     dryRun: options.dryRun,
   };
   let remaining = options.limit;
   for (const space of spaces) {
-    if (remaining <= 0) break;
     if (!space.extractionEnabled) {
       counts.disabled += 1;
       continue;
     }
+    if (!options.dryRun && space.realignTimes) {
+      try {
+        const repaired = await space.realignTimes();
+        counts.relations += repaired.relations;
+        counts.entities += repaired.entities;
+        if (repaired.relations > 0 || repaired.entities > 0) {
+          getLogger().info("memory backfill realigned fact times", {
+            "memory.space_id": space.spaceId,
+            "memory.relations": repaired.relations,
+            "memory.entities": repaired.entities,
+          });
+        }
+      } catch (error) {
+        counts.failed += 1;
+        getLogger().error("memory backfill could not realign fact times", {
+          "memory.space_id": space.spaceId,
+          message: error instanceof Error ? error.message : "realign failed",
+        });
+      }
+    }
+    if (remaining <= 0) continue;
     let skip = 0;
     while (remaining > 0) {
       const requested = remaining;
@@ -172,6 +199,7 @@ export async function loadNeo4jBackfillSpaces(
         extractionEnabled: provider.extractionEnabled(),
         maxChunkChars: neo4jMaxChunkChars(settings),
         listFacts: (input) => provider.listUnextractedFacts(config.spaceId, input),
+        realignTimes: () => provider.realignExtractionTimes(config.spaceId),
       });
     } catch (error) {
       failed += 1;
