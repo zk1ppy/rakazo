@@ -33,7 +33,12 @@ import { REASONING_MODEL_MAX_TOKENS } from "./pi-runtime-limits.js";
  *
  * Model calls share the `memory-extract` queue and run one at a time inside the
  * job. Each run asks at most {@link MAX_CONSOLIDATE_LLM_CALLS} times, then
- * reschedules itself if ambiguous pairs remain.
+ * reschedules itself if ambiguous pairs remain. A confirmation that is aborted
+ * or times out is transient: that pair waits for a later attempt, and the rest
+ * of the page still runs. A permanent model failure remembers the pair and
+ * continues. If that error still leaves the job, the handler returns so
+ * Graphile does not spend another attempt. Merges already committed stay
+ * committed.
  *
  * Canonical name. The surviving node's `name` and `normName` are the more
  * specific display name: a role name loses to a proper name, then more content
@@ -92,7 +97,6 @@ export const MAX_CONSOLIDATE_LLM_CALLS = 4;
 export const MAX_CONSOLIDATE_CARRY = 40;
 export const MAX_CONSOLIDATE_REJECTED = 80;
 export const MAX_CONSOLIDATE_ATTEMPTS = 5;
-const CONSOLIDATE_TIMEOUT_MS = 45_000;
 const CONSOLIDATE_ANSWER_TOKENS = 256;
 const MAX_SCHEDULE_GENERATION = 400;
 const MAX_ALIASES = 64;
@@ -146,15 +150,29 @@ export type ConsolidateThinkingLevel = (typeof CONSOLIDATE_EFFORTS)[number];
  * reasoning reservation extraction uses when the connection has no smaller cap.
  * A stored chat max still ceilings the call. With thinking off, only the
  * visible answer is sent.
+ *
+ * The confirm abort used to be a fixed 45s. A reasoning model on a slow
+ * OpenAI-compatible provider can still be writing the answer then, and pi
+ * reports that signal as "Request was aborted". The default matches the
+ * runtime's idle bound for a live stream. A stored value replaces it. The
+ * stream's own time-to-headers bound still applies before the first byte.
  */
 export const DEFAULT_CONSOLIDATE_THINKING_LEVEL: ConsolidateThinkingLevel = "low";
 export const DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS = REASONING_MODEL_MAX_TOKENS;
+/**
+ * Whole confirmation, including reasoning. Long enough that a slow serialized
+ * model is not aborted while it is still producing the yes/no.
+ */
+export const DEFAULT_CONSOLIDATE_TIMEOUT_MS = 180_000;
 const MIN_CONSOLIDATE_MAX_OUTPUT_TOKENS = 64;
 const MAX_CONSOLIDATE_MAX_OUTPUT_TOKENS = 131_072;
+const MIN_CONSOLIDATE_TIMEOUT_MS = 15_000;
+const MAX_CONSOLIDATE_TIMEOUT_MS = 600_000;
 
 export interface ConsolidateModelSettings {
   thinkingLevel: ConsolidateThinkingLevel;
   maxOutputTokens: number;
+  timeoutMs: number;
 }
 
 /** Missing or invalid stored values use the yes/no defaults so a bad row cannot wedge the job. */
@@ -168,6 +186,8 @@ export function readConsolidateModelSettings(
     maxOutputTokens:
       parseConsolidateMaxOutputTokens(settings.consolidateMaxOutputTokens) ??
       DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
+    timeoutMs:
+      parseConsolidateTimeoutMs(settings.consolidateTimeoutMs) ?? DEFAULT_CONSOLIDATE_TIMEOUT_MS,
   };
 }
 
@@ -197,6 +217,20 @@ export function assertConsolidateMaxOutputTokens(value: string | undefined): str
   return String(parsed);
 }
 
+/** Connect and settings writes. Blank clears the stored override. Invalid input throws. */
+export function assertConsolidateTimeoutMs(value: string | undefined): string | undefined {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return undefined;
+  if (!/^\d+$/.test(trimmed)) throw new Error("consolidateTimeoutMs must be a whole number");
+  const parsed = Number(trimmed);
+  if (parsed < MIN_CONSOLIDATE_TIMEOUT_MS || parsed > MAX_CONSOLIDATE_TIMEOUT_MS) {
+    throw new Error(
+      `consolidateTimeoutMs must be between ${MIN_CONSOLIDATE_TIMEOUT_MS} and ${MAX_CONSOLIDATE_TIMEOUT_MS}`,
+    );
+  }
+  return String(parsed);
+}
+
 function parseConsolidateThinkingLevel(value: string | undefined): ConsolidateThinkingLevel | null {
   const trimmed = value?.trim() ?? "";
   if ((CONSOLIDATE_EFFORTS as readonly string[]).includes(trimmed)) {
@@ -212,6 +246,14 @@ function parseConsolidateMaxOutputTokens(value: string | undefined): number | nu
   if (parsed < MIN_CONSOLIDATE_MAX_OUTPUT_TOKENS || parsed > MAX_CONSOLIDATE_MAX_OUTPUT_TOKENS) {
     return null;
   }
+  return parsed;
+}
+
+function parseConsolidateTimeoutMs(value: string | undefined): number | null {
+  const trimmed = value?.trim() ?? "";
+  if (!/^\d+$/.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  if (parsed < MIN_CONSOLIDATE_TIMEOUT_MS || parsed > MAX_CONSOLIDATE_TIMEOUT_MS) return null;
   return parsed;
 }
 
@@ -260,7 +302,11 @@ export interface MemoryConsolidateDeps {
   deploymentModelConfigured?: boolean;
 }
 
-/** Non-retryable model failure. Graphile must not spend another call on it. */
+/**
+ * Non-retryable model failure. The job handler returns on this error so
+ * Graphile records success and does not spend another attempt. A dropped
+ * database connection is a different error and may still retry.
+ */
 export class MemoryConsolidatePermanentError extends Error {
   readonly jobOutcome = "permanent" as const;
 
@@ -413,44 +459,84 @@ export function planCanonicalRename(entity: Neo4jConsolidationEntity): {
   return { name: promoted.name, normName: promoted.normName, aliases, aliasNorms };
 }
 
+const REASONING_TAG = "think(?:ing)?|reasoning|redacted_thinking";
+
 export function parseConsolidationDecision(text: string): boolean | null {
-  const trimmed = text.trim();
-  if (!trimmed) return null;
-  const outsideReasoning = trimmed.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "");
-  for (const candidate of [...jsonObjects(outsideReasoning), ...jsonObjects(trimmed)].reverse()) {
-    let value: unknown;
-    try {
-      value = JSON.parse(candidate);
-    } catch {
-      continue;
-    }
-    if (!value || typeof value !== "object" || Array.isArray(value) || !("same" in value)) continue;
-    const same = (value as { same: unknown }).same;
-    if (typeof same === "boolean") return same;
-  }
-  return null;
+  return readDecisionRecord(text)?.same ?? null;
 }
 
 export function parseConsolidationTypeDecision(
   text: string,
 ): { same: boolean; type: Neo4jEntityType | null } | null {
+  const record = readDecisionRecord(text);
+  if (!record) return null;
+  if (!record.same) return { same: false, type: null };
+  const type = typeof record.type === "string" ? canonicalEntityType(record.type) : null;
+  return { same: true, type };
+}
+
+/**
+ * Prefer JSON outside a thinking wrapper. An unclosed tag does not hide a
+ * decision that follows it, and a decision that exists only inside the
+ * wrapper still counts. The last object wins.
+ */
+function readDecisionRecord(text: string): { same: boolean; type?: unknown } | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
-  const outsideReasoning = trimmed.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "");
-  for (const candidate of [...jsonObjects(outsideReasoning), ...jsonObjects(trimmed)].reverse()) {
+  const answer = reasoningAnswer(trimmed);
+  return findDecision(answer) ?? findDecision(trimmed);
+}
+
+function reasoningAnswer(text: string): string {
+  const closed = text.replace(new RegExp(`<(${REASONING_TAG})\\b[^>]*>[\\s\\S]*?</\\1>`, "gi"), "");
+  const open = new RegExp(`<(${REASONING_TAG})\\b[^>]*>`, "gi");
+  let last: RegExpExecArray | null = null;
+  for (let match = open.exec(closed); match; match = open.exec(closed)) last = match;
+  if (!last) return closed;
+  return closed.slice(last.index + last[0].length);
+}
+
+function findDecision(text: string): { same: boolean; type?: unknown } | null {
+  for (const candidate of jsonObjects(text).reverse()) {
     let value: unknown;
     try {
       value = JSON.parse(candidate);
     } catch {
       continue;
     }
-    if (!value || typeof value !== "object" || Array.isArray(value) || !("same" in value)) continue;
-    const record = value as { same: unknown; type?: unknown };
-    if (typeof record.same !== "boolean") continue;
-    if (!record.same) return { same: false, type: null };
-    const type = typeof record.type === "string" ? canonicalEntityType(record.type) : null;
-    return { same: true, type };
+    const found = findSameRecord(value);
+    if (found) return found;
   }
+  return null;
+}
+
+function findSameRecord(value: unknown): { same: boolean; type?: unknown } | null {
+  if (!value || typeof value !== "object") return null;
+  if (Array.isArray(value)) {
+    for (const item of [...value].reverse()) {
+      const found = findSameRecord(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if ("same" in record) {
+    const same = coerceSame(record.same);
+    if (same !== null) return { same, type: record.type };
+  }
+  for (const item of [...Object.values(record)].reverse()) {
+    const found = findSameRecord(item);
+    if (found) return found;
+  }
+  return null;
+}
+
+function coerceSame(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true" || normalized === "yes") return true;
+  if (normalized === "false" || normalized === "no") return false;
   return null;
 }
 
@@ -517,6 +603,7 @@ export async function consolidateMemoryGraph(
   let deferredMerge = false;
   let deferredConfirm = false;
   let rateLimited = false;
+  const timedOutKeys: string[] = [];
 
   for (const candidate of pairs) {
     if (merges >= MAX_CONSOLIDATE_MERGES) {
@@ -537,20 +624,33 @@ export async function consolidateMemoryGraph(
         deferredConfirm = true;
         continue;
       }
-      const answer = await confirmDuplicate(
-        deps,
-        payload,
-        model,
-        store.consolidateModelSettings(),
-        left,
-        right,
-        live,
-        llmCalls,
-        decision.reason === "type-conflict" ? "type" : "same",
-      );
+      let answer: boolean | Neo4jEntityType | "rate_limit" | "timeout";
+      try {
+        answer = await confirmDuplicate(
+          deps,
+          payload,
+          model,
+          store.consolidateModelSettings(),
+          left,
+          right,
+          live,
+          llmCalls,
+          decision.reason === "type-conflict" ? "type" : "same",
+        );
+      } catch (error) {
+        if (!(error instanceof MemoryConsolidatePermanentError)) throw error;
+        llmCalls += 1;
+        rejected.add(key);
+        continue;
+      }
       if (answer === "rate_limit") {
         rateLimited = true;
         break;
+      }
+      if (answer === "timeout") {
+        llmCalls += 1;
+        timedOutKeys.push(key);
+        continue;
       }
       llmCalls += 1;
       if (typeof answer === "string") chosenType = answer;
@@ -597,19 +697,34 @@ export async function consolidateMemoryGraph(
 
   if (!rateLimited) await promoteCanonicalNames(store, payload.spaceId, live, rejected);
 
+  const retryTimeout = timedOutKeys.length > 0 && payload.attempt + 1 < MAX_CONSOLIDATE_ATTEMPTS;
+  if (!retryTimeout) {
+    for (const key of timedOutKeys) rejected.add(key);
+  }
   const rejectedList = boundList([...rejected], MAX_CONSOLIDATE_REJECTED);
-  const followUp = rateLimited || deferredMerge || deferredConfirm || page.pageFull;
+  const followUp = rateLimited || retryTimeout || deferredMerge || deferredConfirm || page.pageFull;
   getLogger().info("memory.consolidate finished a page", {
     "memory.space_id": payload.spaceId,
     "memory.merged": merges,
     "memory.confirmed": llmCalls,
     "memory.declined": declined,
+    "memory.timed_out": timedOutKeys.length,
     "memory.page": page.pageIds.length,
     "memory.follow_up": followUp,
   });
   if (rateLimited) {
     await rescheduleRateLimit(deps, payload, rejectedList);
     return;
+  }
+  if (retryTimeout) {
+    await rescheduleTimeout(deps, payload, rejectedList, timedOutKeys.length);
+    return;
+  }
+  if (timedOutKeys.length > 0) {
+    getLogger().error("memory.consolidate gave up after confirmation timeouts", {
+      "memory.space_id": payload.spaceId,
+      "memory.timed_out": timedOutKeys.length,
+    });
   }
   if (deferredMerge || deferredConfirm) {
     await enqueueContinuation(deps, payload, {
@@ -709,9 +824,9 @@ async function confirmDuplicate(
   byId: ReadonlyMap<string, Neo4jConsolidationEntity>,
   callIndex: number,
   mode: "same" | "type",
-): Promise<boolean | Neo4jEntityType | "rate_limit"> {
+): Promise<boolean | Neo4jEntityType | "rate_limit" | "timeout"> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), CONSOLIDATE_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), settings.timeoutMs);
   timer.unref?.();
   const operationId = `memory-consolidate:${payload.spaceId}:${payload.scheduleGeneration}:${callIndex}`;
   let streamed = "";
@@ -756,6 +871,10 @@ async function confirmDuplicate(
   } catch (error) {
     if (isRateLimitFailure(error)) return "rate_limit";
     const reason = error instanceof Error ? error.message : "model call failed";
+    if (isConfirmAbort(error, controller.signal)) {
+      logConfirmTimeout(payload.spaceId, settings.timeoutMs, reason);
+      return "timeout";
+    }
     getLogger().error("memory.consolidate failed", {
       "memory.space_id": payload.spaceId,
       "job.outcome": "permanent",
@@ -765,15 +884,17 @@ async function confirmDuplicate(
   } finally {
     clearTimeout(timer);
   }
+  if (controller.signal.aborted) {
+    logConfirmTimeout(payload.spaceId, settings.timeoutMs, "Request was aborted");
+    return "timeout";
+  }
   const text = (finalText || streamed).trim();
   if (!text && isRateLimitMessage(streamed)) return "rate_limit";
   if (mode === "type") {
     const typed = parseConsolidationTypeDecision(text);
     if (!typed) {
       if (isRateLimitMessage(text)) return "rate_limit";
-      getLogger().info("memory.consolidate ignored an unreadable decision", {
-        "memory.space_id": payload.spaceId,
-      });
+      logUnreadableDecision(payload.spaceId, text);
       return false;
     }
     if (!typed.same || !typed.type) return false;
@@ -782,12 +903,66 @@ async function confirmDuplicate(
   const decision = parseConsolidationDecision(text);
   if (decision === null) {
     if (isRateLimitMessage(text)) return "rate_limit";
-    getLogger().info("memory.consolidate ignored an unreadable decision", {
-      "memory.space_id": payload.spaceId,
-    });
+    logUnreadableDecision(payload.spaceId, text);
     return false;
   }
   return decision;
+}
+
+function logConfirmTimeout(spaceId: string, timeoutMs: number, reason: string): void {
+  getLogger().warn("memory.consolidate confirmation timed out", {
+    "memory.space_id": spaceId,
+    "job.outcome": "transient",
+    "memory.timeout_ms": timeoutMs,
+    reason,
+  });
+}
+
+function logUnreadableDecision(spaceId: string, text: string): void {
+  const snippet = text.trim().slice(0, 400);
+  getLogger().info("memory.consolidate ignored an unreadable decision", {
+    "memory.space_id": spaceId,
+  });
+  getLogger().debug("memory.consolidate unreadable decision text", {
+    "memory.space_id": spaceId,
+    ...(snippet ? { "memory.decision_snippet": snippet } : {}),
+  });
+}
+
+function isConfirmAbort(error: unknown, signal: AbortSignal): boolean {
+  if (signal.aborted) return true;
+  if (error instanceof Error && error.name === "AbortError") return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /request was aborted|operation was aborted|\btimed? out\b|\btimeout\b/i.test(message);
+}
+
+async function rescheduleTimeout(
+  deps: MemoryConsolidateDeps,
+  payload: BackgroundJobPayloads["memory.consolidate"],
+  rejected: string[],
+  timedOut: number,
+): Promise<void> {
+  const delay = consolidateRetryDelay(payload.attempt);
+  getLogger().info("memory.consolidate will retry a timed-out confirmation", {
+    "memory.space_id": payload.spaceId,
+    "memory.retry_in_ms": delay,
+    "memory.timed_out": timedOut,
+  });
+  await enqueueContinuation(
+    deps,
+    payload,
+    {
+      ...(payload.afterId ? { afterId: payload.afterId } : {}),
+      ...(payload.carryIds?.length ? { carryIds: payload.carryIds } : {}),
+      rejected,
+      attempt: payload.attempt + 1,
+    },
+    new Date(Date.now() + delay),
+  );
+}
+
+function consolidateRetryDelay(attempt: number): number {
+  return Math.min(15 * 60_000, 15_000 * 2 ** Math.min(attempt, 6));
 }
 
 async function rescheduleRateLimit(
@@ -801,7 +976,7 @@ async function rescheduleRateLimit(
     });
     return;
   }
-  const delay = Math.min(15 * 60_000, 15_000 * 2 ** Math.min(payload.attempt, 6));
+  const delay = consolidateRetryDelay(payload.attempt);
   getLogger().info("memory.consolidate rate limited", {
     "memory.space_id": payload.spaceId,
     "memory.retry_in_ms": delay,

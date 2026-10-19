@@ -17,7 +17,7 @@ import { scheduleComputerSleep, sleepComputerIfIdle } from "./computer-idle.js";
 import { performComputerUpdate } from "./computer-update.js";
 import type { createRunExecutor } from "./executor.js";
 import { compactHistory } from "./history-compaction.js";
-import { consolidateMemoryGraph } from "./memory-consolidate.js";
+import { consolidateMemoryGraph, MemoryConsolidatePermanentError } from "./memory-consolidate.js";
 import { loadNeo4jConsolidationSpaces } from "./memory-consolidate-backfill.js";
 import { maybeScheduleDreamConsolidation, sweepDreamConsolidation } from "./memory-dream.js";
 import { extractMemoryGraph } from "./memory-extract.js";
@@ -172,23 +172,32 @@ export function createBackgroundJobHandlers(deps: {
         getLogger().info("memory.consolidate skipped: dream mode is off");
         return;
       }
-      await consolidateMemoryGraph(
-        {
-          runtime: deps.runtime,
-          prisma: deps.prisma,
-          jobs: deps.jobs,
-          ...(deps.executor.resolveModel ? { resolveModel: deps.executor.resolveModel } : {}),
-          ...(deps.executor.resolveConnectedModel
-            ? { resolveConnectedModel: deps.executor.resolveConnectedModel }
-            : {}),
-          ...(deps.deploymentModelKey ? { deploymentModelKey: deps.deploymentModelKey } : {}),
-          ...(deps.deploymentModelConfigured !== undefined
-            ? { deploymentModelConfigured: deps.deploymentModelConfigured }
-            : {}),
-        },
-        payload,
-        provider,
-      );
+      try {
+        await consolidateMemoryGraph(
+          {
+            runtime: deps.runtime,
+            prisma: deps.prisma,
+            jobs: deps.jobs,
+            ...(deps.executor.resolveModel ? { resolveModel: deps.executor.resolveModel } : {}),
+            ...(deps.executor.resolveConnectedModel
+              ? { resolveConnectedModel: deps.executor.resolveConnectedModel }
+              : {}),
+            ...(deps.deploymentModelKey ? { deploymentModelKey: deps.deploymentModelKey } : {}),
+            ...(deps.deploymentModelConfigured !== undefined
+              ? { deploymentModelConfigured: deps.deploymentModelConfigured }
+              : {}),
+          },
+          payload,
+          provider,
+        );
+      } catch (error) {
+        if (!(error instanceof MemoryConsolidatePermanentError)) throw error;
+        getLogger().error("memory.consolidate stopped", {
+          "memory.space_id": payload.spaceId,
+          "job.outcome": "permanent",
+          reason: error.message,
+        });
+      }
     },
     "history.compact": async (payload) => {
       // Retrieval policies use stored context without paid message-count compaction.

@@ -1328,6 +1328,10 @@ msgstr ""
 msgid "Consolidation reasoning"
 msgstr ""
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Consolidation timeout (ms)"
+msgstr ""
+
 #: src/pages/ModelSettingsOverlay.tsx
 #: src/pages/Onboarding.tsx
 msgid "Context limit"

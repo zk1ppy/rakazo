@@ -304,8 +304,12 @@ export function Neo4jExtractionSettings({
   const [consolidateMaxTokens, setConsolidateMaxTokens] = useState(
     config.settings.consolidateMaxOutputTokens ?? "",
   );
+  const [consolidateTimeout, setConsolidateTimeout] = useState(
+    config.settings.consolidateTimeoutMs ?? "",
+  );
   const thinkingId = useId();
   const tokensId = useId();
+  const timeoutId = useId();
 
   useEffect(() => {
     setExtract(neo4jExtractEnabled(config.settings));
@@ -314,6 +318,7 @@ export function Neo4jExtractionSettings({
     setModelKey(extractionModelKey(config.settings));
     setConsolidateThinking(config.settings.consolidateThinkingLevel || "low");
     setConsolidateMaxTokens(config.settings.consolidateMaxOutputTokens ?? "");
+    setConsolidateTimeout(config.settings.consolidateTimeoutMs ?? "");
   }, [config.settings]);
 
   async function save(
@@ -323,6 +328,7 @@ export function Neo4jExtractionSettings({
     nextDream: boolean,
     nextThinking = consolidateThinking,
     nextMaxTokens = consolidateMaxTokens,
+    nextTimeout = consolidateTimeout,
   ) {
     return onUpdateExtraction({
       extract: nextExtract,
@@ -331,6 +337,7 @@ export function Neo4jExtractionSettings({
       ...extractionModelPatch(nextModel),
       consolidateThinkingLevel: nextThinking === "low" ? "" : nextThinking,
       consolidateMaxOutputTokens: nextMaxTokens.trim(),
+      consolidateTimeoutMs: nextTimeout.trim(),
     });
   }
 
@@ -458,6 +465,26 @@ export function Neo4jExtractionSettings({
             });
           }}
           placeholder="32768"
+          autoComplete="off"
+        />
+      </Field>
+      <Field className="mt-4">
+        <FieldLabel htmlFor={timeoutId}>
+          <Trans>Consolidation timeout (ms)</Trans>
+        </FieldLabel>
+        <Input
+          id={timeoutId}
+          value={consolidateTimeout}
+          disabled={busy}
+          inputMode="numeric"
+          onChange={(event) => setConsolidateTimeout(event.target.value)}
+          onBlur={() => {
+            if (consolidateTimeout.trim() === (config.settings.consolidateTimeoutMs ?? "")) return;
+            void save(extract, chunkSize, modelKey, dream).then((ok) => {
+              if (!ok) setConsolidateTimeout(config.settings.consolidateTimeoutMs ?? "");
+            });
+          }}
+          placeholder="180000"
           autoComplete="off"
         />
       </Field>

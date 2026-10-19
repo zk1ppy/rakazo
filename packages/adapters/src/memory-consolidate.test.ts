@@ -6,13 +6,17 @@ import type {
 } from "@rakazo/adapter-kit";
 import { TransientModelError } from "@rakazo/adapter-kit";
 import type { PrismaClient } from "@rakazo/db";
+import { createLogger, createTestSink, getLogger, installLogger } from "@rakazo/logging";
 import { describe, expect, it, vi } from "vitest";
 import type { MemoryConsolidateDeps, MemoryConsolidateStore } from "./memory-consolidate.js";
 import {
+  assertConsolidateTimeoutMs,
   classifyConsolidationPair,
   consolidateMemoryGraph,
   DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
   DEFAULT_CONSOLIDATE_THINKING_LEVEL,
+  DEFAULT_CONSOLIDATE_TIMEOUT_MS,
+  MAX_CONSOLIDATE_ATTEMPTS,
   MAX_CONSOLIDATE_LLM_CALLS,
   memoryConsolidatePrompt,
   parseConsolidationDecision,
@@ -298,6 +302,11 @@ describe("consolidation decisions", () => {
       same: true,
       type: null,
     });
+    expect(
+      parseConsolidationTypeDecision(
+        '<reasoning>{"same":"false"}</reasoning>\n{"same":"true","type":"Object"}',
+      ),
+    ).toEqual({ same: true, type: "Object" });
   });
 
   it("refuses a merge across types, namespaces, or merely similar words", () => {
@@ -328,6 +337,11 @@ describe("consolidation decisions", () => {
     expect(parseConsolidationDecision('{"same":false}')).toBe(false);
     expect(parseConsolidationDecision('<think>{"same":true}</think>\n{"same":false}')).toBe(false);
     expect(parseConsolidationDecision("maybe")).toBeNull();
+    expect(parseConsolidationDecision('{"same":"true"}')).toBe(true);
+    expect(parseConsolidationDecision('{"same":" no "}')).toBe(false);
+    expect(parseConsolidationDecision('{"decision":{"same":"yes"}}')).toBe(true);
+    expect(parseConsolidationDecision('<think>still comparing\n{"same":"false"}')).toBe(false);
+    expect(parseConsolidationDecision('<think>{"same":true}</think>')).toBe(true);
   });
 });
 
@@ -643,25 +657,33 @@ describe("consolidateMemoryGraph", () => {
 
   it("reads consolidate model settings and falls back when they are blank or invalid", () => {
     expect(DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS).toBe(REASONING_MODEL_MAX_TOKENS);
+    expect(DEFAULT_CONSOLIDATE_TIMEOUT_MS).toBe(180_000);
     expect(readConsolidateModelSettings({})).toEqual({
       thinkingLevel: DEFAULT_CONSOLIDATE_THINKING_LEVEL,
       maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
+      timeoutMs: DEFAULT_CONSOLIDATE_TIMEOUT_MS,
     });
     expect(
       readConsolidateModelSettings({
         consolidateThinkingLevel: " minimal ",
         consolidateMaxOutputTokens: "2048",
+        consolidateTimeoutMs: " 180000 ",
       }),
-    ).toEqual({ thinkingLevel: "minimal", maxOutputTokens: 2048 });
+    ).toEqual({ thinkingLevel: "minimal", maxOutputTokens: 2048, timeoutMs: 180_000 });
     expect(
       readConsolidateModelSettings({
         consolidateThinkingLevel: "turbo",
         consolidateMaxOutputTokens: "4",
+        consolidateTimeoutMs: "1000",
       }),
     ).toEqual({
       thinkingLevel: DEFAULT_CONSOLIDATE_THINKING_LEVEL,
       maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
+      timeoutMs: DEFAULT_CONSOLIDATE_TIMEOUT_MS,
     });
+    expect(assertConsolidateTimeoutMs("")).toBeUndefined();
+    expect(assertConsolidateTimeoutMs("180000")).toBe("180000");
+    expect(() => assertConsolidateTimeoutMs("4")).toThrow(/consolidateTimeoutMs/);
   });
 
   it("carries a short name forward when the page is full", async () => {
@@ -700,5 +722,151 @@ describe("consolidateMemoryGraph", () => {
     if (job?.name !== "memory.consolidate") throw new Error("expected memory.consolidate");
     expect(job.payload.automatic).toBe(true);
     expect(job.payload.scheduleGeneration).toBe(1);
+  });
+
+  it("continues the page when one confirmation is aborted and retries only that pair", async () => {
+    const calls: string[] = [];
+    const run: AgentRuntime["run"] = async function* (request, context) {
+      calls.push(request.prompt);
+      if (calls.length === 2) {
+        await new Promise<void>((resolve) => {
+          const signal = context?.signal;
+          if (!signal || signal.aborted) {
+            resolve();
+            return;
+          }
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        throw new Error("Request was aborted");
+      }
+      yield { type: "done" as const, text: '{"same":true}' };
+    };
+    const people = ["Ada", "Bea", "Cleo"].map((name) => [
+      entity({ id: `${name}-short`, name, normName: name.toLowerCase() }),
+      entity({
+        id: `${name}-full`,
+        name: `${name} Example`,
+        normName: `${name.toLowerCase()} example`,
+      }),
+    ]);
+    const store = pageStore(people.flat());
+    store.consolidateModelSettings = () => ({
+      thinkingLevel: "low",
+      maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
+      timeoutMs: 30,
+    });
+    const queue = jobs();
+    const sink = createTestSink();
+    const previousLogger = getLogger();
+    installLogger(createLogger({ service: "test", sinks: [sink] }));
+    try {
+      await consolidateMemoryGraph(deps(run, queue), payload, store);
+    } finally {
+      installLogger(previousLogger);
+    }
+    expect(calls).toHaveLength(3);
+    expect(store.merges.map((merge) => merge.dropId).sort()).toEqual(["Ada-short", "Cleo-short"]);
+    const job = queue.enqueue.mock.calls[0]?.[0];
+    expect(job?.name).toBe("memory.consolidate");
+    if (job?.name !== "memory.consolidate") throw new Error("expected memory.consolidate");
+    expect(job.payload.attempt).toBe(1);
+    expect(job.payload.afterId).toBeUndefined();
+    expect(job.payload.rejected ?? []).not.toContain("Bea-full\nBea-short");
+    expect(job.availableAt).toBeInstanceOf(Date);
+    expect(sink.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          level: "warn",
+          message: "memory.consolidate confirmation timed out",
+          "job.outcome": "transient",
+        }),
+      ]),
+    );
+  });
+
+  it("remembers a permanent model failure and still merges the next pair", async () => {
+    let calls = 0;
+    const run: AgentRuntime["run"] = async function* () {
+      calls += 1;
+      if (calls === 1) throw new Error("invalid api key");
+      yield { type: "done" as const, text: '{"same":true}' };
+    };
+    const store = pageStore([
+      entity({ id: "ada-short", name: "Ada", normName: "ada" }),
+      entity({ id: "ada-full", name: "Ada Example", normName: "ada example" }),
+      entity({ id: "bea-short", name: "Bea", normName: "bea" }),
+      entity({ id: "bea-full", name: "Bea Example", normName: "bea example" }),
+    ]);
+    const queue = jobs();
+    await consolidateMemoryGraph(deps(run, queue), payload, store);
+    expect(calls).toBe(2);
+    expect(store.merges.map((merge) => merge.dropId)).toEqual(["bea-short"]);
+    expect(queue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("does not retry a confirmation that keeps timing out", async () => {
+    const run: AgentRuntime["run"] = async function* (_request, context) {
+      await new Promise<void>((resolve) => {
+        const signal = context?.signal;
+        if (!signal || signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      throw new Error("Request was aborted");
+    };
+    const store = pageStore([
+      entity({ id: "ada-short", name: "Ada", normName: "ada" }),
+      entity({ id: "ada-full", name: "Ada Example", normName: "ada example" }),
+    ]);
+    store.consolidateModelSettings = () => ({
+      thinkingLevel: "low",
+      maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
+      timeoutMs: 20,
+    });
+    const queue = jobs();
+    await consolidateMemoryGraph(
+      deps(run, queue),
+      { ...payload, attempt: MAX_CONSOLIDATE_ATTEMPTS - 1 },
+      store,
+    );
+    expect(store.merges).toEqual([]);
+    expect(queue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("logs an unreadable decision snippet at debug and declines that pair", async () => {
+    let calls = 0;
+    const run: AgentRuntime["run"] = async function* () {
+      calls += 1;
+      yield {
+        type: "done" as const,
+        text: calls === 1 ? "not a decision" : '{"same":true}',
+      };
+    };
+    const store = pageStore([
+      entity({ id: "ada-short", name: "Ada", normName: "ada" }),
+      entity({ id: "ada-full", name: "Ada Example", normName: "ada example" }),
+      entity({ id: "bea-short", name: "Bea", normName: "bea" }),
+      entity({ id: "bea-full", name: "Bea Example", normName: "bea example" }),
+    ]);
+    const queue = jobs();
+    const sink = createTestSink();
+    const previousLogger = getLogger();
+    installLogger(createLogger({ service: "test", level: "debug", sinks: [sink] }));
+    try {
+      await consolidateMemoryGraph(deps(run, queue), payload, store);
+    } finally {
+      installLogger(previousLogger);
+    }
+    expect(store.merges.map((merge) => merge.dropId)).toEqual(["bea-short"]);
+    const debug = sink.events.find(
+      (event) => event.message === "memory.consolidate unreadable decision text",
+    );
+    expect(debug).toMatchObject({
+      level: "debug",
+      "memory.decision_snippet": "not a decision",
+    });
+    expect(queue.enqueue).not.toHaveBeenCalled();
   });
 });

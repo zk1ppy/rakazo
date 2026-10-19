@@ -49,6 +49,7 @@ test("dream mode is a Space memory switch and stays off until turned on", async 
   await expect(memory.getByRole("switch", { name: "Extract entities" })).toBeChecked();
   await expect(memory.getByText("Consolidation reasoning")).toBeVisible();
   await expect(memory.getByText("Consolidation output tokens")).toBeVisible();
+  await expect(memory.getByText("Consolidation timeout (ms)")).toBeVisible();
 
   const update = page.waitForRequest("**/rpc/memory/updateNeo4jExtraction");
   await dream.click();
@@ -56,6 +57,6 @@ test("dream mode is a Space memory switch and stays off until turned on", async 
   const sent = request.postDataJSON() as { json?: { dream?: boolean; extract?: boolean } };
   expect(sent.json).toMatchObject({ dream: true, extract: true });
   await expect(dream).toBeChecked();
-  await dream.scrollIntoViewIfNeeded();
+  await memory.getByText("Consolidation timeout (ms)").scrollIntoViewIfNeeded();
   await captureScreenshot(page, testInfo, "dream-mode-on");
 });

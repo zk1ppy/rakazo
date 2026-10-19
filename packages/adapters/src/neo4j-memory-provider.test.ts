@@ -256,12 +256,14 @@ describe("Neo4jMemoryProvider", () => {
         username: "neo4j",
         consolidateThinkingLevel: " minimal ",
         consolidateMaxOutputTokens: "2048",
+        consolidateTimeoutMs: " 180000 ",
       },
       publicHost,
     );
     expect(classified).toMatchObject({
       consolidateThinkingLevel: "minimal",
       consolidateMaxOutputTokens: "2048",
+      consolidateTimeoutMs: "180000",
     });
     await expect(
       classifyNeo4jConnectionSettings(
@@ -273,6 +275,16 @@ describe("Neo4jMemoryProvider", () => {
         publicHost,
       ),
     ).rejects.toThrow(/consolidateMaxOutputTokens/);
+    await expect(
+      classifyNeo4jConnectionSettings(
+        {
+          uri: "neo4j+s://db.example.test",
+          username: "neo4j",
+          consolidateTimeoutMs: "1000",
+        },
+        publicHost,
+      ),
+    ).rejects.toThrow(/consolidateTimeoutMs/);
   });
 
   it("refuses a private endpoint before connecting when the caller is not the owner", async () => {

@@ -603,6 +603,7 @@ describe("updateNeo4jExtraction", () => {
       extract: true,
       consolidateThinkingLevel: " minimal ",
       consolidateMaxOutputTokens: "2048",
+      consolidateTimeoutMs: " 180000 ",
     });
     expect(secretCreate).not.toHaveBeenCalled();
     expect(update).toHaveBeenCalledWith({
@@ -612,12 +613,16 @@ describe("updateNeo4jExtraction", () => {
           ...stored,
           consolidateThinkingLevel: "minimal",
           consolidateMaxOutputTokens: "2048",
+          consolidateTimeoutMs: "180000",
         },
       },
     });
     await expect(
       updateNeo4jExtraction(deps, actor, { extract: true, consolidateMaxOutputTokens: "4" }),
     ).rejects.toThrow(/consolidateMaxOutputTokens/);
+    await expect(
+      updateNeo4jExtraction(deps, actor, { extract: true, consolidateTimeoutMs: "1000" }),
+    ).rejects.toThrow(/consolidateTimeoutMs/);
   });
 
   it("stores dream mode without dropping extraction settings, and leaves it when omitted", async () => {

@@ -1328,6 +1328,10 @@ msgstr "Consolidation output tokens"
 msgid "Consolidation reasoning"
 msgstr "Consolidation reasoning"
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Consolidation timeout (ms)"
+msgstr "Consolidation timeout (ms)"
+
 #: src/pages/ModelSettingsOverlay.tsx
 #: src/pages/Onboarding.tsx
 msgid "Context limit"
