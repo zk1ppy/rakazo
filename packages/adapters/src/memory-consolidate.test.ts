@@ -680,6 +680,25 @@ describe("consolidateMemoryGraph", () => {
     if (job?.name !== "memory.consolidate") throw new Error("expected memory.consolidate");
     expect(job.payload.afterId).toBe("nicolas");
     expect(job.payload.carryIds).toEqual(["nicolas"]);
+    expect(job.payload.automatic).toBeUndefined();
     expect(store.merges).toEqual([]);
+  });
+
+  it("keeps an automatic run automatic when it reschedules", async () => {
+    const store = pageStore([entity({ id: "nicolas" })], {
+      pageFull: true,
+      pageIds: ["nicolas"],
+    });
+    const queue = jobs();
+    await consolidateMemoryGraph(
+      deps(async function* () {}, queue),
+      { ...payload, automatic: true },
+      store,
+    );
+    const job = queue.enqueue.mock.calls[0]?.[0];
+    expect(job?.name).toBe("memory.consolidate");
+    if (job?.name !== "memory.consolidate") throw new Error("expected memory.consolidate");
+    expect(job.payload.automatic).toBe(true);
+    expect(job.payload.scheduleGeneration).toBe(1);
   });
 });

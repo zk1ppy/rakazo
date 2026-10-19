@@ -8,9 +8,10 @@ import { dispatchBackgroundJob } from "@rakazo/adapter-kit";
 import { isTooManyDatabaseConnections } from "@rakazo/db";
 import { getLogger, runCorrelatedJob, unwrapJobPayload, wrapJobPayload } from "@rakazo/logging";
 import type { Runner, WorkerUtils } from "graphile-worker";
-import { makeWorkerUtils, run } from "graphile-worker";
+import { makeWorkerUtils, parseCronItems, run } from "graphile-worker";
 import type { Pool } from "pg";
 import { recordHistoryCompactAttemptsExhausted } from "./history-compaction.js";
+import { DREAM_CRON_ITEM } from "./memory-dream.js";
 
 // Share the caller's pg.Pool instead of opening a separate connectionString-based
 // pool per graphile-worker component: three independent pools per worker process
@@ -142,6 +143,7 @@ export class GraphileJobWorkerHost implements JobWorkerHost {
       concurrency: this.options.concurrency ?? 4,
       pollInterval: this.options.pollInterval ?? 500,
       noHandleSignals: this.options.noHandleSignals,
+      parsedCronItems: parseCronItems([DREAM_CRON_ITEM]),
       taskList,
     });
     runner.events.on("job:failed", ({ job, error }) => {

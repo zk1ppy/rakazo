@@ -20,7 +20,12 @@ import {
 } from "../../lib/model-catalog";
 import { rpc } from "../../lib/rpc";
 import type { Neo4jSettingsFieldError } from "./neo4j-settings";
-import { NEO4J_URI_PLACEHOLDER, neo4jConnectionDraft, neo4jExtractEnabled } from "./neo4j-settings";
+import {
+  NEO4J_URI_PLACEHOLDER,
+  neo4jConnectionDraft,
+  neo4jDreamEnabled,
+  neo4jExtractEnabled,
+} from "./neo4j-settings";
 import type { MemoryProviderSettingsFormProps, Neo4jExtractionUpdate } from "./registry";
 
 const CONSOLIDATE_THINKING_LEVELS: ThinkingLevel[] = [
@@ -285,10 +290,12 @@ export function Neo4jExtractionSettings({
   onUpdateExtraction: (input: Neo4jExtractionUpdate) => Promise<boolean>;
 }) {
   const extractId = useId();
+  const dreamId = useId();
   const chunkId = useId();
   const modelSelectId = useId();
   const modelChoices = useExtractionModelChoices();
   const [extract, setExtract] = useState(() => neo4jExtractEnabled(config.settings));
+  const [dream, setDream] = useState(() => neo4jDreamEnabled(config.settings));
   const [chunkSize, setChunkSize] = useState(config.settings.maxChunkChars ?? "");
   const [modelKey, setModelKey] = useState(() => extractionModelKey(config.settings));
   const [consolidateThinking, setConsolidateThinking] = useState(
@@ -302,6 +309,7 @@ export function Neo4jExtractionSettings({
 
   useEffect(() => {
     setExtract(neo4jExtractEnabled(config.settings));
+    setDream(neo4jDreamEnabled(config.settings));
     setChunkSize(config.settings.maxChunkChars ?? "");
     setModelKey(extractionModelKey(config.settings));
     setConsolidateThinking(config.settings.consolidateThinkingLevel || "low");
@@ -312,12 +320,14 @@ export function Neo4jExtractionSettings({
     nextExtract: boolean,
     nextChunk: string,
     nextModel: string,
+    nextDream: boolean,
     nextThinking = consolidateThinking,
     nextMaxTokens = consolidateMaxTokens,
   ) {
     return onUpdateExtraction({
       extract: nextExtract,
       maxChunkChars: nextChunk,
+      dream: nextDream,
       ...extractionModelPatch(nextModel),
       consolidateThinkingLevel: nextThinking === "low" ? "" : nextThinking,
       consolidateMaxOutputTokens: nextMaxTokens.trim(),
@@ -335,13 +345,32 @@ export function Neo4jExtractionSettings({
           onCheckedChange={(checked) => {
             const previous = extract;
             setExtract(checked);
-            void save(checked, chunkSize, modelKey).then((ok) => {
+            void save(checked, chunkSize, modelKey, dream).then((ok) => {
               if (!ok) setExtract(previous);
             });
           }}
         />
         <Label htmlFor={extractId} className="text-[14px] font-normal text-foreground/75">
           <Trans>Extract entities</Trans>
+        </Label>
+      </div>
+      <div className="mt-4 flex items-start gap-3">
+        <Switch
+          id={dreamId}
+          data-testid="dream-mode-toggle"
+          className="mt-0.5"
+          checked={dream}
+          disabled={busy}
+          onCheckedChange={(checked) => {
+            const previous = dream;
+            setDream(checked);
+            void save(extract, chunkSize, modelKey, checked).then((ok) => {
+              if (!ok) setDream(previous);
+            });
+          }}
+        />
+        <Label htmlFor={dreamId} className="text-[14px] font-normal text-foreground/75">
+          <Trans>Dream mode</Trans>
         </Label>
       </div>
       {extract ? (
@@ -357,7 +386,7 @@ export function Neo4jExtractionSettings({
             onChange={(event) => setChunkSize(event.target.value)}
             onBlur={() => {
               if (chunkSize.trim() === (config.settings.maxChunkChars ?? "")) return;
-              void save(extract, chunkSize, modelKey).then((ok) => {
+              void save(extract, chunkSize, modelKey, dream).then((ok) => {
                 if (!ok) setChunkSize(config.settings.maxChunkChars ?? "");
               });
             }}
@@ -375,7 +404,7 @@ export function Neo4jExtractionSettings({
           onChange={(next) => {
             const previous = modelKey;
             setModelKey(next);
-            void save(extract, chunkSize, next).then((ok) => {
+            void save(extract, chunkSize, next, dream).then((ok) => {
               if (!ok) setModelKey(previous);
             });
           }}
@@ -394,9 +423,11 @@ export function Neo4jExtractionSettings({
             const next = event.target.value;
             const previous = consolidateThinking;
             setConsolidateThinking(next);
-            void save(extract, chunkSize, modelKey, next, consolidateMaxTokens).then((ok) => {
-              if (!ok) setConsolidateThinking(previous);
-            });
+            void save(extract, chunkSize, modelKey, dream, next, consolidateMaxTokens).then(
+              (ok) => {
+                if (!ok) setConsolidateThinking(previous);
+              },
+            );
           }}
         >
           {CONSOLIDATE_THINKING_LEVELS.map((level) => (
@@ -422,7 +453,7 @@ export function Neo4jExtractionSettings({
             ) {
               return;
             }
-            void save(extract, chunkSize, modelKey).then((ok) => {
+            void save(extract, chunkSize, modelKey, dream).then((ok) => {
               if (!ok) setConsolidateMaxTokens(config.settings.consolidateMaxOutputTokens ?? "");
             });
           }}

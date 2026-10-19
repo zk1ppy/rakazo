@@ -2174,6 +2174,10 @@ msgstr "Habilidad en borrador"
 msgid "Drag, drop, or paste an image"
 msgstr "Arrastra, suelta o pega una imagen"
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Dream mode"
+msgstr ""
+
 #: src/pages/BotContextMenu.tsx
 msgid "Duplicate"
 msgstr "Duplicar"

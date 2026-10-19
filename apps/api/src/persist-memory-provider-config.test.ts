@@ -619,4 +619,64 @@ describe("updateNeo4jExtraction", () => {
       updateNeo4jExtraction(deps, actor, { extract: true, consolidateMaxOutputTokens: "4" }),
     ).rejects.toThrow(/consolidateMaxOutputTokens/);
   });
+
+  it("stores dream mode without dropping extraction settings, and leaves it when omitted", async () => {
+    const stored = {
+      uri: "bolt://localhost:7687",
+      username: "neo4j",
+      extract: "true",
+      dream: "false",
+    };
+    const { deps, update, findUnique } = makeDeps({
+      existing: { id: "cfg-1", secretId: "secret-existing" },
+    });
+    findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: stored,
+    });
+
+    await updateNeo4jExtraction(deps, actor, { extract: true, dream: true });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "cfg-1" },
+      data: { settings: { ...stored, dream: "true" } },
+    });
+
+    findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: { ...stored, dream: "true" },
+    });
+    await updateNeo4jExtraction(deps, actor, { extract: false });
+    expect(update).toHaveBeenLastCalledWith({
+      where: { id: "cfg-1" },
+      data: { settings: { ...stored, dream: "true", extract: "false" } },
+    });
+
+    findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: { ...stored, dream: "true", extract: "false" },
+    });
+    await updateNeo4jExtraction(deps, actor, {
+      extract: false,
+      consolidateThinkingLevel: "minimal",
+      consolidateMaxOutputTokens: "2048",
+    });
+    expect(update).toHaveBeenLastCalledWith({
+      where: { id: "cfg-1" },
+      data: {
+        settings: {
+          ...stored,
+          dream: "true",
+          extract: "false",
+          consolidateThinkingLevel: "minimal",
+          consolidateMaxOutputTokens: "2048",
+        },
+      },
+    });
+  });
 });

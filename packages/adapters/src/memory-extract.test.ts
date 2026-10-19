@@ -345,7 +345,7 @@ describe("extractMemoryGraph", () => {
     const pending = extractMemoryGraph(deps(run), payload({ maxChunkChars: 400 }), memory);
     await vi.waitFor(() => expect(order).toEqual(["start-0"]));
     releaseFirst();
-    await pending;
+    await expect(pending).resolves.toBe(true);
     expect(order).toEqual(["start-0", "end-0", "start-1", "end-1"]);
     expect(calls).toBe(2);
     expect(run.mock.calls[0]?.[0]).toMatchObject({
@@ -627,17 +627,21 @@ describe("extractMemoryGraph", () => {
 
   it("does not call the model when extraction is off, the runtime is scripted, or text is trivial", async () => {
     const run = vi.fn();
-    await extractMemoryGraph(
-      deps(run),
-      payload(),
-      store("Ada Lovelace founded the Analytical Society in London.", { enabled: false }),
-    );
-    await extractMemoryGraph(
-      deps(run, jobs(), true),
-      payload(),
-      store("Ada Lovelace founded the Analytical Society in London."),
-    );
-    await extractMemoryGraph(deps(run), payload(), store("ok"));
+    await expect(
+      extractMemoryGraph(
+        deps(run),
+        payload(),
+        store("Ada Lovelace founded the Analytical Society in London.", { enabled: false }),
+      ),
+    ).resolves.toBe(false);
+    await expect(
+      extractMemoryGraph(
+        deps(run, jobs(), true),
+        payload(),
+        store("Ada Lovelace founded the Analytical Society in London."),
+      ),
+    ).resolves.toBe(false);
+    await expect(extractMemoryGraph(deps(run), payload(), store("ok"))).resolves.toBe(false);
     expect(run).not.toHaveBeenCalled();
   });
 

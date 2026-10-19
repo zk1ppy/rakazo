@@ -31,6 +31,7 @@ function handlers(overrides: Partial<BackgroundJobHandlers> = {}): BackgroundJob
     "cloud_agent.poll": vi.fn(async () => undefined),
     "memory.extract": vi.fn(async () => undefined),
     "memory.consolidate": vi.fn(async () => undefined),
+    "memory.dream": vi.fn(async () => undefined),
     ...overrides,
   };
 }

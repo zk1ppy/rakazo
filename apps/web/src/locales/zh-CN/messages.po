@@ -2174,6 +2174,10 @@ msgstr "技能草稿"
 msgid "Drag, drop, or paste an image"
 msgstr "拖放或粘贴图片"
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Dream mode"
+msgstr ""
+
 #: src/pages/BotContextMenu.tsx
 msgid "Duplicate"
 msgstr "复制"

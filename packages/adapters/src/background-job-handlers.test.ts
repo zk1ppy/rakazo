@@ -1,6 +1,7 @@
 import type {
   AgentHomeStore,
   AgentRuntime,
+  BackgroundJob,
   JobPublisher,
   MessagingSurface,
   SandboxProvider,
@@ -11,7 +12,9 @@ import { describe, expect, it, vi } from "vitest";
 import { createBackgroundJobHandlers } from "./background-job-handlers.js";
 import { createRunExecutor } from "./executor.js";
 import { compactHistory } from "./history-compaction.js";
+import { dreamConsolidateJobKey } from "./memory-dream.js";
 import { deliverMessagingOutbound, mirrorMessagingOutbound } from "./messaging-delivery.js";
+import { Neo4jMemoryProvider } from "./neo4j-memory-provider.js";
 import type { EncryptedSecretStore } from "./secrets.js";
 
 vi.mock("./history-compaction.js", () => ({ compactHistory: vi.fn(async () => undefined) }));
@@ -206,6 +209,160 @@ describe("createBackgroundJobHandlers", () => {
     expect(sink.events.map((event) => event.message)).toEqual([
       "memory.consolidate skipped: no memory provider",
     ]);
+  });
+
+  it("schedules one dream consolidate after an extraction write and skips it when dream mode is off", async () => {
+    class WritingNeo4j extends Neo4jMemoryProvider {
+      override async readFactText() {
+        return "Ada Lovelace founded the Analytical Society in London.";
+      }
+
+      override async applyExtraction() {}
+    }
+    const connection = {
+      uri: "bolt://127.0.0.1:7687",
+      database: "neo4j",
+      username: "neo4j",
+      password: "secret",
+      endpointTrust: "private" as const,
+    };
+    const openDriver = () => {
+      throw new Error("driver");
+    };
+    const run = vi.fn(async function* () {
+      yield {
+        type: "done" as const,
+        text: '{"entities":[{"type":"Person","name":"Ada Lovelace"}],"relations":[]}',
+      };
+    });
+    const runtime = {
+      describe: () => ({ id: "test", capabilities: { scripted: false } }),
+      run,
+    } as unknown as AgentRuntime;
+    const enqueue = vi.fn(async (_job: BackgroundJob) => undefined);
+    const jobs = { enqueue, cancel: vi.fn(), close: vi.fn() } as unknown as JobPublisher;
+    const handlersFor = (dream: boolean) =>
+      createBackgroundJobHandlers({
+        executor: {
+          resolveModel: vi.fn(async () => ({ provider: "openai", id: "gpt-test", apiKey: "k" })),
+        } as unknown as ReturnType<typeof createRunExecutor>,
+        prisma: {} as unknown as PrismaClient,
+        sandbox: {} as unknown as SandboxProvider,
+        home: {} as unknown as AgentHomeStore,
+        jobs,
+        events: {} as unknown as ThreadEvents,
+        workerId: "worker-1",
+        runtime,
+        secretStore: {} as unknown as EncryptedSecretStore,
+        memoryProviders: {
+          resolve: vi.fn(async () => ({
+            provider: new WritingNeo4j(connection, openDriver, { dream }),
+            defaultScope: "isolated" as const,
+          })),
+        },
+      });
+    const extractPayload = {
+      spaceId: "space-1",
+      userId: "user-1",
+      botId: "bot-1",
+      factId: "fact-1",
+      ns: "shared",
+      maxChunkChars: 4_000,
+      chunkIndex: 0,
+      attempt: 0,
+      scheduleGeneration: 0,
+    };
+
+    await handlersFor(false)["memory.extract"](extractPayload);
+    expect(enqueue).not.toHaveBeenCalled();
+
+    await handlersFor(true)["memory.extract"](extractPayload);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    const job = enqueue.mock.calls[0]?.[0];
+    expect(job).toMatchObject({
+      name: "memory.consolidate",
+      replaceKey: dreamConsolidateJobKey("space-1"),
+      queueName: "memory-extract",
+      payload: {
+        spaceId: "space-1",
+        userId: "user-1",
+        automatic: true,
+        attempt: 0,
+        scheduleGeneration: 0,
+      },
+    });
+    expect(job?.availableAt).toBeInstanceOf(Date);
+    expect(job).not.toHaveProperty("keepExisting");
+
+    const sink = createTestSink();
+    const previousLogger = getLogger();
+    installLogger(createLogger({ service: "test", sinks: [sink] }));
+    try {
+      await handlersFor(false)["memory.consolidate"]({
+        spaceId: "space-1",
+        userId: "user-1",
+        attempt: 0,
+        scheduleGeneration: 0,
+        automatic: true,
+      });
+    } finally {
+      installLogger(previousLogger);
+    }
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(sink.events.map((event) => event.message)).toContain(
+      "memory.consolidate skipped: dream mode is off",
+    );
+  });
+
+  it("enqueues nightly consolidation only for spaces with dream mode on", async () => {
+    const enqueue = vi.fn(async (_job: BackgroundJob) => undefined);
+    const handlers = createBackgroundJobHandlers({
+      executor: {} as unknown as ReturnType<typeof createRunExecutor>,
+      prisma: {
+        spaceMemoryConfig: {
+          findMany: vi.fn(async () => [
+            {
+              spaceId: "space-on",
+              userId: "user-on",
+              settings: {
+                uri: "neo4j+s://db.example.test",
+                username: "neo4j",
+                dream: "true",
+              },
+              secret: { ciphertext: "cipher", id: "secret-on" },
+            },
+            {
+              spaceId: "space-off",
+              userId: "user-off",
+              settings: {
+                uri: "neo4j+s://db.example.test",
+                username: "neo4j",
+                dream: "false",
+              },
+              secret: { ciphertext: "cipher", id: "secret-off" },
+            },
+          ]),
+        },
+      } as unknown as PrismaClient,
+      sandbox: {} as unknown as SandboxProvider,
+      home: {} as unknown as AgentHomeStore,
+      jobs: { enqueue, cancel: vi.fn(), close: vi.fn() } as unknown as JobPublisher,
+      events: {} as unknown as ThreadEvents,
+      workerId: "worker-1",
+      runtime: { run: vi.fn() } as unknown as AgentRuntime,
+      secretStore: {
+        load: vi.fn(async () => JSON.stringify({ password: "secret" })),
+      } as unknown as EncryptedSecretStore,
+      memoryProviders: { resolve: vi.fn(async () => null) },
+    });
+
+    await handlers["memory.dream"]({});
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue.mock.calls[0]?.[0]).toMatchObject({
+      replaceKey: dreamConsolidateJobKey("space-on"),
+      keepExisting: true,
+      payload: { spaceId: "space-on", automatic: true },
+    });
   });
 
   it("resolves the deployment model when no user credential is configured", async () => {

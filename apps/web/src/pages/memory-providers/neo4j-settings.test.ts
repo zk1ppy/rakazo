@@ -5,6 +5,7 @@ import {
   NEO4J_URI_PLACEHOLDER,
   neo4jConnectedHost,
   neo4jConnectionDraft,
+  neo4jDreamEnabled,
   neo4jExtractEnabled,
   neo4jUriError,
 } from "./neo4j-settings";
@@ -21,6 +22,10 @@ describe("Neo4j memory provider settings", () => {
       "utf8",
     );
     expect(form).toContain('const [uri, setUri] = useState("");');
+    expect(form.match(/<Trans>Dream mode<\/Trans>/g)).toEqual(["<Trans>Dream mode</Trans>"]);
+    expect(form.indexOf("export function Neo4jExtractionSettings")).toBeLessThan(
+      form.indexOf("<Trans>Dream mode</Trans>"),
+    );
     expect(form).toContain("placeholder={NEO4J_URI_PLACEHOLDER}");
     expect(form).toContain("required");
     expect(NEO4J_URI_PLACEHOLDER).toBe("bolt://localhost:7687");
@@ -79,6 +84,9 @@ describe("Neo4j memory provider settings", () => {
 
   it("persists extraction only when the form sets it", () => {
     expect(neo4jExtractEnabled({})).toBe(true);
+    expect(neo4jDreamEnabled({})).toBe(false);
+    expect(neo4jDreamEnabled({ dream: "true" })).toBe(true);
+    expect(neo4jDreamEnabled({ dream: "false" })).toBe(false);
     expect(neo4jExtractEnabled({ extract: "false" })).toBe(false);
     expect(neo4jExtractEnabled({ extract: "off" })).toBe(false);
 

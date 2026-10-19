@@ -18,6 +18,12 @@ export function neo4jExtractEnabled(settings: Record<string, string>): boolean {
   return value !== "false" && value !== "off" && value !== "0";
 }
 
+/** Absent stays off. Automatic consolidation is not the default. */
+export function neo4jDreamEnabled(settings: Record<string, string>): boolean {
+  const value = settings.dream?.trim().toLowerCase();
+  return value === "true" || value === "on" || value === "1";
+}
+
 export function neo4jConnectionDraft(input: {
   uri: string;
   database: string;

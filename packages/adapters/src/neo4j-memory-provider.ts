@@ -21,6 +21,7 @@ import {
   assertConsolidateThinkingLevel,
   readConsolidateModelSettings,
 } from "./memory-consolidate.js";
+import { neo4jDreamEnabled } from "./memory-dream.js";
 import type {
   ExtractedEntityWrite,
   ExtractedRelationWrite,
@@ -237,6 +238,9 @@ export async function classifyNeo4jConnectionSettings(
   if (settings.extract?.trim()) {
     classified.extract = neo4jExtractionEnabled(settings) ? "true" : "false";
   }
+  if (settings.dream?.trim()) {
+    classified.dream = neo4jDreamEnabled(settings) ? "true" : "false";
+  }
   const maxChunkChars = assertNeo4jMaxChunkChars(settings.maxChunkChars);
   if (maxChunkChars) classified.maxChunkChars = maxChunkChars;
   const extractionModel = readNeo4jExtractionModel(settings);
@@ -313,6 +317,7 @@ export function createNeo4jProvider(
     {
       jobs: deps?.jobs,
       extract: neo4jExtractionEnabled(settings),
+      dream: neo4jDreamEnabled(settings),
       maxChunkChars: neo4jMaxChunkChars(settings),
       extractionModel: readNeo4jExtractionModel(settings),
       consolidateModelSettings: readConsolidateModelSettings(settings),
@@ -448,6 +453,8 @@ export function acquireNeo4jMemoryDriver(
 export interface Neo4jProviderOptions {
   jobs?: JobPublisher;
   extract?: boolean;
+  /** Dream mode. Absent stays off, unlike extraction. */
+  dream?: boolean;
   maxChunkChars?: number;
   extractionModel?: Neo4jExtractionModel | null;
   consolidateModelSettings?: ConsolidateModelSettings;
@@ -457,6 +464,7 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
   private driverTask?: Promise<Neo4jMemoryDriver>;
   private readonly jobs?: JobPublisher;
   private readonly extractEnabled: boolean;
+  private readonly dreamMode: boolean;
   private readonly maxChunkChars: number;
   private readonly pinnedModel: Neo4jExtractionModel | null;
   private readonly consolidateSettings: ConsolidateModelSettings;
@@ -468,6 +476,7 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
   ) {
     this.jobs = options?.jobs;
     this.extractEnabled = options?.extract ?? true;
+    this.dreamMode = options?.dream ?? false;
     this.maxChunkChars = options?.maxChunkChars ?? neo4jMaxChunkChars({});
     this.pinnedModel = options?.extractionModel ?? null;
     this.consolidateSettings =
@@ -476,6 +485,10 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
 
   extractionEnabled(): boolean {
     return this.extractEnabled;
+  }
+
+  dreamEnabled(): boolean {
+    return this.dreamMode;
   }
 
   extractionModel(): Neo4jExtractionModel | null {

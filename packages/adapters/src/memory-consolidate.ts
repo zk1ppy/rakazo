@@ -848,6 +848,7 @@ async function enqueueContinuation(
         ...(next.rejected.length ? { rejected: next.rejected } : {}),
         attempt: next.attempt,
         scheduleGeneration,
+        ...(payload.automatic ? { automatic: true } : {}),
       },
       availableAt,
     ),
