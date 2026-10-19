@@ -43,6 +43,15 @@ describe("parseBackfillExtractArgs", () => {
     ).toEqual({ spaceId: "space-9", limit: 25, dryRun: true });
   });
 
+  it("skips a pnpm -- separator", () => {
+    expect(parseBackfillExtractArgs(["--", "--dry-run"])).toEqual({ limit: 100, dryRun: true });
+    expect(parseBackfillExtractArgs(["--", "--space", "X", "--limit", "10"])).toEqual({
+      spaceId: "X",
+      limit: 10,
+      dryRun: false,
+    });
+  });
+
   it("rejects an unknown flag and a limit outside 1 to 5000", () => {
     expect(() => parseBackfillExtractArgs(["--nope"])).toThrow(/Usage/);
     expect(() => parseBackfillExtractArgs(["--limit", "0"])).toThrow(/--limit/);
