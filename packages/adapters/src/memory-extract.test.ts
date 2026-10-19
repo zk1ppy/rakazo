@@ -183,7 +183,8 @@ describe("extractMemoryGraph", () => {
       providerRetries: 0,
       tools: [],
       usageOperationKind: "retrieval",
-      model: { thinkingLevel: "off" },
+      visibleOutputTokens: 1_024,
+      model: { thinkingLevel: "off", maxTokens: 1_024 },
     });
     expect(memory.applyExtraction).toHaveBeenCalledTimes(2);
     expect(memory.applyExtraction.mock.calls[0]?.[0].entities[0].type).toBe("Person");
@@ -212,7 +213,7 @@ describe("extractMemoryGraph", () => {
     expect(JSON.stringify(job.payload)).not.toContain("Lovelace");
   });
 
-  it("treats a non-JSON rate-limit reply as a reschedule and ignores permanent errors", async () => {
+  it("reschedules a non-JSON rate-limit reply and fails a permanent model error", async () => {
     const limited = jobs();
     await extractMemoryGraph(
       deps(done("429 too many requests"), limited),
@@ -227,7 +228,7 @@ describe("extractMemoryGraph", () => {
 
     const permanent = jobs();
     const run = vi.fn<AgentRuntime["run"]>(() => {
-      throw new Error("invalid api key");
+      throw new Error("The model hit its output limit before writing a response.");
     });
     await expect(
       extractMemoryGraph(
@@ -235,7 +236,7 @@ describe("extractMemoryGraph", () => {
         payload(),
         store("Ada Lovelace founded the Analytical Society in London."),
       ),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow("output limit");
     expect(permanent.enqueue).not.toHaveBeenCalled();
     expect(run).toHaveBeenCalledTimes(1);
   });

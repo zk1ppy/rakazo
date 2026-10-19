@@ -89,6 +89,61 @@ export function billedPromptTokens(usage: {
  */
 export const REASONING_MODEL_MAX_TOKENS = 32_768;
 
+/** Visible JSON budget for one memory.extract chunk. */
+export const EXTRACT_ANSWER_TOKENS = 1_024;
+
+/**
+ * Extra completion tokens when reasoning and the answer share one ceiling.
+ * Matches a short thinking pass; the model cap still wins.
+ */
+export const EXTRACT_REASONING_HEADROOM = 4_096;
+
+/** Pi thinking budgets. xhigh and max clamp to high before the lookup. */
+const EXTRACT_THINKING_BUDGETS: Record<string, number> = {
+  minimal: 1_024,
+  low: 2_048,
+  medium: 8_192,
+  high: 16_384,
+};
+
+/**
+ * These APIs bill thinking beside the answer (Anthropic and Bedrock add a
+ * budget on top of maxTokens; Google uses a separate thinking budget). The
+ * others, including OpenAI-compatible providers, count thinking inside the
+ * same completion cap.
+ */
+const SEPARATED_THINKING_APIS = new Set([
+  "anthropic-messages",
+  "bedrock-converse-stream",
+  "google-generative-ai",
+  "google-vertex",
+]);
+
+/**
+ * Size one extraction call. Reasoning stays off when the model allows it.
+ * A shared ceiling still gets headroom, because a provider can spend the cap
+ * on thinking before any visible JSON. Separated providers keep the answer cap
+ * and add their own thinking budget.
+ */
+export function extractionCompletionTokens(
+  model: { api?: string; reasoning?: boolean; maxTokens?: number },
+  thinkingLevel: string,
+  answerTokens: number = EXTRACT_ANSWER_TOKENS,
+): number {
+  const answer = Math.max(1, Math.floor(answerTokens));
+  const ceiling =
+    typeof model.maxTokens === "number" && model.maxTokens >= 1 ? model.maxTokens : undefined;
+  const cap = (total: number) => (ceiling === undefined ? total : Math.min(ceiling, total));
+  const separated = model.api !== undefined && SEPARATED_THINKING_APIS.has(model.api);
+  if (!model.reasoning || separated) return cap(answer);
+  const level = thinkingLevel === "xhigh" || thinkingLevel === "max" ? "high" : thinkingLevel;
+  const headroom =
+    level === "off"
+      ? EXTRACT_REASONING_HEADROOM
+      : (EXTRACT_THINKING_BUDGETS[level] ?? EXTRACT_REASONING_HEADROOM);
+  return cap(answer + headroom);
+}
+
 /**
  * Completions default to a modest output cap so OpenRouter-style providers do not
  * hold credit for a model card's 128k ceiling. A configured maxTokens is the escape.

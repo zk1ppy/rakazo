@@ -123,6 +123,7 @@ async function runWithModel(
   }>,
   maxImagesPerPrompt?: number,
   limits?: { contextWindow?: number; maxTokens?: number },
+  extra?: { visibleOutputTokens?: number },
 ) {
   const runtime = new PiAgentRuntime();
   for await (const _event of runtime.run(
@@ -143,6 +144,7 @@ async function runWithModel(
       },
       executeTool: vi.fn(async () => ({ ok: true })),
       resolveModel,
+      ...extra,
     },
     {
       operationId: "1",
@@ -191,6 +193,21 @@ describe("Pi agent thinking level", () => {
     const levels = await runWithModel("reasoning-model");
     expect(levels).toEqual(["medium", "medium"]);
     expect(levels.every((level) => level !== "off")).toBe(true);
+  });
+
+  it("reserves shared completion tokens when extraction turns reasoning off", async () => {
+    const levels = await runWithModel(
+      "reasoning-model",
+      "test",
+      new AbortController().signal,
+      "off",
+      undefined,
+      undefined,
+      { maxTokens: 128_000 },
+      { visibleOutputTokens: 1_024 },
+    );
+    expect(levels[0]).toBe("off");
+    expect(fakeAgentState.models[0]?.maxTokens).toBe(1_024 + 4_096);
   });
 
   it("uses a stable provider session for each bot thread", async () => {

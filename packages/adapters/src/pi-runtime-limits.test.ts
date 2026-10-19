@@ -4,6 +4,9 @@ import {
   billedPromptTokens,
   clipToolResultContent,
   clipToolResultText,
+  EXTRACT_ANSWER_TOKENS,
+  EXTRACT_REASONING_HEADROOM,
+  extractionCompletionTokens,
   modelStreamMaxRetries,
   REASONING_MODEL_MAX_TOKENS,
   resolveCompletionMaxTokens,
@@ -121,6 +124,50 @@ describe("resolveCompletionMaxTokens", () => {
     expect(resolveCompletionMaxTokens(128_000, undefined, undefined, false)).toBe(
       DEFAULT_MODEL_MAX_TOKENS,
     );
+  });
+});
+
+describe("extractionCompletionTokens", () => {
+  it("keeps the answer cap when thinking is billed separately or the model does not reason", () => {
+    expect(
+      extractionCompletionTokens(
+        { api: "anthropic-messages", reasoning: true, maxTokens: 128_000 },
+        "off",
+      ),
+    ).toBe(EXTRACT_ANSWER_TOKENS);
+    expect(
+      extractionCompletionTokens(
+        { api: "google-generative-ai", reasoning: true, maxTokens: 128_000 },
+        "low",
+      ),
+    ).toBe(EXTRACT_ANSWER_TOKENS);
+    expect(
+      extractionCompletionTokens(
+        { api: "openai-completions", reasoning: false, maxTokens: 128_000 },
+        "off",
+      ),
+    ).toBe(EXTRACT_ANSWER_TOKENS);
+  });
+
+  it("adds reasoning room when thinking shares the completion cap", () => {
+    expect(
+      extractionCompletionTokens(
+        { api: "openai-completions", reasoning: true, maxTokens: 128_000 },
+        "off",
+      ),
+    ).toBe(EXTRACT_ANSWER_TOKENS + EXTRACT_REASONING_HEADROOM);
+    expect(
+      extractionCompletionTokens(
+        { api: "openai-responses", reasoning: true, maxTokens: 128_000 },
+        "low",
+      ),
+    ).toBe(EXTRACT_ANSWER_TOKENS + 2_048);
+    expect(
+      extractionCompletionTokens(
+        { api: "openai-completions", reasoning: true, maxTokens: 2_048 },
+        "off",
+      ),
+    ).toBe(2_048);
   });
 });
 

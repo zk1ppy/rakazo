@@ -487,6 +487,13 @@ export interface AgentRunRequest {
    * Memory extraction sets this so a 429 is rescheduled by the job queue.
    */
   providerRetries?: 0;
+  /**
+   * Visible answer budget. Memory extraction sets this so a reasoning model
+   * does not spend the whole completion cap before writing JSON. The runtime
+   * keeps this as max output when the provider bills thinking separately, and
+   * adds reasoning room when thinking shares that cap.
+   */
+  visibleOutputTokens?: number;
   /** Contextual fallback when a non-silent run produces no written response. */
   emptyResponseText?: string;
   executeTool?: (

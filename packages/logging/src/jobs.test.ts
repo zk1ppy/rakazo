@@ -108,5 +108,22 @@ describe("job correlation envelope", () => {
       "job.outcome": "error",
       level: "error",
     });
+
+    await expect(
+      runCorrelatedJob({
+        name: "memory.extract",
+        payload: { factId: "fact-1" },
+        run: async () => {
+          const error = new Error("The model hit its output limit before writing a response.");
+          Object.assign(error, { jobOutcome: "permanent" });
+          throw error;
+        },
+      }),
+    ).rejects.toThrow("output limit");
+    expect(sink.events.at(-1)).toMatchObject({
+      message: "job.completed",
+      "job.outcome": "permanent",
+      level: "error",
+    });
   });
 });
