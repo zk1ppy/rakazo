@@ -83,6 +83,11 @@ export * from "./mcp-transport.js";
 export * from "./media-generation-factory.js";
 export * from "./media-generation-provider.js";
 export {
+  backfillMemoryConsolidation,
+  loadNeo4jConsolidationSpaces,
+  parseBackfillConsolidateArgs,
+} from "./memory-consolidate-backfill.js";
+export {
   assertNeo4jMaxChunkChars,
   neo4jExtractionEnabled,
   neo4jMaxChunkChars,

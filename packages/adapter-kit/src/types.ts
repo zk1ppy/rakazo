@@ -673,6 +673,23 @@ export interface BackgroundJobPayloads {
     attempt: number;
     scheduleGeneration: number;
   };
+  /**
+   * Merge duplicate entities in one space. `ns` limits the scan to one namespace.
+   * `afterId` is an exclusive entity-id cursor. `carryIds` are short names from
+   * the previous page that might match a later, more specific name. `rejected`
+   * pairs were already refused, so a follow-up does not ask the model again.
+   * attempt counts rate-limit reschedules. scheduleGeneration alternates the job key.
+   */
+  "memory.consolidate": {
+    spaceId: string;
+    userId: string;
+    ns?: string;
+    afterId?: string;
+    carryIds?: string[];
+    rejected?: string[];
+    attempt: number;
+    scheduleGeneration: number;
+  };
 }
 
 export type BackgroundJobName = keyof BackgroundJobPayloads;

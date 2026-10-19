@@ -778,6 +778,354 @@ export async function mergeExtractedNeo4jEntity(
   return id;
 }
 
+export interface Neo4jConsolidationEntity {
+  id: string;
+  ns: string;
+  type: Neo4jEntityType;
+  name: string;
+  normName: string;
+  aliases: string[];
+  aliasNorms: string[];
+  summary: string;
+  degree: number;
+  neighborIds: string[];
+  factIds: string[];
+}
+
+export interface Neo4jConsolidationList {
+  spaceId: string;
+  ns?: string;
+  limit: number;
+  /** Exclusive lower bound on entity id. Ignored when `ids` is set. */
+  afterId?: string;
+  /** Load these entities instead of the cursor page. */
+  ids?: string[];
+}
+
+const CONSOLIDATION_ENTITY_QUERY = `
+WITH e
+ORDER BY e.id
+LIMIT $limit
+OPTIONAL MATCH (e)-[:${NEO4J_ENTITY_RELATIONSHIP}]-(neighbor:Rkz:Entity {spaceId: e.spaceId, ns: e.ns})
+WITH e, [id IN collect(DISTINCT neighbor.id) WHERE id IS NOT NULL AND id <> e.id][0..24] AS neighborIds
+OPTIONAL MATCH (fact:Rkz:Fact {spaceId: e.spaceId})-[:ABOUT]->(e)
+WITH e, neighborIds, [id IN collect(DISTINCT fact.id) WHERE id IS NOT NULL][0..16] AS factIds
+RETURN e.id AS id,
+       e.ns AS ns,
+       labels(e) AS labels,
+       coalesce(e.entityType, '') AS entityType,
+       coalesce(e.name, '') AS name,
+       coalesce(e.normName, '') AS normName,
+       e.aliases AS aliases,
+       e.aliasNorms AS aliasNorms,
+       coalesce(e.summary, '') AS summary,
+       neighborIds,
+       factIds,
+       COUNT { (e)--() } AS degree
+`;
+
+/** One page of entities in a space, optionally restricted to a namespace or an id list. */
+export async function listNeo4jConsolidationEntities(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: Neo4jConsolidationList,
+  signal?: AbortSignal,
+): Promise<Neo4jConsolidationEntity[]> {
+  const byIds = Boolean(input.ids);
+  const result = await driver.run(
+    byIds
+      ? `MATCH (e:Rkz:Entity {spaceId: $spaceId})
+         WHERE e.id IN $ids AND ($ns = '' OR e.ns = $ns)
+         ${CONSOLIDATION_ENTITY_QUERY}`
+      : `MATCH (e:Rkz:Entity {spaceId: $spaceId})
+         WHERE ($ns = '' OR e.ns = $ns) AND ($afterId = '' OR e.id > $afterId)
+         ${CONSOLIDATION_ENTITY_QUERY}`,
+    {
+      spaceId: input.spaceId,
+      ns: input.ns?.trim() ?? "",
+      afterId: input.afterId?.trim() ?? "",
+      ids: input.ids ?? [],
+      limit: input.limit,
+    },
+    { database, access: "read", signal },
+  );
+  const entities: Neo4jConsolidationEntity[] = [];
+  for (const record of result.records) {
+    const entity = consolidationEntity(record);
+    if (entity) entities.push(entity);
+  }
+  return entities;
+}
+
+export type Neo4jDuplicateMergeReason = "guard" | "foreign" | "unsafe" | "leftover";
+
+export interface Neo4jDuplicateMerge {
+  spaceId: string;
+  keepId: string;
+  dropId: string;
+  type: Neo4jEntityType;
+  name: string;
+  normName: string;
+  aliases: string[];
+  aliasNorms: string[];
+  summary: string;
+  now: string;
+}
+
+export interface Neo4jDuplicateMergeResult {
+  merged: boolean;
+  reason?: Neo4jDuplicateMergeReason;
+}
+
+const HANDLED_MERGE_RELATIONSHIPS = new Set(["ABOUT", NEO4J_ENTITY_RELATIONSHIP, "FROM"]);
+const SAFE_RELATIONSHIP_TYPE = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/**
+ * Move one duplicate entity onto the canonical node, then delete it.
+ * Refuses a different type, namespace, or space. Known edges (ABOUT, RKZ_REL, FROM)
+ * keep their endpoints and properties. Any other safe relationship type is copied.
+ * An unsafe type or a cross-space edge leaves both nodes in place.
+ * A second call is a no-op once the duplicate id is gone.
+ */
+export async function mergeNeo4jDuplicateEntity(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: Neo4jDuplicateMerge,
+  signal?: AbortSignal,
+): Promise<Neo4jDuplicateMergeResult> {
+  const label = entityLabel(input.type);
+  if (input.keepId === input.dropId) return { merged: false, reason: "guard" };
+  const read: Neo4jRunOptions = { database, access: "read", signal };
+  const write: Neo4jRunOptions = { database, access: "write", signal };
+  const scope = {
+    spaceId: input.spaceId,
+    keepId: input.keepId,
+    dropId: input.dropId,
+    type: input.type,
+    types: [...NEO4J_ENTITY_TYPES],
+  };
+  const guard = await driver.run(
+    `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
+     MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})
+     WHERE keep.id <> drop.id
+       AND keep.ns = drop.ns
+       AND keep.ns IS NOT NULL
+       AND (
+         ($type IN labels(keep) AND $type IN labels(drop))
+         OR (
+           keep.entityType = $type
+           AND drop.entityType = $type
+           AND none(label IN labels(keep) WHERE label IN $types AND label <> $type)
+           AND none(label IN labels(drop) WHERE label IN $types AND label <> $type)
+         )
+       )
+     RETURN keep.id AS id`,
+    scope,
+    read,
+  );
+  if (!guard.records[0]) return { merged: false, reason: "guard" };
+
+  const foreign = await driver.run(
+    `MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})-[rel]-(other)
+     WHERE other.spaceId IS NULL OR other.spaceId <> $spaceId
+     RETURN count(rel) AS foreign`,
+    scope,
+    read,
+  );
+  if (asNumber(foreign.records[0]?.get("foreign")) > 0) {
+    return { merged: false, reason: "foreign" };
+  }
+
+  const typed = await driver.run(
+    `MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})-[rel]-()
+     RETURN DISTINCT type(rel) AS relType`,
+    scope,
+    read,
+  );
+  const relTypes = typed.records
+    .map((record) => asString(record.get("relType")))
+    .filter((relType) => relType.length > 0);
+  if (relTypes.some((relType) => !SAFE_RELATIONSHIP_TYPE.test(relType))) {
+    return { merged: false, reason: "unsafe" };
+  }
+
+  await driver.run(
+    `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
+     MATCH (src)-[rel:ABOUT]->(drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})
+     WHERE src.spaceId = $spaceId AND src <> keep AND src <> drop
+     MERGE (src)-[:ABOUT]->(keep)
+     DELETE rel`,
+    scope,
+    write,
+  );
+  await driver.run(rewireEntityRelation("out"), scope, write);
+  await driver.run(rewireEntityRelation("in"), scope, write);
+  await driver.run(rewireFrom("out"), scope, write);
+  await driver.run(rewireFrom("in"), scope, write);
+  for (const relType of relTypes) {
+    if (HANDLED_MERGE_RELATIONSHIPS.has(relType)) continue;
+    await driver.run(rewireCopiedRelationship(relType, "out"), scope, write);
+    await driver.run(rewireCopiedRelationship(relType, "in"), scope, write);
+  }
+  await driver.run(
+    `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})-[rel]-(drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})
+     DELETE rel`,
+    scope,
+    write,
+  );
+  await driver.run(
+    `MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})-[rel]-(drop)
+     DELETE rel`,
+    scope,
+    write,
+  );
+  const committed = await driver.run(
+    `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
+     MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})
+     WHERE keep.ns = drop.ns AND keep.id <> drop.id AND NOT (drop)--()
+     SET keep:${label},
+         keep.entityType = $type,
+         keep.name = $name,
+         keep.normName = $normName,
+         keep.aliases = $aliases,
+         keep.aliasNorms = $aliasNorms,
+         keep.summary = $summary,
+         keep.firstSeen = CASE
+           WHEN keep.firstSeen IS NULL THEN drop.firstSeen
+           WHEN drop.firstSeen IS NULL THEN keep.firstSeen
+           WHEN drop.firstSeen < keep.firstSeen THEN drop.firstSeen
+           ELSE keep.firstSeen
+         END,
+         keep.lastSeen = CASE
+           WHEN drop.lastSeen IS NULL AND keep.lastSeen IS NULL THEN $now
+           WHEN drop.lastSeen IS NULL THEN keep.lastSeen
+           WHEN keep.lastSeen IS NULL THEN drop.lastSeen
+           WHEN drop.lastSeen > keep.lastSeen THEN drop.lastSeen
+           ELSE keep.lastSeen
+         END
+     DELETE drop
+     RETURN keep.id AS id`,
+    {
+      ...scope,
+      name: input.name,
+      normName: input.normName,
+      aliases: input.aliases,
+      aliasNorms: input.aliasNorms,
+      summary: input.summary,
+      now: input.now,
+    },
+    write,
+  );
+  if (typeof committed.records[0]?.get("id") !== "string") {
+    return { merged: false, reason: "leftover" };
+  }
+  return { merged: true };
+}
+
+function rewireEntityRelation(direction: "in" | "out"): string {
+  const match =
+    direction === "out"
+      ? `MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})-[rel:${NEO4J_ENTITY_RELATIONSHIP}]->(other)`
+      : `MATCH (other)-[rel:${NEO4J_ENTITY_RELATIONSHIP}]->(drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})`;
+  const merge =
+    direction === "out"
+      ? `MERGE (keep)-[moved:${NEO4J_ENTITY_RELATIONSHIP} {type: coalesce(rel.type, ''), factId: coalesce(rel.factId, '')}]->(other)`
+      : `MERGE (other)-[moved:${NEO4J_ENTITY_RELATIONSHIP} {type: coalesce(rel.type, ''), factId: coalesce(rel.factId, '')}]->(keep)`;
+  return `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
+     ${match}
+     WHERE other.spaceId = $spaceId AND other <> keep AND other <> drop
+     ${merge}
+     ON CREATE SET
+       moved.validFrom = rel.validFrom,
+       moved.validTo = rel.validTo,
+       moved.createdAt = rel.createdAt,
+       moved.time = rel.time
+     ON MATCH SET
+       moved.validFrom = coalesce(moved.validFrom, rel.validFrom),
+       moved.createdAt = coalesce(moved.createdAt, rel.createdAt),
+       moved.time = coalesce(moved.time, rel.time),
+       moved.validTo = CASE
+         WHEN moved.validTo IS NULL OR rel.validTo IS NULL THEN null
+         ELSE moved.validTo
+       END
+     DELETE rel`;
+}
+
+function rewireFrom(direction: "in" | "out"): string {
+  if (direction === "out") {
+    return `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
+     MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})-[rel:FROM]->(other)
+     WHERE other.spaceId = $spaceId AND other <> keep AND other <> drop
+     MERGE (keep)-[moved:FROM]->(other)
+     ON CREATE SET moved = properties(rel)
+     DELETE rel`;
+  }
+  return `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
+     MATCH (other)-[rel:FROM]->(drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})
+     WHERE other.spaceId = $spaceId AND other <> keep AND other <> drop
+     MERGE (other)-[moved:FROM]->(keep)
+     ON CREATE SET moved = properties(rel)
+     DELETE rel`;
+}
+
+function rewireCopiedRelationship(relType: string, direction: "in" | "out"): string {
+  if (!SAFE_RELATIONSHIP_TYPE.test(relType)) {
+    throw new Error("relationship type is not safe to rewire");
+  }
+  if (direction === "out") {
+    return `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
+     MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})-[rel:${relType}]->(other)
+     WHERE other <> keep AND other <> drop
+     MERGE (keep)-[moved:${relType}]->(other)
+     ON CREATE SET moved = properties(rel)
+     DELETE rel`;
+  }
+  return `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
+     MATCH (other)-[rel:${relType}]->(drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})
+     WHERE other <> keep AND other <> drop
+     MERGE (other)-[moved:${relType}]->(keep)
+     ON CREATE SET moved = properties(rel)
+     DELETE rel`;
+}
+
+function consolidationEntity(record: {
+  get(key: string): unknown;
+}): Neo4jConsolidationEntity | null {
+  const id = asString(record.get("id")).trim();
+  const ns = asString(record.get("ns")).trim();
+  const type = consolidationType(
+    asStringList(record.get("labels")),
+    asString(record.get("entityType")),
+  );
+  if (!id || !ns || !type) return null;
+  const normName = asString(record.get("normName")).trim();
+  const name = asString(record.get("name")).trim() || normName;
+  if (!name) return null;
+  return {
+    id,
+    ns,
+    type,
+    name,
+    normName,
+    aliases: asStringList(record.get("aliases")),
+    aliasNorms: asStringList(record.get("aliasNorms")),
+    summary: asString(record.get("summary")),
+    degree: asNumber(record.get("degree")),
+    neighborIds: asStringList(record.get("neighborIds")).filter((neighborId) => neighborId !== id),
+    factIds: asStringList(record.get("factIds")),
+  };
+}
+
+function consolidationType(labels: string[], stored: string): Neo4jEntityType | null {
+  const known = labels.filter((label): label is Neo4jEntityType =>
+    (NEO4J_ENTITY_TYPES as readonly string[]).includes(label),
+  );
+  if (known.length === 1) return known[0] ?? null;
+  if (known.length > 1) return null;
+  if ((NEO4J_ENTITY_TYPES as readonly string[]).includes(stored)) return stored as Neo4jEntityType;
+  return null;
+}
+
 export async function deleteNeo4jSpace(
   driver: Neo4jMemoryDriver,
   database: string,

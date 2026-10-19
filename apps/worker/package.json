@@ -7,6 +7,7 @@
     "dev": "node ../../scripts/dev-watch.mjs src/index.ts",
     "start": "tsx src/index.ts",
     "memory:backfill-extract": "tsx src/cli/backfill-extract.ts",
+    "memory:backfill-consolidate": "tsx src/cli/backfill-consolidate.ts",
     "check": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --passWithNoTests"
   },

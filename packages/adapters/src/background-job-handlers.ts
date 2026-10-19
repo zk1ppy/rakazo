@@ -17,6 +17,7 @@ import { scheduleComputerSleep, sleepComputerIfIdle } from "./computer-idle.js";
 import { performComputerUpdate } from "./computer-update.js";
 import type { createRunExecutor } from "./executor.js";
 import { compactHistory } from "./history-compaction.js";
+import { consolidateMemoryGraph } from "./memory-consolidate.js";
 import { extractMemoryGraph } from "./memory-extract.js";
 import type { MemoryProviderResolver } from "./memory-provider-factory.js";
 import { deliverMessagingOutbound, mirrorMessagingOutbound } from "./messaging-delivery.js";
@@ -116,6 +117,35 @@ export function createBackgroundJobHandlers(deps: {
         return;
       }
       await extractMemoryGraph(
+        {
+          runtime: deps.runtime,
+          prisma: deps.prisma,
+          jobs: deps.jobs,
+          ...(deps.executor.resolveModel ? { resolveModel: deps.executor.resolveModel } : {}),
+          ...(deps.executor.resolveConnectedModel
+            ? { resolveConnectedModel: deps.executor.resolveConnectedModel }
+            : {}),
+          ...(deps.deploymentModelKey ? { deploymentModelKey: deps.deploymentModelKey } : {}),
+          ...(deps.deploymentModelConfigured !== undefined
+            ? { deploymentModelConfigured: deps.deploymentModelConfigured }
+            : {}),
+        },
+        payload,
+        provider,
+      );
+    },
+    "memory.consolidate": async (payload) => {
+      const configured = await deps.memoryProviders.resolve(payload.spaceId);
+      const provider = configured?.provider;
+      if (!(provider instanceof Neo4jMemoryProvider)) {
+        getLogger().info(
+          configured
+            ? "memory.consolidate skipped: provider is not neo4j"
+            : "memory.consolidate skipped: no memory provider",
+        );
+        return;
+      }
+      await consolidateMemoryGraph(
         {
           runtime: deps.runtime,
           prisma: deps.prisma,

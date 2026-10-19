@@ -15,6 +15,7 @@ import type {
 import { memoryExtractJob } from "@rakazo/adapter-kit";
 import { isCloudMetadataHost, isLocalMcpHost } from "@rakazo/contracts";
 import { getLogger } from "@rakazo/logging";
+import type { ConsolidationPage } from "./memory-consolidate.js";
 import type {
   ExtractedEntityWrite,
   ExtractedRelationWrite,
@@ -29,6 +30,8 @@ import {
   readNeo4jExtractionModel,
 } from "./memory-extract.js";
 import type {
+  Neo4jConsolidationEntity,
+  Neo4jDuplicateMerge,
   Neo4jMemoryConnection,
   Neo4jMemoryDriver,
   Neo4jMemoryDriverFactory,
@@ -39,8 +42,10 @@ import {
   forgetNeo4jFact,
   linkNeo4jEntities,
   linkNeo4jFactEntity,
+  listNeo4jConsolidationEntities,
   listUnextractedNeo4jFacts,
   mergeExtractedNeo4jEntity,
+  mergeNeo4jDuplicateEntity,
   openNeo4jMemoryDriver,
   purgeNeo4jChatSources,
   readNeo4jFactLearnedAt,
@@ -653,6 +658,67 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
       await this.ready(signal),
       this.connection.database,
       { spaceId, limit: input.limit, skip: input.skip },
+      signal,
+    );
+  }
+
+  async listConsolidationPage(
+    input: {
+      spaceId: string;
+      ns?: string;
+      limit: number;
+      afterId?: string;
+      carryIds?: string[];
+    },
+    signal?: AbortSignal,
+  ): Promise<ConsolidationPage> {
+    const driver = await this.ready(signal);
+    const database = this.connection.database;
+    const page = await listNeo4jConsolidationEntities(
+      driver,
+      database,
+      {
+        spaceId: input.spaceId,
+        ...(input.ns ? { ns: input.ns } : {}),
+        limit: input.limit,
+        ...(input.afterId ? { afterId: input.afterId } : {}),
+      },
+      signal,
+    );
+    const seen = new Set(page.map((entity) => entity.id));
+    const missing = (input.carryIds ?? []).filter((id) => !seen.has(id));
+    const carry = missing.length
+      ? await listNeo4jConsolidationEntities(
+          driver,
+          database,
+          {
+            spaceId: input.spaceId,
+            ...(input.ns ? { ns: input.ns } : {}),
+            ids: missing,
+            limit: missing.length,
+          },
+          signal,
+        )
+      : [];
+    const entities: Neo4jConsolidationEntity[] = [];
+    const ids = new Set<string>();
+    for (const entity of [...page, ...carry]) {
+      if (ids.has(entity.id)) continue;
+      ids.add(entity.id);
+      entities.push(entity);
+    }
+    return {
+      entities,
+      pageIds: page.map((entity) => entity.id),
+      pageFull: page.length >= input.limit,
+    };
+  }
+
+  async mergeDuplicateEntity(input: Neo4jDuplicateMerge, signal?: AbortSignal) {
+    return mergeNeo4jDuplicateEntity(
+      await this.ready(signal),
+      this.connection.database,
+      input,
       signal,
     );
   }

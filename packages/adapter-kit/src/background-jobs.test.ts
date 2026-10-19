@@ -4,8 +4,11 @@ import {
   HISTORY_COMPACT_MAX_ATTEMPTS,
   historyCompactJob,
   historyCompactJobKey,
+  MEMORY_CONSOLIDATE_MAX_ATTEMPTS,
   MEMORY_EXTRACT_MAX_ATTEMPTS,
   MEMORY_EXTRACT_QUEUE_NAME,
+  memoryConsolidateJob,
+  memoryConsolidateJobKey,
   memoryExtractJob,
   memoryExtractJobKey,
   messagingDeliverJob,
@@ -27,6 +30,7 @@ function handlers(): BackgroundJobHandlers {
     "messaging.deliver": vi.fn(async () => undefined),
     "cloud_agent.poll": vi.fn(async () => undefined),
     "memory.extract": vi.fn(async () => undefined),
+    "memory.consolidate": vi.fn(async () => undefined),
   };
 }
 
@@ -135,6 +139,37 @@ describe("memoryExtractJob", () => {
     const availableAt = new Date("2030-01-01T00:00:15.000Z");
     expect(
       memoryExtractJob({ ...payload, scheduleGeneration: 1, attempt: 1 }, availableAt).availableAt,
+    ).toBe(availableAt);
+  });
+});
+
+describe("memoryConsolidateJob", () => {
+  const payload = {
+    spaceId: "space-1",
+    userId: "user-1",
+    attempt: 0,
+    scheduleGeneration: 0,
+  };
+
+  it("shares the memory model queue and alternates its replace key", () => {
+    expect(memoryConsolidateJob(payload)).toEqual({
+      name: "memory.consolidate",
+      payload,
+      replaceKey: memoryConsolidateJobKey("space-1", undefined, 0),
+      queueName: MEMORY_EXTRACT_QUEUE_NAME,
+      maxAttempts: MEMORY_CONSOLIDATE_MAX_ATTEMPTS,
+    });
+    expect(memoryConsolidateJobKey("space-1", "shared", 0)).toBe(
+      "memory.consolidate:space-1:shared:0",
+    );
+    expect(memoryConsolidateJobKey("space-1", undefined, 1)).toBe("memory.consolidate:space-1:*:1");
+    expect(memoryConsolidateJobKey("space-1", undefined, 2)).toBe(
+      memoryConsolidateJobKey("space-1", undefined, 0),
+    );
+    const availableAt = new Date("2030-01-01T00:00:15.000Z");
+    expect(
+      memoryConsolidateJob({ ...payload, scheduleGeneration: 1, attempt: 1 }, availableAt)
+        .availableAt,
     ).toBe(availableAt);
   });
 });

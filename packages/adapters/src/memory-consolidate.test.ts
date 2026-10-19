@@ -1,0 +1,403 @@
+import type {
+  AgentRunRequest,
+  AgentRuntime,
+  BackgroundJob,
+  JobPublisher,
+} from "@rakazo/adapter-kit";
+import { TransientModelError } from "@rakazo/adapter-kit";
+import type { PrismaClient } from "@rakazo/db";
+import { describe, expect, it, vi } from "vitest";
+import type { MemoryConsolidateDeps, MemoryConsolidateStore } from "./memory-consolidate.js";
+import {
+  classifyConsolidationPair,
+  consolidateMemoryGraph,
+  MAX_CONSOLIDATE_LLM_CALLS,
+  memoryConsolidatePrompt,
+  parseConsolidationDecision,
+  planCanonicalEntity,
+} from "./memory-consolidate.js";
+import type { Neo4jConsolidationEntity, Neo4jDuplicateMerge } from "./neo4j-memory-client.js";
+
+const payload = {
+  spaceId: "space-1",
+  userId: "user-1",
+  attempt: 0,
+  scheduleGeneration: 0,
+};
+
+const model = {
+  provider: "openai",
+  id: "gpt-test",
+  apiKey: "test-key",
+} satisfies AgentRunRequest["model"];
+
+function entity(overrides: Partial<Neo4jConsolidationEntity> = {}): Neo4jConsolidationEntity {
+  return {
+    id: "nicolas",
+    ns: "shared",
+    type: "Person",
+    name: "Nicolas",
+    normName: "nicolas",
+    aliases: [],
+    aliasNorms: [],
+    summary: "",
+    degree: 1,
+    neighborIds: [],
+    factIds: [],
+    ...overrides,
+  };
+}
+
+function jobs(): JobPublisher & {
+  enqueue: ReturnType<typeof vi.fn<(job: BackgroundJob) => Promise<void>>>;
+} {
+  return {
+    enqueue: vi.fn(async () => undefined),
+    cancel: vi.fn(),
+    close: vi.fn(),
+  };
+}
+
+function pageStore(
+  entities: Neo4jConsolidationEntity[],
+  options?: { pageFull?: boolean; pageIds?: string[] },
+): MemoryConsolidateStore & {
+  merges: Neo4jDuplicateMerge[];
+} {
+  const merges: Neo4jDuplicateMerge[] = [];
+  return {
+    merges,
+    extractionModel: () => null,
+    listConsolidationPage: async () => ({
+      entities,
+      pageIds: options?.pageIds ?? entities.map((item) => item.id),
+      pageFull: options?.pageFull ?? false,
+    }),
+    mergeDuplicateEntity: async (input) => {
+      merges.push(input);
+      return { merged: true };
+    },
+  };
+}
+
+function runtime(run: AgentRuntime["run"], scripted = false): AgentRuntime {
+  return {
+    describe: () => ({ id: "test", capabilities: { scripted } }),
+    run,
+  } as unknown as AgentRuntime;
+}
+
+function deps(
+  run: AgentRuntime["run"] = async function* () {
+    yield { type: "done" as const, text: '{"same":true}' };
+  },
+  queue = jobs(),
+  scripted = false,
+): MemoryConsolidateDeps & { jobs: ReturnType<typeof jobs> } {
+  return {
+    runtime: runtime(run, scripted),
+    prisma: { usageRecord: { create: vi.fn() } } as unknown as Pick<PrismaClient, "usageRecord">,
+    jobs: queue,
+    resolveModel: vi.fn(async () => model),
+  };
+}
+
+describe("consolidation decisions", () => {
+  it("merges when alias norms overlap and keeps the more specific name", () => {
+    const full = entity({
+      id: "ada-full",
+      name: "Ada Lovelace",
+      normName: "ada lovelace",
+      aliases: ["Ada"],
+      aliasNorms: ["ada"],
+      degree: 2,
+    });
+    const short = entity({
+      id: "ada-short",
+      name: "Ada",
+      normName: "ada",
+      degree: 1,
+    });
+    expect(classifyConsolidationPair(full, short)).toEqual({ action: "merge", reason: "alias" });
+    const plan = planCanonicalEntity(full, short);
+    expect(plan.keep.id).toBe("ada-full");
+    expect(plan.drop.id).toBe("ada-short");
+    expect(plan.name).toBe("Ada Lovelace");
+    expect(plan.normName).toBe("ada lovelace");
+    expect(plan.aliases).toContain("Ada");
+    expect(plan.aliasNorms).toContain("ada");
+    expect(plan.aliasNorms).not.toContain("ada lovelace");
+  });
+
+  it("asks before merging a short name into a full name, and merges when they share a neighbor", () => {
+    const short = entity({ id: "short", neighborIds: ["paris"] });
+    const full = entity({
+      id: "full",
+      name: "Nicolas Tremblier",
+      normName: "nicolas tremblier",
+      degree: 2,
+    });
+    expect(classifyConsolidationPair(short, full)).toEqual({ action: "confirm", reason: "prefix" });
+    expect(
+      classifyConsolidationPair(short, { ...full, neighborIds: ["paris"], factIds: ["fact-1"] }),
+    ).toEqual({ action: "merge", reason: "prefix-evidence" });
+    const plan = planCanonicalEntity(short, full);
+    expect(plan.name).toBe("Nicolas Tremblier");
+    expect(plan.keep.id).toBe("full");
+    expect(plan.aliases).toEqual(["Nicolas"]);
+    expect(plan.aliasNorms).toEqual(["nicolas"]);
+  });
+
+  it("keeps the busier hub's name when its degree dominates", () => {
+    const hub = entity({ id: "hub", degree: 20 });
+    const full = entity({
+      id: "full",
+      name: "Nicolas Tremblier",
+      normName: "nicolas tremblier",
+      degree: 2,
+    });
+    const plan = planCanonicalEntity(hub, full);
+    expect(plan.name).toBe("Nicolas");
+    expect(plan.keep.id).toBe("hub");
+    expect(plan.aliases).toContain("Nicolas Tremblier");
+    expect(plan.aliasNorms).toContain("nicolas tremblier");
+  });
+
+  it("refuses a merge across types, namespaces, or merely similar words", () => {
+    const person = entity();
+    expect(
+      classifyConsolidationPair(person, entity({ id: "place", type: "Location" })).action,
+    ).toBe("skip");
+    expect(
+      classifyConsolidationPair(person, entity({ id: "other", ns: "isolated:bot" })).action,
+    ).toBe("skip");
+    expect(
+      classifyConsolidationPair(
+        entity({ id: "ann", name: "Ann", normName: "ann" }),
+        entity({ id: "annecy", name: "Annecy", normName: "annecy", type: "Location" }),
+      ).action,
+    ).toBe("skip");
+    expect(
+      classifyConsolidationPair(
+        entity({ id: "a", name: "Nicolas Tremblier", normName: "nicolas tremblier" }),
+        entity({ id: "b", name: "Nicolas Dupont", normName: "nicolas dupont" }),
+      ).action,
+    ).toBe("skip");
+  });
+
+  it("reads a same decision and ignores a reasoning preface", () => {
+    expect(parseConsolidationDecision('```json\n{"same":true}\n```')).toBe(true);
+    expect(parseConsolidationDecision('{"same":false}')).toBe(false);
+    expect(parseConsolidationDecision('<think>{"same":true}</think>\n{"same":false}')).toBe(false);
+    expect(parseConsolidationDecision("maybe")).toBeNull();
+  });
+});
+
+describe("consolidateMemoryGraph", () => {
+  it("merges overlapping alias norms without calling the model", async () => {
+    const run = vi.fn(async function* () {
+      yield { type: "done" as const, text: '{"same":true}' };
+    });
+    const store = pageStore([
+      entity({
+        id: "ada-full",
+        name: "Ada Lovelace",
+        normName: "ada lovelace",
+        aliases: ["Ada"],
+        aliasNorms: ["ada"],
+      }),
+      entity({ id: "ada-short", name: "Ada", normName: "ada" }),
+    ]);
+    await consolidateMemoryGraph(deps(run), payload, store);
+    expect(run).not.toHaveBeenCalled();
+    expect(store.merges).toHaveLength(1);
+    expect(store.merges[0]).toMatchObject({
+      spaceId: "space-1",
+      keepId: "ada-full",
+      dropId: "ada-short",
+      type: "Person",
+      name: "Ada Lovelace",
+      normName: "ada lovelace",
+    });
+    expect(store.merges[0]?.aliases).toContain("Ada");
+    expect(store.merges[0]?.aliasNorms).toContain("ada");
+  });
+
+  it("merges Nicolas into Nicolas Tremblier after one confirmation", async () => {
+    const prompts: string[] = [];
+    const run: AgentRuntime["run"] = async function* (request) {
+      prompts.push(request.prompt);
+      yield { type: "done" as const, text: '{"same": true}' };
+    };
+    const store = pageStore([
+      entity({ id: "short", summary: "Works at SDIS 68" }),
+      entity({
+        id: "full",
+        name: "Nicolas Tremblier",
+        normName: "nicolas tremblier",
+        summary: "Lives in Strasbourg",
+        degree: 2,
+        neighborIds: ["strasbourg"],
+      }),
+      entity({ id: "strasbourg", name: "Strasbourg", normName: "strasbourg", type: "Location" }),
+    ]);
+    await consolidateMemoryGraph(deps(run), payload, store);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("Nicolas Tremblier");
+    expect(prompts[0]).toContain("SDIS 68");
+    expect(store.merges).toEqual([
+      expect.objectContaining({
+        keepId: "full",
+        dropId: "short",
+        type: "Person",
+        name: "Nicolas Tremblier",
+        normName: "nicolas tremblier",
+        aliases: ["Nicolas"],
+        aliasNorms: ["nicolas"],
+      }),
+    ]);
+    const asked = memoryConsolidatePrompt(
+      entity(),
+      entity({ id: "full", name: "Nicolas Tremblier", normName: "nicolas tremblier" }),
+      new Map(),
+    );
+    expect(asked).toContain('"type":"Person"');
+  });
+
+  it("merges a prefixed name with a shared neighbor and does not call the model", async () => {
+    const run = vi.fn(async function* () {
+      yield { type: "done" as const, text: '{"same":false}' };
+    });
+    const store = pageStore([
+      entity({ id: "short", neighborIds: ["paris", "full"], factIds: ["fact-1"] }),
+      entity({
+        id: "full",
+        name: "Nicolas Tremblier",
+        normName: "nicolas tremblier",
+        neighborIds: ["paris", "short"],
+        factIds: ["fact-1"],
+      }),
+    ]);
+    await consolidateMemoryGraph(deps(run), payload, store);
+    expect(run).not.toHaveBeenCalled();
+    expect(store.merges).toHaveLength(1);
+    expect(store.merges[0]).toMatchObject({
+      keepId: "full",
+      dropId: "short",
+      name: "Nicolas Tremblier",
+    });
+  });
+
+  it("does not merge across entity types", async () => {
+    const run = vi.fn(async function* () {
+      yield { type: "done" as const, text: '{"same":true}' };
+    });
+    const store = pageStore([
+      entity({ aliasNorms: ["nicolas tremblier"] }),
+      entity({
+        id: "place",
+        type: "Location",
+        name: "Nicolas",
+        normName: "nicolas",
+      }),
+    ]);
+    await consolidateMemoryGraph(deps(run), payload, store);
+    expect(run).not.toHaveBeenCalled();
+    expect(store.merges).toEqual([]);
+  });
+
+  it("leaves the pair split when the model says they differ", async () => {
+    const run: AgentRuntime["run"] = async function* () {
+      yield { type: "done" as const, text: '{"same":false}' };
+    };
+    const store = pageStore([
+      entity({ id: "short" }),
+      entity({ id: "full", name: "Nicolas Tremblier", normName: "nicolas tremblier" }),
+    ]);
+    const queue = jobs();
+    await consolidateMemoryGraph(deps(run, queue), payload, store);
+    expect(store.merges).toEqual([]);
+    expect(queue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("confirms ambiguous pairs one at a time and reschedules the rest", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const run: AgentRuntime["run"] = async function* () {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      yield { type: "done" as const, text: '{"same":true}' };
+    };
+    const people = ["Nicolas", "Marie", "Ada", "Grace", "Alan"].flatMap((name) => [
+      entity({ id: `${name}-short`, name, normName: name.toLowerCase() }),
+      entity({
+        id: `${name}-full`,
+        name: `${name} Example`,
+        normName: `${name.toLowerCase()} example`,
+      }),
+    ]);
+    const store = pageStore(people);
+    const queue = jobs();
+    await consolidateMemoryGraph(deps(run, queue), payload, store);
+    expect(maxActive).toBe(1);
+    expect(store.merges).toHaveLength(MAX_CONSOLIDATE_LLM_CALLS);
+    expect(queue.enqueue).toHaveBeenCalledTimes(1);
+    const job = queue.enqueue.mock.calls[0]?.[0];
+    expect(job).toMatchObject({
+      name: "memory.consolidate",
+      queueName: "memory-extract",
+      payload: {
+        spaceId: "space-1",
+        attempt: 0,
+        scheduleGeneration: 1,
+      },
+    });
+  });
+
+  it("reschedules a rate limit without starting another confirmation", async () => {
+    let calls = 0;
+    const run: AgentRuntime["run"] = async function* () {
+      calls += 1;
+      yield { type: "text" as const, text: "" };
+      throw new TransientModelError("429 too many requests");
+    };
+    const store = pageStore([
+      entity({ id: "short" }),
+      entity({ id: "full", name: "Nicolas Tremblier", normName: "nicolas tremblier" }),
+      entity({ id: "ada", name: "Ada", normName: "ada" }),
+      entity({ id: "ada-full", name: "Ada Lovelace", normName: "ada lovelace" }),
+    ]);
+    const queue = jobs();
+    await consolidateMemoryGraph(deps(run, queue), payload, store);
+    expect(calls).toBe(1);
+    expect(store.merges).toEqual([]);
+    const job = queue.enqueue.mock.calls[0]?.[0];
+    expect(job?.name).toBe("memory.consolidate");
+    if (job?.name !== "memory.consolidate") throw new Error("expected memory.consolidate");
+    expect(job.payload.attempt).toBe(1);
+    expect(job.payload.scheduleGeneration).toBe(1);
+    expect(job.queueName).toBe("memory-extract");
+    expect(job.availableAt).toBeInstanceOf(Date);
+  });
+
+  it("carries a short name forward when the page is full", async () => {
+    const store = pageStore([entity({ id: "nicolas" })], {
+      pageFull: true,
+      pageIds: ["nicolas"],
+    });
+    const queue = jobs();
+    await consolidateMemoryGraph(
+      deps(async function* () {}, queue),
+      payload,
+      store,
+    );
+    const job = queue.enqueue.mock.calls[0]?.[0];
+    expect(job?.name).toBe("memory.consolidate");
+    if (job?.name !== "memory.consolidate") throw new Error("expected memory.consolidate");
+    expect(job.payload.afterId).toBe("nicolas");
+    expect(job.payload.carryIds).toEqual(["nicolas"]);
+    expect(store.merges).toEqual([]);
+  });
+});

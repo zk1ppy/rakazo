@@ -246,6 +246,14 @@ pnpm test:e2e
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for the development workflow and test matrix.
 
+Neo4j memory consolidation merges duplicate entities in one space. With the worker running:
+
+```bash
+pnpm --filter @rakazo/worker memory:backfill-consolidate -- --space SPACE_ID
+```
+
+`--dry-run` counts matching spaces. Omit `--space` to enqueue every Neo4j space. `--ns shared` limits that job to one namespace.
+
 ## Documentation
 
 - [Self-hosting](./docs/self-host.md)
