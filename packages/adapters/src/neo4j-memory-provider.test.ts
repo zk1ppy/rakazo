@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AdapterContext, BackgroundJob, JobPublisher } from "@rakazo/adapter-kit";
+import { createLogger, createTestSink, getLogger, installLogger } from "@rakazo/logging";
 import { describe, expect, it, vi } from "vitest";
 import {
   createMemoryProvider,
@@ -528,25 +529,38 @@ describe("Neo4jMemoryProvider", () => {
     expect(job?.payload).not.toHaveProperty("text");
   });
 
-  it("does not enqueue trivial text or a disabled extractor", async () => {
-    const driver = new FakeDriver();
-    const enqueue = vi.fn(async () => undefined);
-    const jobs: JobPublisher = { enqueue, cancel: vi.fn(), close: vi.fn() };
-    driver.rows.push({ records: [row({ id: "fact-ok" })] });
-    await providerFor(driver, { jobs }).save(
-      { content: "ok", scope: "isolated", botId: "bot-1", source: { kind: "durable" } },
-      context,
-    );
-    driver.rows.push({ records: [row({ id: "fact-off" })] });
-    await providerFor(driver, { jobs, extract: false }).save(
-      {
-        content: "Ada Lovelace founded the Analytical Society in London.",
-        scope: "isolated",
-        botId: "bot-1",
-        source: { kind: "durable" },
-      },
-      context,
-    );
-    expect(enqueue).not.toHaveBeenCalled();
+  it("does not enqueue trivial text, a disabled extractor, or a provider with no jobs", async () => {
+    const sink = createTestSink();
+    const previousLogger = getLogger();
+    installLogger(createLogger({ service: "test", sinks: [sink] }));
+    try {
+      const driver = new FakeDriver();
+      const enqueue = vi.fn(async () => undefined);
+      const jobs: JobPublisher = { enqueue, cancel: vi.fn(), close: vi.fn() };
+      const content = "Ada Lovelace founded the Analytical Society in London.";
+      driver.rows.push({ records: [row({ id: "fact-ok" })] });
+      await providerFor(driver, { jobs }).save(
+        { content: "ok", scope: "isolated", botId: "bot-1", source: { kind: "durable" } },
+        context,
+      );
+      driver.rows.push({ records: [row({ id: "fact-off" })] });
+      await providerFor(driver, { jobs, extract: false }).save(
+        { content, scope: "isolated", botId: "bot-1", source: { kind: "durable" } },
+        context,
+      );
+      driver.rows.push({ records: [row({ id: "fact-no-jobs" })] });
+      await providerFor(driver).save(
+        { content, scope: "isolated", botId: "bot-1", source: { kind: "durable" } },
+        context,
+      );
+      expect(enqueue).not.toHaveBeenCalled();
+      expect(sink.events.map((event) => event.message)).toEqual([
+        "memory.extract enqueue skipped: trivial text",
+        "memory.extract enqueue skipped: extraction is off",
+        "memory.extract enqueue skipped: no job publisher",
+      ]);
+    } finally {
+      installLogger(previousLogger);
+    }
   });
 });

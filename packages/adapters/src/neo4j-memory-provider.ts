@@ -721,9 +721,23 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
     ns: string;
     text: string;
   }): Promise<void> {
-    if (!this.jobs || !this.extractEnabled || isTrivialMemoryText(input.text)) return;
+    if (!this.jobs) {
+      getLogger().info("memory.extract enqueue skipped: no job publisher");
+      return;
+    }
+    if (!this.extractEnabled) {
+      getLogger().info("memory.extract enqueue skipped: extraction is off");
+      return;
+    }
+    if (isTrivialMemoryText(input.text)) {
+      getLogger().info("memory.extract enqueue skipped: trivial text");
+      return;
+    }
     const planned = planExtractionChunks(input.text, this.maxChunkChars);
-    if (planned.chunks.length === 0) return;
+    if (planned.chunks.length === 0) {
+      getLogger().info("memory.extract enqueue skipped: no chunks");
+      return;
+    }
     try {
       await this.jobs.enqueue(
         memoryExtractJob({
