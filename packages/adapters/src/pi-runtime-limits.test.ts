@@ -6,7 +6,6 @@ import {
   clipToolResultText,
   EXTRACT_ANSWER_TOKENS,
   extractionCompletionTokens,
-  extractionReasoningAllowance,
   extractionThinkingLevel,
   modelStreamMaxRetries,
   REASONING_MODEL_MAX_TOKENS,
@@ -164,9 +163,7 @@ describe("extractionCompletionTokens", () => {
     ).toBe(EXTRACT_ANSWER_TOKENS);
   });
 
-  it("adds the requested effort's allowance when thinking shares the completion cap", () => {
-    expect(extractionReasoningAllowance("off")).toBe(0);
-    expect(extractionReasoningAllowance("low")).toBe(2_048);
+  it("uses the connection max when thinking cannot be disabled", () => {
     expect(
       extractionCompletionTokens(
         { api: "openai-completions", reasoning: true, maxTokens: 65_536 },
@@ -178,19 +175,22 @@ describe("extractionCompletionTokens", () => {
         { api: "openai-completions", reasoning: true, maxTokens: 65_536 },
         "low",
       ),
-    ).toBe(EXTRACT_ANSWER_TOKENS + 2_048);
+    ).toBe(65_536);
     expect(
       extractionCompletionTokens(
         { api: "openai-responses", reasoning: true, maxTokens: 128_000 },
         "low",
       ),
-    ).toBe(EXTRACT_ANSWER_TOKENS + 2_048);
+    ).toBe(128_000);
     expect(
       extractionCompletionTokens(
         { api: "openai-completions", reasoning: true, maxTokens: 2_048 },
         "low",
       ),
     ).toBe(2_048);
+    expect(extractionCompletionTokens({ api: "openai-completions", reasoning: true }, "low")).toBe(
+      REASONING_MODEL_MAX_TOKENS,
+    );
   });
 });
 

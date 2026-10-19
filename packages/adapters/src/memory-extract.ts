@@ -291,6 +291,14 @@ export async function extractMemoryGraph(
       return;
     }
     const extracted = parseMemoryExtraction(call.text, payload.spaceId, payload.ns);
+    const counts = {
+      "memory.fact_id": payload.factId,
+      "memory.chunk": index,
+      "memory.entities_parsed": extracted.parsedEntities,
+      "memory.entities_kept": extracted.entities.length,
+      "memory.edges_written":
+        extracted.entities.length > 0 ? extracted.entities.length + extracted.relations.length : 0,
+    };
     if (extracted.entities.length > 0) {
       await store.applyExtraction({
         factId: payload.factId,
@@ -300,6 +308,9 @@ export async function extractMemoryGraph(
         relations: extracted.relations,
         now: new Date().toISOString(),
       });
+      getLogger().info("memory.extract wrote a graph", counts);
+    } else if (!isTrivialMemoryText(chunk)) {
+      getLogger().warn("memory.extract kept no entities", counts);
     }
     attempt = 0;
   }
@@ -309,14 +320,19 @@ export function parseMemoryExtraction(
   text: string,
   spaceId: string,
   ns: string,
-): { entities: ExtractedEntityWrite[]; relations: ExtractedRelationWrite[] } {
+): {
+  parsedEntities: number;
+  entities: ExtractedEntityWrite[];
+  relations: ExtractedRelationWrite[];
+} {
   const parsed = parseJsonObject(text);
   const envelope = extractionEnvelope.safeParse(parsed);
-  if (!envelope.success) return { entities: [], relations: [] };
+  if (!envelope.success) return { parsedEntities: 0, entities: [], relations: [] };
 
+  const rawEntities = envelope.data.entities ?? [];
   const entities: ExtractedEntityWrite[] = [];
   const byKey = new Map<string, ExtractedEntityWrite>();
-  for (const raw of envelope.data.entities ?? []) {
+  for (const raw of rawEntities) {
     const entity = parseEntity(raw, spaceId, ns);
     if (!entity) continue;
     const key = `${entity.type}\n${entity.normName}`;
@@ -349,7 +365,11 @@ export function parseMemoryExtraction(
     seenRelations.add(key);
     relations.push(relation);
   }
-  return { entities: entities.slice(0, 24), relations: relations.slice(0, 32) };
+  return {
+    parsedEntities: rawEntities.length,
+    entities: entities.slice(0, 24),
+    relations: relations.slice(0, 32),
+  };
 }
 
 async function rescheduleExtract(
@@ -398,6 +418,7 @@ async function callExtractor(
   const operationId = `memory-extract:${payload.factId}:${chunkIndex}`;
   let streamed = "";
   let finalText = "";
+  let reportedUsage: Extract<AgentRuntimeEvent, { type: "usage" }> | undefined;
   try {
     for await (const event of deps.runtime.run(
       {
@@ -413,9 +434,10 @@ async function callExtractor(
         allowSilentEmpty: true,
         providerRetries: 0,
         // One call. Thinking is requested off unless the connection stores a
-        // minimum effort. The runtime sizes a shared completion cap to that
-        // effort's allowance plus the visible budget, and the connection's
-        // max output still wins. A second call would spend another quota unit.
+        // minimum effort. A stored floor cannot be disabled, so the runtime
+        // uses that connection's max output instead of an effort allowance.
+        // The visible budget stays in force only when thinking is off or
+        // billed separately. A second call would spend another quota unit.
         visibleOutputTokens: EXTRACT_ANSWER_TOKENS,
         model: {
           ...model,
@@ -431,8 +453,9 @@ async function callExtractor(
         signal: controller.signal,
       },
     )) {
-      if (event.type === "usage" && !event.accounted) {
-        await recordExtractUsage(deps, payload, event, operationId);
+      if (event.type === "usage") {
+        reportedUsage = event;
+        if (!event.accounted) await recordExtractUsage(deps, payload, event, operationId);
       }
       if (event.type === "text") streamed += event.text;
       if (event.type === "done") finalText = event.text?.trim() || streamed.trim();
@@ -445,6 +468,7 @@ async function callExtractor(
       "memory.chunk": chunkIndex,
       "job.outcome": "permanent",
       reason,
+      ...extractionUsageLog(reportedUsage),
     });
     throw new MemoryExtractPermanentError(reason);
   } finally {
@@ -629,19 +653,82 @@ function normalizeRelationType(value: string): string | null {
   return normalized;
 }
 
+/**
+ * The answer is the last object that carries entities or relations.
+ * A reasoning preface often restates the empty shape, and a ```json fence
+ * follows it, so a slice from the first brace to the last one does not parse.
+ */
 function parseJsonObject(text: string): unknown {
   const trimmed = text.trim();
   if (!trimmed) return null;
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)```$/i);
-  const body = (fenced?.[1] ?? trimmed).trim();
-  const start = body.indexOf("{");
-  const end = body.lastIndexOf("}");
-  if (start < 0 || end <= start) return null;
-  try {
-    return JSON.parse(body.slice(start, end + 1));
-  } catch {
-    return null;
+  const outsideReasoning = trimmed.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "");
+  const candidates = [
+    ...balancedObjects(outsideReasoning).reverse(),
+    ...balancedObjects(trimmed).reverse(),
+  ];
+  let fallback: unknown;
+  for (const candidate of candidates) {
+    let value: unknown;
+    try {
+      value = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    if ("entities" in value || "relations" in value) return value;
+    fallback ??= value;
   }
+  return fallback ?? null;
+}
+
+function balancedObjects(text: string): string[] {
+  const objects: string[] = [];
+  let start = -1;
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"') {
+      quoted = true;
+      continue;
+    }
+    if (char === "{") {
+      if (depth === 0) start = index;
+      depth += 1;
+      continue;
+    }
+    if (char === "}" && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        objects.push(text.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+  return objects;
+}
+
+function extractionUsageLog(event: Extract<AgentRuntimeEvent, { type: "usage" }> | undefined): {
+  "usage.output"?: number;
+  "usage.reasoning"?: number;
+} {
+  if (!event) return {};
+  const fields: { "usage.output"?: number; "usage.reasoning"?: number } = {};
+  // Key names avoid "token": the log redactor treats that word as a secret.
+  if (typeof event.outputTokens === "number" && Number.isFinite(event.outputTokens)) {
+    fields["usage.output"] = event.outputTokens;
+  }
+  if (typeof event.reasoningTokens === "number" && Number.isFinite(event.reasoningTokens)) {
+    fields["usage.reasoning"] = event.reasoningTokens;
+  }
+  return fields;
 }
 
 function isRateLimitFailure(error: unknown): boolean {

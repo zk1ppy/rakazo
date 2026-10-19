@@ -6,7 +6,8 @@ import type {
   JobPublisher,
 } from "@rakazo/adapter-kit";
 import { TransientModelError } from "@rakazo/adapter-kit";
-import { describe, expect, it, vi } from "vitest";
+import { createLogger, createTestSink, getLogger, installLogger } from "@rakazo/logging";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MemoryExtractDeps, MemoryExtractStore } from "./memory-extract.js";
 import {
   extractMemoryGraph,
@@ -151,7 +152,39 @@ describe("memory extraction planning", () => {
   });
 });
 
+const nicolasFact =
+  "Nicolas (l'utilisateur, propriétaire de l'instance Home Assistant ha.skippy-home.xyz) — 2026-10-18 : son identifiant/nom d'utilisateur est « nicolas »...";
+
+/** Reasoning restates the empty shape, then the answer is a fenced object. */
+const glmNicolasReply = [
+  'The memory names the owner and the instance. The empty shape {"entities":[],"relations":[]} does not apply.',
+  "",
+  "```json",
+  JSON.stringify({
+    entities: [
+      {
+        type: "Person",
+        name: "Nicolas",
+        aliases: ["nicolas"],
+        attributes: { role: "utilisateur" },
+      },
+      {
+        type: "Object",
+        name: "Home Assistant",
+        aliases: ["ha.skippy-home.xyz"],
+        attributes: { host: "ha.skippy-home.xyz" },
+      },
+    ],
+    relations: [{ source: "Nicolas", target: "Home Assistant", type: "owns" }],
+  }),
+  "```",
+].join("\n");
+
 describe("extractMemoryGraph", () => {
+  afterEach(() => {
+    installLogger(createLogger({ service: "rakazo", level: "off", sinks: [] }));
+  });
+
   it("processes chunks sequentially and writes the parsed graph", async () => {
     const order: string[] = [];
     let releaseFirst!: () => void;
@@ -294,6 +327,92 @@ describe("extractMemoryGraph", () => {
     ).rejects.toThrow("output limit");
     expect(permanent.enqueue).not.toHaveBeenCalled();
     expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the fenced answer when a GLM reply leads with reasoning", async () => {
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "rakazo", sinks: [sink] }));
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done" as const, text: glmNicolasReply };
+    });
+    const memory = store(nicolasFact);
+    await extractMemoryGraph(deps(run), payload(), memory);
+    expect(memory.applyExtraction).toHaveBeenCalledTimes(1);
+    const written = memory.applyExtraction.mock.calls[0]?.[0];
+    expect(
+      written?.entities.map((entity: { type: string; name: string }) => [entity.type, entity.name]),
+    ).toEqual([
+      ["Person", "Nicolas"],
+      ["Object", "Home Assistant"],
+    ]);
+    expect(written?.relations).toEqual([
+      expect.objectContaining({ type: "owns", fromNorm: "nicolas", toNorm: "home assistant" }),
+    ]);
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({
+        message: "memory.extract wrote a graph",
+        "memory.entities_parsed": 2,
+        "memory.entities_kept": 2,
+        "memory.edges_written": 3,
+      }),
+    );
+    expect(sink.events.some((event) => event.level === "warn")).toBe(false);
+  });
+
+  it("warns when a non-trivial fact yields no entities", async () => {
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "rakazo", sinks: [sink] }));
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield {
+        type: "done" as const,
+        text: 'Nothing here.\n{"entities":[],"relations":[]}',
+      };
+    });
+    const memory = store(nicolasFact);
+    await extractMemoryGraph(deps(run), payload(), memory);
+    expect(memory.applyExtraction).not.toHaveBeenCalled();
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({
+        level: "warn",
+        message: "memory.extract kept no entities",
+        "memory.fact_id": "fact-1",
+        "memory.entities_parsed": 0,
+        "memory.entities_kept": 0,
+        "memory.edges_written": 0,
+      }),
+    );
+  });
+
+  it("logs output and reasoning tokens when extraction fails permanently", async () => {
+    const sink = createTestSink();
+    const previous = getLogger();
+    installLogger(createLogger({ service: "rakazo", sinks: [sink] }));
+    try {
+      const run = vi.fn<AgentRuntime["run"]>(async function* () {
+        yield {
+          type: "usage" as const,
+          provider: "openai-compatible",
+          model: "glm",
+          inputTokens: 100,
+          outputTokens: 3_072,
+          reasoningTokens: 3_000,
+        };
+        throw new Error("The model hit its output limit before writing a response.");
+      });
+      await expect(extractMemoryGraph(deps(run), payload(), store(nicolasFact))).rejects.toThrow(
+        "output limit",
+      );
+      expect(sink.events).toContainEqual(
+        expect.objectContaining({
+          message: "memory.extract failed",
+          "job.outcome": "permanent",
+          "usage.output": 3_072,
+          "usage.reasoning": 3_000,
+        }),
+      );
+    } finally {
+      installLogger(previous);
+    }
   });
 
   it("does not call the model when extraction is off, the runtime is scripted, or text is trivial", async () => {
