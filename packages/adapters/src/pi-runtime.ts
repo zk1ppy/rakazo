@@ -251,6 +251,7 @@ export class PiAgentRuntime implements AgentRuntime {
             model,
             extractionThinkingLevel({
               reasoning: model.reasoning,
+              thinkingLevel: request.model.thinkingLevel,
               minReasoningEffort: request.model.minReasoningEffort,
             }),
           );
@@ -259,7 +260,7 @@ export class PiAgentRuntime implements AgentRuntime {
           if (model.reasoning && maxTokens > request.visibleOutputTokens) {
             getLogger().info("memory.extract reserved output tokens for reasoning", {
               "model.thinking_level": level,
-              "model.max_tokens": maxTokens,
+              "model.max_output": maxTokens,
             });
           }
         }
@@ -614,12 +615,20 @@ export class PiAgentRuntime implements AgentRuntime {
         // with a durable assistant message instead of a failed run.
         const budgetExceeded = host.toolCallBudget.exceeded;
         const terminalMessage = agent.state.messages.at(-1);
+        // Extraction reads the reasoning channel as well as the visible answer.
+        // Chat keeps using visible text only.
+        const extractionChannel =
+          typeof request.visibleOutputTokens === "number"
+            ? assistantChannelText(terminalMessage)
+            : undefined;
         // pi-agent-core records ordinary provider failures as an empty assistant
         // message (stopReason "error" / "length") and still resolves the run.
         // state.errorMessage covers the error stop; the message itself covers a
         // length stop and any failure that never landed on state.
         const providerFailure =
-          !budgetExceeded && terminalMessage ? providerFailureText(terminalMessage) : undefined;
+          !budgetExceeded && terminalMessage
+            ? providerFailureText(terminalMessage, extractionChannel)
+            : undefined;
         const error = agent.state.errorMessage || providerFailure;
         if (error && !budgetExceeded) {
           const message = sanitizeProviderError(activeStreamTarget.model.provider, error);
@@ -673,7 +682,17 @@ export class PiAgentRuntime implements AgentRuntime {
             queue.push({ type: "text", text: streamed });
           }
         }
-        queue.push(streamed.trim() ? { type: "done", text: streamed } : { type: "done" });
+        const answer = extractionChannel?.trim() || streamed;
+        if (extractionChannel !== undefined) {
+          const stopReason = assistantStopReason(terminalMessage);
+          queue.push(
+            answer.trim()
+              ? { type: "done", text: answer, ...(stopReason ? { stopReason } : {}) }
+              : { type: "done", ...(stopReason ? { stopReason } : {}) },
+          );
+        } else {
+          queue.push(answer.trim() ? { type: "done", text: answer } : { type: "done" });
+        }
       } catch (error) {
         span?.setStatus({ status: "error" });
         const message = sanitizeError(error instanceof Error ? error.message : String(error));
@@ -2112,17 +2131,45 @@ function boundAgentToolResult<T>(result: AgentToolResult<T>): AgentToolResult<T>
 }
 
 function assistantText(message: unknown): string {
-  if (!message || typeof message !== "object" || !("content" in message)) return "";
-  const content = (message as { content?: unknown }).content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) =>
-      part && typeof part === "object" && "type" in part && part.type === "text" && "text" in part
-        ? String(part.text)
-        : "",
-    )
+  return messageContent(message)
+    .map((part) => contentPartText(part, "text"))
     .join("");
+}
+
+/** Reasoning first, then the visible answer, so the last JSON object is the reply. */
+function assistantChannelText(message: unknown): string {
+  const parts = messageContent(message);
+  const thinking = parts.map((part) => contentPartText(part, "thinking")).join("");
+  const visible = parts.map((part) => contentPartText(part, "text")).join("");
+  if (thinking && visible) return `${thinking}\n${visible}`;
+  return thinking || visible;
+}
+
+function messageContent(message: unknown): unknown[] {
+  if (!message || typeof message !== "object" || !("content" in message)) return [];
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") return [{ type: "text", text: content }];
+  return Array.isArray(content) ? content : [];
+}
+
+function contentPartText(part: unknown, kind: "text" | "thinking"): string {
+  if (!part || typeof part !== "object" || !("type" in part) || part.type !== kind) return "";
+  const field = kind === "text" ? "text" : "thinking";
+  if (!(field in part)) return "";
+  const value = (part as { text?: unknown; thinking?: unknown })[field];
+  return typeof value === "string" ? value : "";
+}
+
+function assistantStopReason(message: unknown): string | undefined {
+  if (!message || typeof message !== "object") return undefined;
+  if (!("role" in message) || message.role !== "assistant") return undefined;
+  if (!("stopReason" in message) || typeof message.stopReason !== "string") return undefined;
+  if (!message.stopReason || message.stopReason === "aborted") return undefined;
+  return message.stopReason;
+}
+
+function textHasJsonObject(value: string): boolean {
+  return value.includes("{") && value.includes("}");
 }
 
 function messageHasToolCall(message: unknown): boolean {
@@ -2134,8 +2181,12 @@ function messageHasToolCall(message: unknown): boolean {
   );
 }
 
-/** Provider failure. Aborts stay on the existing cancel path. */
-export function providerFailureText(message: unknown): string | undefined {
+/**
+ * Provider failure. Aborts stay on the existing cancel path.
+ * `recoveredText` is the reasoning channel plus the visible answer. A length
+ * stop that already holds a JSON object is a usable extraction, not a failure.
+ */
+export function providerFailureText(message: unknown, recoveredText?: string): string | undefined {
   if (!message || typeof message !== "object") return undefined;
   if (!("role" in message) || message.role !== "assistant") return undefined;
   const stopReason =
@@ -2156,6 +2207,7 @@ export function providerFailureText(message: unknown): string | undefined {
     return "The model failed before writing a response.";
   }
   if (stopReason === "length" && !text) {
+    if (recoveredText && textHasJsonObject(recoveredText)) return undefined;
     return errorMessage || "The model hit its output limit before writing a response.";
   }
   if (errorMessage && !text) return errorMessage;

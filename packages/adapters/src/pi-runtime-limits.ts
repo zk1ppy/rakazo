@@ -95,22 +95,34 @@ export const EXTRACT_ANSWER_TOKENS = 1_024;
 const EXTRACTION_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 type ExtractionEffort = (typeof EXTRACTION_EFFORTS)[number];
 
+/** Same default chat uses when a reasoning connection leaves effort unset. */
+const DEFAULT_EXTRACTION_EFFORT: ExtractionEffort = "medium";
+
+function storedEffort(value: string | null | undefined): ExtractionEffort | "off" | undefined {
+  if (!value) return undefined;
+  if (value === "off") return "off";
+  if ((EXTRACTION_EFFORTS as readonly string[]).includes(value)) return value as ExtractionEffort;
+  return undefined;
+}
+
 /**
- * Lowest effort extraction should request. Absent means thinking can be
- * disabled: an OpenAI-compatible connection then sends `reasoning_effort`
- * `"none"`. A stored minimum is that connection's floor, sent as
- * `reasoning_effort` through the same thinking level.
+ * Effort extraction should request. A stored minimum is the effort used for
+ * extraction, ahead of the chat effort. Otherwise an explicit effort is used
+ * as set. Leaving effort unset on a reasoning connection is the default
+ * effort, not off: off is only an explicit "off" or a connection that does
+ * not support thinking.
  */
 export function extractionThinkingLevel(model: {
   reasoning?: boolean;
+  thinkingLevel?: string | null;
   minReasoningEffort?: string | null;
 }): "off" | ExtractionEffort {
   if (!model.reasoning) return "off";
-  const floor = model.minReasoningEffort;
-  if (floor && (EXTRACTION_EFFORTS as readonly string[]).includes(floor)) {
-    return floor as ExtractionEffort;
-  }
-  return "off";
+  const floor = storedEffort(model.minReasoningEffort);
+  if (floor && floor !== "off") return floor;
+  const requested = storedEffort(model.thinkingLevel);
+  if (requested === "off") return "off";
+  return requested ?? DEFAULT_EXTRACTION_EFFORT;
 }
 
 /**

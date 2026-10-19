@@ -1172,6 +1172,27 @@ describe("Pi connector tool dispatch", () => {
     ).toBe("upstream unavailable");
   });
 
+  it("keeps a length stop when the reasoning channel already holds JSON", () => {
+    const recovered = '{"entities":[{"type":"Person","name":"Ada"}],"relations":[]}';
+    expect(
+      providerFailureText(
+        {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: recovered }],
+          stopReason: "length",
+        },
+        recovered,
+      ),
+    ).toBeUndefined();
+    expect(
+      providerFailureText({
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "Still working." }],
+        stopReason: "length",
+      }),
+    ).toBe("The model hit its output limit before writing a response.");
+  });
+
   it("fails when tools succeeded and the final assistant content is an empty provider error", async () => {
     fakeAgentState.mode = "tools-then-empty-failure";
     fakeAgentState.terminalMessage = {

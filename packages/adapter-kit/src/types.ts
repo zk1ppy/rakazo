@@ -493,10 +493,10 @@ export interface AgentRunRequest {
    */
   providerRetries?: 0;
   /**
-   * Visible answer budget. Memory extraction sets this so a reasoning model
-   * does not spend the whole completion cap before writing JSON. The runtime
-   * keeps this as max output when the provider bills thinking separately, and
-   * adds reasoning room when thinking shares that cap.
+   * Visible answer budget. Memory extraction sets this. The runtime keeps it
+   * as max output when thinking is off or billed separately. A requested
+   * effort, including the default when a reasoning connection leaves effort
+   * unset, shares the completion cap, so that call uses the connection max.
    */
   visibleOutputTokens?: number;
   /** Contextual fallback when a non-silent run produces no written response. */
@@ -591,7 +591,7 @@ export type AgentRuntimeEvent =
       progress?: string;
       result?: string;
     }
-  | { type: "done"; text?: string };
+  | { type: "done"; text?: string; stopReason?: string };
 
 export interface AgentRuntimeCapabilities {
   streaming: boolean;
