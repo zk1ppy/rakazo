@@ -128,15 +128,35 @@ describe("resolveCompletionMaxTokens", () => {
 });
 
 describe("extractionThinkingLevel", () => {
-  it("disables thinking when the connection stores no floor", () => {
+  it("uses the default effort when a reasoning connection leaves it unset", () => {
     expect(extractionThinkingLevel({ reasoning: false })).toBe("off");
-    expect(extractionThinkingLevel({ reasoning: true })).toBe("off");
-    expect(extractionThinkingLevel({ reasoning: true, minReasoningEffort: null })).toBe("off");
+    expect(extractionThinkingLevel({ reasoning: true })).toBe("medium");
+    expect(extractionThinkingLevel({ reasoning: true, thinkingLevel: null })).toBe("medium");
+    expect(extractionThinkingLevel({ reasoning: true, minReasoningEffort: null })).toBe("medium");
   });
 
-  it("uses the connection's minimum effort", () => {
+  it("keeps an explicit off and an explicit effort", () => {
+    expect(extractionThinkingLevel({ reasoning: true, thinkingLevel: "off" })).toBe("off");
+    expect(extractionThinkingLevel({ reasoning: true, thinkingLevel: "high" })).toBe("high");
+    expect(extractionThinkingLevel({ reasoning: false, thinkingLevel: "high" })).toBe("off");
+  });
+
+  it("uses the stored minimum instead of the chat effort", () => {
     expect(extractionThinkingLevel({ reasoning: true, minReasoningEffort: "low" })).toBe("low");
-    expect(extractionThinkingLevel({ reasoning: true, minReasoningEffort: null })).toBe("off");
+    expect(
+      extractionThinkingLevel({
+        reasoning: true,
+        thinkingLevel: "off",
+        minReasoningEffort: "low",
+      }),
+    ).toBe("low");
+    expect(
+      extractionThinkingLevel({
+        reasoning: true,
+        thinkingLevel: "high",
+        minReasoningEffort: "low",
+      }),
+    ).toBe("low");
     expect(extractionThinkingLevel({ reasoning: false, minReasoningEffort: "low" })).toBe("off");
   });
 });

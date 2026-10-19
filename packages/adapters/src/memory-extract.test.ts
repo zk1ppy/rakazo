@@ -256,7 +256,7 @@ describe("extractMemoryGraph", () => {
     });
   });
 
-  it("does not infer a reasoning floor from the model id", async () => {
+  it("treats an unset effort as the default without reading the model id", async () => {
     const run = vi.fn<AgentRuntime["run"]>(async function* () {
       yield { type: "done" as const, text: '{"entities":[],"relations":[]}' };
     });
@@ -265,6 +265,30 @@ describe("extractMemoryGraph", () => {
       id: "hf:zai-org/GLM-5.3-Flash",
       apiKey: "test-key",
       reasoning: true,
+      thinkingLevel: null,
+      maxTokens: 65_536,
+    } satisfies AgentRunRequest["model"];
+    await extractMemoryGraph(
+      deps(run, jobs(), false, named),
+      payload(),
+      store("Ada Lovelace founded the Analytical Society in London."),
+    );
+    expect(run.mock.calls[0]?.[0].model).toMatchObject({
+      thinkingLevel: "medium",
+      maxTokens: 65_536,
+    });
+  });
+
+  it("keeps thinking off when the connection asks for off", async () => {
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done" as const, text: '{"entities":[],"relations":[]}' };
+    });
+    const named = {
+      provider: "openai-compatible",
+      id: "hf:zai-org/GLM-5.3-Flash",
+      apiKey: "test-key",
+      reasoning: true,
+      thinkingLevel: "off" as const,
       maxTokens: 65_536,
     } satisfies AgentRunRequest["model"];
     await extractMemoryGraph(
@@ -362,10 +386,20 @@ describe("extractMemoryGraph", () => {
   it("warns when a non-trivial fact yields no entities", async () => {
     const sink = createTestSink();
     installLogger(createLogger({ service: "rakazo", sinks: [sink] }));
+    const reply = 'Nothing here.\n{"entities":[],"relations":[]}';
     const run = vi.fn<AgentRuntime["run"]>(async function* () {
       yield {
+        type: "usage" as const,
+        provider: "openai-compatible",
+        model: "glm",
+        inputTokens: 40,
+        outputTokens: 12,
+        reasoningTokens: 8,
+      };
+      yield {
         type: "done" as const,
-        text: 'Nothing here.\n{"entities":[],"relations":[]}',
+        text: reply,
+        stopReason: "stop",
       };
     });
     const memory = store(nicolasFact);
@@ -379,6 +413,47 @@ describe("extractMemoryGraph", () => {
         "memory.entities_parsed": 0,
         "memory.entities_kept": 0,
         "memory.edges_written": 0,
+        "model.stop_reason": "stop",
+        "usage.input": 40,
+        "usage.output": 12,
+        "usage.reasoning": 8,
+        "memory.content_length": reply.trim().length,
+        "memory.json_found": true,
+      }),
+    );
+    expect(JSON.stringify(sink.events)).not.toContain("Nothing here");
+    expect(JSON.stringify(sink.events)).not.toContain("nicolas");
+  });
+
+  it("records an empty completion that never produced a JSON object", async () => {
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "rakazo", sinks: [sink] }));
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield {
+        type: "usage" as const,
+        provider: "openai-compatible",
+        model: "glm",
+        inputTokens: 11,
+        outputTokens: 4,
+        reasoningTokens: 4,
+      };
+      yield { type: "done" as const, stopReason: "stop" };
+    });
+    await extractMemoryGraph(
+      deps(run),
+      payload(),
+      store("Ada Lovelace founded the Analytical Society in London."),
+    );
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({
+        level: "warn",
+        message: "memory.extract kept no entities",
+        "model.stop_reason": "stop",
+        "usage.input": 11,
+        "usage.output": 4,
+        "usage.reasoning": 4,
+        "memory.content_length": 0,
+        "memory.json_found": false,
       }),
     );
   });

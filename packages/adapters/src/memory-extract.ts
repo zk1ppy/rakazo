@@ -310,7 +310,10 @@ export async function extractMemoryGraph(
       });
       getLogger().info("memory.extract wrote a graph", counts);
     } else if (!isTrivialMemoryText(chunk)) {
-      getLogger().warn("memory.extract kept no entities", counts);
+      getLogger().warn("memory.extract kept no entities", {
+        ...counts,
+        ...extractionDiagnostics(call),
+      });
     }
     attempt = 0;
   }
@@ -411,13 +414,19 @@ async function callExtractor(
   model: AgentRunRequest["model"],
   chunk: string,
   chunkIndex: number,
-): Promise<{ kind: ExtractCall; text: string }> {
+): Promise<{
+  kind: ExtractCall;
+  text: string;
+  stopReason?: string;
+  usage?: Extract<AgentRuntimeEvent, { type: "usage" }>;
+}> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), EXTRACT_TIMEOUT_MS);
   timer.unref?.();
   const operationId = `memory-extract:${payload.factId}:${chunkIndex}`;
   let streamed = "";
   let finalText = "";
+  let stopReason: string | undefined;
   let reportedUsage: Extract<AgentRuntimeEvent, { type: "usage" }> | undefined;
   try {
     for await (const event of deps.runtime.run(
@@ -433,11 +442,11 @@ async function callExtractor(
         tools: [],
         allowSilentEmpty: true,
         providerRetries: 0,
-        // One call. Thinking is requested off unless the connection stores a
-        // minimum effort. A stored floor cannot be disabled, so the runtime
-        // uses that connection's max output instead of an effort allowance.
-        // The visible budget stays in force only when thinking is off or
-        // billed separately. A second call would spend another quota unit.
+        // One call. An explicit off, or a model that does not reason, keeps
+        // the visible budget. A requested effort — including the default when
+        // effort is unset — shares the completion cap, so the runtime uses
+        // that connection's max output. A second call would spend another
+        // quota unit.
         visibleOutputTokens: EXTRACT_ANSWER_TOKENS,
         model: {
           ...model,
@@ -458,7 +467,10 @@ async function callExtractor(
         if (!event.accounted) await recordExtractUsage(deps, payload, event, operationId);
       }
       if (event.type === "text") streamed += event.text;
-      if (event.type === "done") finalText = event.text?.trim() || streamed.trim();
+      if (event.type === "done") {
+        finalText = event.text?.trim() || streamed.trim();
+        if (event.stopReason) stopReason = event.stopReason;
+      }
     }
   } catch (error) {
     if (isRateLimitFailure(error)) return { kind: "rate_limit", text: "" };
@@ -476,7 +488,7 @@ async function callExtractor(
   }
   const text = (finalText || streamed).trim();
   if (!parseJsonObject(text) && isRateLimitMessage(text)) return { kind: "rate_limit", text: "" };
-  return { kind: "ok", text };
+  return { kind: "ok", text, stopReason, usage: reportedUsage };
 }
 
 async function recordExtractUsage(
@@ -715,13 +727,41 @@ function balancedObjects(text: string): string[] {
   return objects;
 }
 
+function extractionDiagnostics(call: {
+  text: string;
+  stopReason?: string;
+  usage?: Extract<AgentRuntimeEvent, { type: "usage" }>;
+}): {
+  "model.stop_reason"?: string;
+  "usage.input"?: number;
+  "usage.output"?: number;
+  "usage.reasoning"?: number;
+  "memory.content_length": number;
+  "memory.json_found": boolean;
+} {
+  return {
+    ...(call.stopReason ? { "model.stop_reason": call.stopReason } : {}),
+    ...extractionUsageLog(call.usage),
+    "memory.content_length": call.text.length,
+    "memory.json_found": parseJsonObject(call.text) !== null,
+  };
+}
+
 function extractionUsageLog(event: Extract<AgentRuntimeEvent, { type: "usage" }> | undefined): {
+  "usage.input"?: number;
   "usage.output"?: number;
   "usage.reasoning"?: number;
 } {
   if (!event) return {};
-  const fields: { "usage.output"?: number; "usage.reasoning"?: number } = {};
+  const fields: {
+    "usage.input"?: number;
+    "usage.output"?: number;
+    "usage.reasoning"?: number;
+  } = {};
   // Key names avoid "token": the log redactor treats that word as a secret.
+  if (typeof event.inputTokens === "number" && Number.isFinite(event.inputTokens)) {
+    fields["usage.input"] = event.inputTokens;
+  }
   if (typeof event.outputTokens === "number" && Number.isFinite(event.outputTokens)) {
     fields["usage.output"] = event.outputTokens;
   }
