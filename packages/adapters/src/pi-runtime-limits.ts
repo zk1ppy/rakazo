@@ -93,18 +93,48 @@ export const REASONING_MODEL_MAX_TOKENS = 32_768;
 export const EXTRACT_ANSWER_TOKENS = 1_024;
 
 /**
- * Extra completion tokens when reasoning and the answer share one ceiling.
- * Matches a short thinking pass; the model cap still wins.
+ * Pi thinking budgets. xhigh and max clamp to high before the lookup.
+ * These are the reasoning allowance added to the visible answer when thinking
+ * and the answer share one completion cap.
  */
-export const EXTRACT_REASONING_HEADROOM = 4_096;
-
-/** Pi thinking budgets. xhigh and max clamp to high before the lookup. */
 const EXTRACT_THINKING_BUDGETS: Record<string, number> = {
   minimal: 1_024,
   low: 2_048,
   medium: 8_192,
   high: 16_384,
 };
+
+/**
+ * GLM-5.3 and GLM-5.3-Flash force thinking. On an OpenAI-compatible API,
+ * `reasoning_effort` other than `low`, `high`, or `max` is rejected, and
+ * `thinking.type: disabled` is rejected too. The lowest accepted effort is
+ * `low`. Pi sends that as `reasoning_effort` when the thinking level is `low`
+ * (`thinkingFormat: "openai"`); it does not send `chat_template_kwargs` or
+ * `thinking.type`.
+ */
+const FORCED_LOW_EFFORT_MODEL = /glm-5\.3/i;
+
+/**
+ * Lowest effort extraction should request. `off` becomes `reasoning_effort`
+ * `"none"` on an OpenAI-compatible connection, which disables thinking where
+ * the model allows it. GLM-5.3 cannot disable thinking, so extraction asks
+ * for `low` instead of `"none"`.
+ */
+export function extractionThinkingLevel(model: {
+  id?: string;
+  reasoning?: boolean;
+}): "off" | "low" {
+  if (!model.reasoning) return "off";
+  if (model.id && FORCED_LOW_EFFORT_MODEL.test(model.id)) return "low";
+  return "off";
+}
+
+/** Tokens to reserve for the effort extraction actually requested. `off` reserves none. */
+export function extractionReasoningAllowance(thinkingLevel: string): number {
+  if (!thinkingLevel || thinkingLevel === "off") return 0;
+  const level = thinkingLevel === "xhigh" || thinkingLevel === "max" ? "high" : thinkingLevel;
+  return EXTRACT_THINKING_BUDGETS[level] ?? EXTRACT_THINKING_BUDGETS.low ?? 2_048;
+}
 
 /**
  * These APIs bill thinking beside the answer (Anthropic and Bedrock add a
@@ -120,10 +150,10 @@ const SEPARATED_THINKING_APIS = new Set([
 ]);
 
 /**
- * Size one extraction call. Reasoning stays off when the model allows it.
- * A shared ceiling still gets headroom, because a provider can spend the cap
- * on thinking before any visible JSON. Separated providers keep the answer cap
- * and add their own thinking budget.
+ * Size one extraction call. Separated providers bill thinking beside the
+ * answer, so the completion cap stays the visible budget. A shared ceiling
+ * (OpenAI-compatible included) is the reasoning allowance for the requested
+ * effort plus the visible budget, and the model's max output still wins.
  */
 export function extractionCompletionTokens(
   model: { api?: string; reasoning?: boolean; maxTokens?: number },
@@ -136,12 +166,7 @@ export function extractionCompletionTokens(
   const cap = (total: number) => (ceiling === undefined ? total : Math.min(ceiling, total));
   const separated = model.api !== undefined && SEPARATED_THINKING_APIS.has(model.api);
   if (!model.reasoning || separated) return cap(answer);
-  const level = thinkingLevel === "xhigh" || thinkingLevel === "max" ? "high" : thinkingLevel;
-  const headroom =
-    level === "off"
-      ? EXTRACT_REASONING_HEADROOM
-      : (EXTRACT_THINKING_BUDGETS[level] ?? EXTRACT_REASONING_HEADROOM);
-  return cap(answer + headroom);
+  return cap(answer + extractionReasoningAllowance(thinkingLevel));
 }
 
 /**

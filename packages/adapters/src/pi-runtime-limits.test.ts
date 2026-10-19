@@ -5,8 +5,9 @@ import {
   clipToolResultContent,
   clipToolResultText,
   EXTRACT_ANSWER_TOKENS,
-  EXTRACT_REASONING_HEADROOM,
   extractionCompletionTokens,
+  extractionReasoningAllowance,
+  extractionThinkingLevel,
   modelStreamMaxRetries,
   REASONING_MODEL_MAX_TOKENS,
   resolveCompletionMaxTokens,
@@ -127,6 +128,22 @@ describe("resolveCompletionMaxTokens", () => {
   });
 });
 
+describe("extractionThinkingLevel", () => {
+  it("disables thinking when the model allows it", () => {
+    expect(extractionThinkingLevel({ id: "gpt-test", reasoning: false })).toBe("off");
+    expect(extractionThinkingLevel({ id: "gpt-test", reasoning: true })).toBe("off");
+    expect(extractionThinkingLevel({ id: "glm-5.2", reasoning: true })).toBe("off");
+  });
+
+  it("asks GLM-5.3 for low effort because thinking cannot be disabled", () => {
+    expect(extractionThinkingLevel({ id: "hf:zai-org/GLM-5.3-Flash", reasoning: true })).toBe(
+      "low",
+    );
+    expect(extractionThinkingLevel({ id: "zai-org/GLM-5.3", reasoning: true })).toBe("low");
+    expect(extractionThinkingLevel({ id: "glm-5.3-flash", reasoning: false })).toBe("off");
+  });
+});
+
 describe("extractionCompletionTokens", () => {
   it("keeps the answer cap when thinking is billed separately or the model does not reason", () => {
     expect(
@@ -149,13 +166,21 @@ describe("extractionCompletionTokens", () => {
     ).toBe(EXTRACT_ANSWER_TOKENS);
   });
 
-  it("adds reasoning room when thinking shares the completion cap", () => {
+  it("adds the requested effort's allowance when thinking shares the completion cap", () => {
+    expect(extractionReasoningAllowance("off")).toBe(0);
+    expect(extractionReasoningAllowance("low")).toBe(2_048);
     expect(
       extractionCompletionTokens(
-        { api: "openai-completions", reasoning: true, maxTokens: 128_000 },
+        { api: "openai-completions", reasoning: true, maxTokens: 65_536 },
         "off",
       ),
-    ).toBe(EXTRACT_ANSWER_TOKENS + EXTRACT_REASONING_HEADROOM);
+    ).toBe(EXTRACT_ANSWER_TOKENS);
+    expect(
+      extractionCompletionTokens(
+        { api: "openai-completions", reasoning: true, maxTokens: 65_536 },
+        "low",
+      ),
+    ).toBe(EXTRACT_ANSWER_TOKENS + 2_048);
     expect(
       extractionCompletionTokens(
         { api: "openai-responses", reasoning: true, maxTokens: 128_000 },
@@ -165,7 +190,7 @@ describe("extractionCompletionTokens", () => {
     expect(
       extractionCompletionTokens(
         { api: "openai-completions", reasoning: true, maxTokens: 2_048 },
-        "off",
+        "low",
       ),
     ).toBe(2_048);
   });

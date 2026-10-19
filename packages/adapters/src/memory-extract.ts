@@ -18,7 +18,7 @@ import { z } from "zod";
 import { resolveDeploymentModel } from "./deployment-model.js";
 import type { Neo4jEntityType } from "./neo4j-memory-client.js";
 import { NEO4J_ENTITY_TYPES } from "./neo4j-memory-client.js";
-import { EXTRACT_ANSWER_TOKENS } from "./pi-runtime-limits.js";
+import { EXTRACT_ANSWER_TOKENS, extractionThinkingLevel } from "./pi-runtime-limits.js";
 
 export const NEO4J_DEFAULT_MAX_CHUNK_CHARS = 4_000;
 export const NEO4J_MIN_MAX_CHUNK_CHARS = 400;
@@ -412,14 +412,16 @@ async function callExtractor(
         tools: [],
         allowSilentEmpty: true,
         providerRetries: 0,
-        // One call. Reasoning is requested off; the runtime adds headroom only
-        // when thinking shares the completion cap. A second call would spend
-        // another quota unit on a failure the larger budget was meant to avoid.
+        // One call. Thinking is requested off when the model allows it.
+        // GLM-5.3 cannot disable thinking, so that family is asked for "low"
+        // (reasoning_effort "low"). The runtime sizes the shared completion
+        // cap to that effort's allowance plus the visible budget, and the
+        // connection's max output still wins. A second call would spend
+        // another quota unit.
         visibleOutputTokens: EXTRACT_ANSWER_TOKENS,
         model: {
           ...model,
-          thinkingLevel: "off",
-          maxTokens: Math.min(model.maxTokens ?? EXTRACT_ANSWER_TOKENS, EXTRACT_ANSWER_TOKENS),
+          thinkingLevel: extractionThinkingLevel(model),
         },
       },
       {

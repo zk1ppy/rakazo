@@ -65,6 +65,7 @@ import {
   clipToolResultContent,
   clipToolResultText,
   extractionCompletionTokens,
+  extractionThinkingLevel,
   MODEL_STREAM_IDLE_TIMEOUT_MS,
   MODEL_STREAM_TIMEOUT_MS,
   modelStreamMaxRetries,
@@ -246,7 +247,7 @@ export class PiAgentRuntime implements AgentRuntime {
         }
         const { models, model, apiKey } = selectedModel;
         if (typeof request.visibleOutputTokens === "number") {
-          const level = thinkingLevelFor(model, request.model.thinkingLevel ?? "off");
+          const level = thinkingLevelFor(model, extractionThinkingLevel(model));
           const maxTokens = extractionCompletionTokens(model, level, request.visibleOutputTokens);
           request.model = { ...request.model, thinkingLevel: level, maxTokens };
           if (model.reasoning && maxTokens > request.visibleOutputTokens) {

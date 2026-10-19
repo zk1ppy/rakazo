@@ -65,6 +65,15 @@ vi.mock("@earendil-works/pi-ai/providers/all", () => ({
   builtinModels: () => ({
     getModel: (_provider: string, modelId: string) => {
       if (modelId === "reasoning-model") return { provider: "test", id: modelId, reasoning: true };
+      if (/glm-5\.3/i.test(modelId)) {
+        return {
+          provider: "openai-compatible",
+          id: modelId,
+          api: "openai-completions",
+          reasoning: true,
+          thinkingLevelMap: { off: "none" },
+        };
+      }
       if (modelId === "plain-model") return { provider: "test", id: modelId, reasoning: false };
       if (modelId === "grok-4.6") {
         return {
@@ -195,7 +204,7 @@ describe("Pi agent thinking level", () => {
     expect(levels.every((level) => level !== "off")).toBe(true);
   });
 
-  it("reserves shared completion tokens when extraction turns reasoning off", async () => {
+  it("keeps the visible cap when extraction disables thinking", async () => {
     const levels = await runWithModel(
       "reasoning-model",
       "test",
@@ -207,7 +216,23 @@ describe("Pi agent thinking level", () => {
       { visibleOutputTokens: 1_024 },
     );
     expect(levels[0]).toBe("off");
-    expect(fakeAgentState.models[0]?.maxTokens).toBe(1_024 + 4_096);
+    expect(fakeAgentState.models[0]?.maxTokens).toBe(1_024);
+  });
+
+  it("budgets low effort plus the visible answer for GLM-5.3, capped by the connection", async () => {
+    const levels = await runWithModel(
+      "hf:zai-org/GLM-5.3-Flash",
+      "openai-compatible",
+      new AbortController().signal,
+      null,
+      undefined,
+      undefined,
+      { maxTokens: 65_536, contextWindow: 524_288 },
+      { visibleOutputTokens: 1_024 },
+    );
+    expect(levels[0]).toBe("low");
+    expect(fakeAgentState.models[0]?.maxTokens).toBe(1_024 + 2_048);
+    expect(fakeAgentState.models[0]?.contextWindow).toBe(524_288);
   });
 
   it("uses a stable provider session for each bot thread", async () => {

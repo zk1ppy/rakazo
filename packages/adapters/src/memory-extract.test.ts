@@ -78,6 +78,7 @@ function deps(
   run: AgentRuntime["run"],
   queue = jobs(),
   scripted = false,
+  resolved: AgentRunRequest["model"] = model,
 ): MemoryExtractDeps & {
   jobs: JobPublisher & { enqueue: ReturnType<typeof vi.fn> };
 } {
@@ -85,7 +86,7 @@ function deps(
     runtime: runtime(run, scripted),
     prisma: { usageRecord: { create: vi.fn() } } as unknown as MemoryExtractDeps["prisma"],
     jobs: queue,
-    resolveModel: vi.fn(async () => model),
+    resolveModel: vi.fn(async () => resolved),
   };
 }
 
@@ -184,10 +185,40 @@ describe("extractMemoryGraph", () => {
       tools: [],
       usageOperationKind: "retrieval",
       visibleOutputTokens: 1_024,
-      model: { thinkingLevel: "off", maxTokens: 1_024 },
+      model: { thinkingLevel: "off", id: "gpt-test" },
     });
+    expect(run.mock.calls[0]?.[0].model.maxTokens).toBeUndefined();
     expect(memory.applyExtraction).toHaveBeenCalledTimes(2);
     expect(memory.applyExtraction.mock.calls[0]?.[0].entities[0].type).toBe("Person");
+  });
+
+  it("asks GLM-5.3 for low effort and keeps the connection output cap", async () => {
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done" as const, text: '{"entities":[],"relations":[]}' };
+    });
+    const glm = {
+      provider: "openai-compatible",
+      id: "hf:zai-org/GLM-5.3-Flash",
+      apiKey: "test-key",
+      reasoning: true,
+      maxTokens: 65_536,
+      contextWindow: 524_288,
+    } satisfies AgentRunRequest["model"];
+    await extractMemoryGraph(
+      deps(run, jobs(), false, glm),
+      payload(),
+      store("Ada Lovelace founded the Analytical Society in London."),
+    );
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]?.[0]).toMatchObject({
+      providerRetries: 0,
+      visibleOutputTokens: 1_024,
+      model: {
+        id: "hf:zai-org/GLM-5.3-Flash",
+        thinkingLevel: "low",
+        maxTokens: 65_536,
+      },
+    });
   });
 
   it("reschedules the failing chunk on the serial queue instead of calling the next one", async () => {
