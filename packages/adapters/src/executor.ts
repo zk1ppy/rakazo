@@ -3021,7 +3021,9 @@ export function createRunExecutor(deps: ExecutorDeps) {
       maxTokens: resolved.maxTokens,
       acceptsImages: resolved.acceptsImages,
       maxImagesPerPrompt: resolved.maxImagesPerPrompt,
-      minReasoningEffort: resolved.minReasoningEffort ?? null,
+      ...(resolved.minReasoningEffort
+        ? { minReasoningEffort: resolved.minReasoningEffort }
+        : {}),
       thinkingLevel:
         ((credential.defaultModel === modelId
           ? credential.thinkingLevel
@@ -3102,7 +3104,9 @@ export function createRunExecutor(deps: ExecutorDeps) {
         maxTokens: resolved.maxTokens,
         acceptsImages: resolved.acceptsImages,
         maxImagesPerPrompt: resolved.maxImagesPerPrompt,
-        minReasoningEffort: resolved.minReasoningEffort ?? null,
+        ...(resolved.minReasoningEffort
+          ? { minReasoningEffort: resolved.minReasoningEffort }
+          : {}),
         thinkingLevel: thinkingLevel ?? resolved.thinkingLevel ?? null,
         oauth: resolved.oauth
           ? {
@@ -7041,7 +7045,9 @@ export function createRunExecutor(deps: ExecutorDeps) {
                 maxTokens: resolved.maxTokens,
                 acceptsImages: resolved.acceptsImages,
                 maxImagesPerPrompt: resolved.maxImagesPerPrompt,
-                minReasoningEffort: resolved.minReasoningEffort ?? null,
+                ...(resolved.minReasoningEffort
+                  ? { minReasoningEffort: resolved.minReasoningEffort }
+                  : {}),
                 thinkingLevel: thinkingLevel ?? resolved.thinkingLevel ?? null,
                 oauth: resolved.oauth
                   ? {
