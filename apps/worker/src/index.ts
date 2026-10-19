@@ -1,6 +1,7 @@
 import type { JobPublisher, JobWorkerHost } from "@rakazo/adapter-kit";
 import { ComposioConnector, IntegrationProviderSettings } from "@rakazo/adapters";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
+import { loadWorkerConfig } from "./config.js";
 import { createWorkerSecretStore } from "./secret-store.js";
 
 loadRootEnv();
@@ -66,24 +67,23 @@ import { MarkdownMemoryStore } from "@rakazo/memory";
 const logger = createRootLogger(SERVICE_NAMES.worker);
 
 async function main() {
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) throw new Error("DATABASE_URL is required");
+  const config = loadWorkerConfig();
   // Shared by Prisma, the reconciliation leadership lock, and both graphile-worker
   // components (see GraphileJobPublisher/GraphileJobWorkerHost) — one pool instead
   // of four separate ones. Keep this modest: graphile holds a LISTEN client and
   // leadership holds an advisory-lock client for the process lifetime, and a
   // larger max just competes for Postgres max_connections (53300).
-  const created = createDb(databaseUrl, {
-    poolMax: parsePositiveInteger(process.env.DB_POOL_MAX, 8),
+  const created = createDb(config.databaseUrl, {
+    poolMax: parsePositiveInteger(config.env.DB_POOL_MAX, 8),
     applicationName: "rakazo-worker",
   });
   const { pool } = created;
   let { prisma } = created;
   const realtime = new PostgresRealtimeFanout({
-    connectionString: process.env.REALTIME_DATABASE_URL ?? databaseUrl,
+    connectionString: config.realtimeDatabaseUrl,
     publisher: pool,
   });
-  const secrets = await createWorkerSecretStore(process.env, realtime);
+  const secrets = await createWorkerSecretStore(config.env, realtime);
   if (secrets.describe().capabilities.degraded)
     logger.warn("Secret storage degraded; encrypted credentials remain available");
   prisma = withSecretPersistence(prisma, secrets);
