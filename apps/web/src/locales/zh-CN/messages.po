@@ -1320,6 +1320,14 @@ msgstr "连接测试失败。"
 msgid "Connection to {0} is still pending. You can close this and check again."
 msgstr "与 {0} 的连接仍在等待。可以关闭此窗口稍后再看。"
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Consolidation output tokens"
+msgstr ""
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Consolidation reasoning"
+msgstr ""
+
 #: src/pages/ModelSettingsOverlay.tsx
 #: src/pages/Onboarding.tsx
 msgid "Context limit"

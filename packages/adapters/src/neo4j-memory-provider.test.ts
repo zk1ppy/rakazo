@@ -222,6 +222,33 @@ describe("Neo4jMemoryProvider", () => {
     expect(oversized.extractModelProvider).toBeUndefined();
   });
 
+  it("keeps consolidate model settings and rejects an invalid budget", async () => {
+    const publicHost = { resolveHostname: async () => [{ address: "203.0.113.10", family: 4 }] };
+    const classified = await classifyNeo4jConnectionSettings(
+      {
+        uri: "neo4j+s://db.example.test",
+        username: "neo4j",
+        consolidateThinkingLevel: " minimal ",
+        consolidateMaxOutputTokens: "2048",
+      },
+      publicHost,
+    );
+    expect(classified).toMatchObject({
+      consolidateThinkingLevel: "minimal",
+      consolidateMaxOutputTokens: "2048",
+    });
+    await expect(
+      classifyNeo4jConnectionSettings(
+        {
+          uri: "neo4j+s://db.example.test",
+          username: "neo4j",
+          consolidateMaxOutputTokens: "4",
+        },
+        publicHost,
+      ),
+    ).rejects.toThrow(/consolidateMaxOutputTokens/);
+  });
+
   it("refuses a private endpoint before connecting when the caller is not the owner", async () => {
     const driver = new FakeDriver();
     await expect(

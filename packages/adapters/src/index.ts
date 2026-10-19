@@ -83,6 +83,10 @@ export * from "./mcp-transport.js";
 export * from "./media-generation-factory.js";
 export * from "./media-generation-provider.js";
 export {
+  assertConsolidateMaxOutputTokens,
+  assertConsolidateThinkingLevel,
+} from "./memory-consolidate.js";
+export {
   backfillMemoryConsolidation,
   loadNeo4jConsolidationSpaces,
   parseBackfillConsolidateArgs,

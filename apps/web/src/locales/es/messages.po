@@ -1320,6 +1320,14 @@ msgstr "La prueba de conexión falló."
 msgid "Connection to {0} is still pending. You can close this and check again."
 msgstr "La conexión con {0} sigue pendiente. Puedes cerrar esto y volver a comprobar."
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Consolidation output tokens"
+msgstr ""
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Consolidation reasoning"
+msgstr ""
+
 #: src/pages/ModelSettingsOverlay.tsx
 #: src/pages/Onboarding.tsx
 msgid "Context limit"

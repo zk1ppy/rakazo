@@ -508,6 +508,8 @@ export const appContract = {
           maxChunkChars: z.string().max(8).optional(),
           extractModelProvider: z.string().max(80).optional(),
           extractModelId: z.string().max(200).optional(),
+          consolidateThinkingLevel: z.string().max(16).optional(),
+          consolidateMaxOutputTokens: z.string().max(8).optional(),
         }),
       )
       .output(SpaceMemoryConfigSchema),

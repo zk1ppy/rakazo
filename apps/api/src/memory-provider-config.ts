@@ -1,6 +1,8 @@
 import { ORPCError } from "@orpc/server";
 import type { SecretStore } from "@rakazo/adapter-kit";
 import {
+  assertConsolidateMaxOutputTokens,
+  assertConsolidateThinkingLevel,
   assertNeo4jMaxChunkChars,
   classifyMemoryProviderSettings,
   MemoryProviderDeploymentOwnerRequiredError,
@@ -143,6 +145,8 @@ export async function updateNeo4jExtraction(
     maxChunkChars?: string;
     extractModelProvider?: string;
     extractModelId?: string;
+    consolidateThinkingLevel?: string;
+    consolidateMaxOutputTokens?: string;
   },
 ) {
   await requireSpaceOwner(deps.prisma, actor);
@@ -166,6 +170,30 @@ export async function updateNeo4jExtraction(
       });
     }
     if (validated) settings.maxChunkChars = validated;
+  }
+  if (input.consolidateThinkingLevel !== undefined) {
+    let thinking: string | undefined;
+    try {
+      thinking = assertConsolidateThinkingLevel(input.consolidateThinkingLevel);
+    } catch (error) {
+      throw new ORPCError("BAD_REQUEST", {
+        message: error instanceof Error ? error.message : "Consolidation reasoning is invalid",
+      });
+    }
+    if (thinking) settings.consolidateThinkingLevel = thinking;
+    else delete settings.consolidateThinkingLevel;
+  }
+  if (input.consolidateMaxOutputTokens !== undefined) {
+    let maxOutput: string | undefined;
+    try {
+      maxOutput = assertConsolidateMaxOutputTokens(input.consolidateMaxOutputTokens);
+    } catch (error) {
+      throw new ORPCError("BAD_REQUEST", {
+        message: error instanceof Error ? error.message : "Consolidation output tokens are invalid",
+      });
+    }
+    if (maxOutput) settings.consolidateMaxOutputTokens = maxOutput;
+    else delete settings.consolidateMaxOutputTokens;
   }
   if (input.extractModelProvider !== undefined || input.extractModelId !== undefined) {
     const provider = input.extractModelProvider?.trim() ?? "";

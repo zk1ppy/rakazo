@@ -15,7 +15,12 @@ import type {
 import { memoryExtractJob } from "@rakazo/adapter-kit";
 import { isCloudMetadataHost, isLocalMcpHost } from "@rakazo/contracts";
 import { getLogger } from "@rakazo/logging";
-import type { ConsolidationPage } from "./memory-consolidate.js";
+import type { ConsolidateModelSettings, ConsolidationPage } from "./memory-consolidate.js";
+import {
+  assertConsolidateMaxOutputTokens,
+  assertConsolidateThinkingLevel,
+  readConsolidateModelSettings,
+} from "./memory-consolidate.js";
 import type {
   ExtractedEntityWrite,
   ExtractedRelationWrite,
@@ -52,6 +57,7 @@ import {
   readNeo4jFactText,
   realignNeo4jFactTimes,
   recallNeo4jFacts,
+  renameNeo4jEntity,
   saveNeo4jFact,
 } from "./neo4j-memory-client.js";
 import type { ResolveHostname } from "./network-address.js";
@@ -238,6 +244,15 @@ export async function classifyNeo4jConnectionSettings(
     classified.extractModelProvider = extractionModel.provider;
     classified.extractModelId = extractionModel.id;
   }
+  const consolidateThinkingLevel = assertConsolidateThinkingLevel(
+    settings.consolidateThinkingLevel,
+  );
+  if (consolidateThinkingLevel) classified.consolidateThinkingLevel = consolidateThinkingLevel;
+  const consolidateMaxOutputTokens = assertConsolidateMaxOutputTokens(
+    settings.consolidateMaxOutputTokens,
+  );
+  if (consolidateMaxOutputTokens)
+    classified.consolidateMaxOutputTokens = consolidateMaxOutputTokens;
   return classified;
 }
 
@@ -300,6 +315,7 @@ export function createNeo4jProvider(
       extract: neo4jExtractionEnabled(settings),
       maxChunkChars: neo4jMaxChunkChars(settings),
       extractionModel: readNeo4jExtractionModel(settings),
+      consolidateModelSettings: readConsolidateModelSettings(settings),
     },
   );
 }
@@ -434,6 +450,7 @@ export interface Neo4jProviderOptions {
   extract?: boolean;
   maxChunkChars?: number;
   extractionModel?: Neo4jExtractionModel | null;
+  consolidateModelSettings?: ConsolidateModelSettings;
 }
 
 export class Neo4jMemoryProvider implements SemanticMemoryProvider {
@@ -442,6 +459,7 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
   private readonly extractEnabled: boolean;
   private readonly maxChunkChars: number;
   private readonly pinnedModel: Neo4jExtractionModel | null;
+  private readonly consolidateSettings: ConsolidateModelSettings;
 
   constructor(
     private readonly connection: Neo4jMemoryConnection,
@@ -452,6 +470,8 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
     this.extractEnabled = options?.extract ?? true;
     this.maxChunkChars = options?.maxChunkChars ?? neo4jMaxChunkChars({});
     this.pinnedModel = options?.extractionModel ?? null;
+    this.consolidateSettings =
+      options?.consolidateModelSettings ?? readConsolidateModelSettings({});
   }
 
   extractionEnabled(): boolean {
@@ -460,6 +480,10 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
 
   extractionModel(): Neo4jExtractionModel | null {
     return this.pinnedModel;
+  }
+
+  consolidateModelSettings(): ConsolidateModelSettings {
+    return this.consolidateSettings;
   }
 
   extractionChunkChars(): number {
@@ -721,6 +745,13 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
       input,
       signal,
     );
+  }
+
+  async renameEntity(
+    input: Parameters<typeof renameNeo4jEntity>[2],
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    return renameNeo4jEntity(await this.ready(signal), this.connection.database, input, signal);
   }
 
   async readFactText(

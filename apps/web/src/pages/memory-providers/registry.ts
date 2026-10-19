@@ -20,6 +20,8 @@ export interface Neo4jExtractionUpdate {
   maxChunkChars?: string;
   extractModelProvider?: string;
   extractModelId?: string;
+  consolidateThinkingLevel?: string;
+  consolidateMaxOutputTokens?: string;
 }
 
 export interface MemoryProviderConnectedSettingsProps {

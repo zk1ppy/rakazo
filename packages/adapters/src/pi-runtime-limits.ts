@@ -146,6 +146,27 @@ const SEPARATED_THINKING_APIS = new Set([
  * for that case, so the call uses the model's max output — the connection's
  * own cap when one is stored — and never asks for more than that.
  */
+/**
+ * Cap one background task that brings its own budget. When thinking is on,
+ * `maxOutputTokens` is the whole shared completion cap, so it has to leave room
+ * for reasoning and the answer. Thinking that is off stays within the visible
+ * answer. The connection max, when set, is still a ceiling.
+ */
+export function taskCompletionTokens(
+  model: { maxTokens?: number },
+  thinkingLevel: string,
+  maxOutputTokens: number,
+  answerTokens: number,
+): number {
+  const answer = Math.max(1, Math.floor(answerTokens));
+  const requested = Math.max(1, Math.floor(maxOutputTokens));
+  const budget =
+    !thinkingLevel || thinkingLevel === "off" ? Math.min(requested, answer) : requested;
+  const ceiling =
+    typeof model.maxTokens === "number" && model.maxTokens >= 1 ? model.maxTokens : undefined;
+  return ceiling === undefined ? budget : Math.min(ceiling, budget);
+}
+
 export function extractionCompletionTokens(
   model: { api?: string; reasoning?: boolean; maxTokens?: number },
   thinkingLevel: string,
