@@ -3,6 +3,7 @@ import type { SecretStore } from "@rakazo/adapter-kit";
 import {
   assertConsolidateMaxOutputTokens,
   assertConsolidateThinkingLevel,
+  assertConsolidateTimeoutMs,
   assertNeo4jMaxChunkChars,
   classifyMemoryProviderSettings,
   MemoryProviderDeploymentOwnerRequiredError,
@@ -147,6 +148,7 @@ export async function updateNeo4jExtraction(
     extractModelId?: string;
     consolidateThinkingLevel?: string;
     consolidateMaxOutputTokens?: string;
+    consolidateTimeoutMs?: string;
     dream?: boolean;
   },
 ) {
@@ -195,6 +197,18 @@ export async function updateNeo4jExtraction(
     }
     if (maxOutput) settings.consolidateMaxOutputTokens = maxOutput;
     else delete settings.consolidateMaxOutputTokens;
+  }
+  if (input.consolidateTimeoutMs !== undefined) {
+    let timeout: string | undefined;
+    try {
+      timeout = assertConsolidateTimeoutMs(input.consolidateTimeoutMs);
+    } catch (error) {
+      throw new ORPCError("BAD_REQUEST", {
+        message: error instanceof Error ? error.message : "Consolidation timeout is invalid",
+      });
+    }
+    if (timeout) settings.consolidateTimeoutMs = timeout;
+    else delete settings.consolidateTimeoutMs;
   }
   if (input.extractModelProvider !== undefined || input.extractModelId !== undefined) {
     const provider = input.extractModelProvider?.trim() ?? "";

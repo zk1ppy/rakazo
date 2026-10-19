@@ -146,6 +146,7 @@ export function MemorySettingsOverlay({
     extractModelId?: string;
     consolidateThinkingLevel?: string;
     consolidateMaxOutputTokens?: string;
+    consolidateTimeoutMs?: string;
     dream?: boolean;
   }) {
     setError(null);

@@ -19,6 +19,7 @@ import type { ConsolidateModelSettings, ConsolidationPage } from "./memory-conso
 import {
   assertConsolidateMaxOutputTokens,
   assertConsolidateThinkingLevel,
+  assertConsolidateTimeoutMs,
   readConsolidateModelSettings,
 } from "./memory-consolidate.js";
 import { neo4jDreamEnabled } from "./memory-dream.js";
@@ -257,6 +258,8 @@ export async function classifyNeo4jConnectionSettings(
   );
   if (consolidateMaxOutputTokens)
     classified.consolidateMaxOutputTokens = consolidateMaxOutputTokens;
+  const consolidateTimeoutMs = assertConsolidateTimeoutMs(settings.consolidateTimeoutMs);
+  if (consolidateTimeoutMs) classified.consolidateTimeoutMs = consolidateTimeoutMs;
   return classified;
 }
 

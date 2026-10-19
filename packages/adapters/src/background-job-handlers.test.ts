@@ -12,6 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createBackgroundJobHandlers } from "./background-job-handlers.js";
 import { createRunExecutor } from "./executor.js";
 import { compactHistory } from "./history-compaction.js";
+import { MemoryConsolidatePermanentError } from "./memory-consolidate.js";
 import { dreamConsolidateJobKey } from "./memory-dream.js";
 import { deliverMessagingOutbound, mirrorMessagingOutbound } from "./messaging-delivery.js";
 import { Neo4jMemoryProvider } from "./neo4j-memory-provider.js";
@@ -312,6 +313,108 @@ describe("createBackgroundJobHandlers", () => {
     expect(sink.events.map((event) => event.message)).toContain(
       "memory.consolidate skipped: dream mode is off",
     );
+  });
+
+  it("returns after a permanent consolidate failure instead of asking Graphile to retry", async () => {
+    class PermanentNeo4j extends Neo4jMemoryProvider {
+      override listConsolidationPage(): Promise<never> {
+        throw new MemoryConsolidatePermanentError("invalid api key");
+      }
+    }
+    const handlers = createBackgroundJobHandlers({
+      executor: {} as unknown as ReturnType<typeof createRunExecutor>,
+      prisma: {} as unknown as PrismaClient,
+      sandbox: {} as unknown as SandboxProvider,
+      home: {} as unknown as AgentHomeStore,
+      jobs: {} as unknown as JobPublisher,
+      events: {} as unknown as ThreadEvents,
+      workerId: "worker-1",
+      runtime: { run: vi.fn() } as unknown as AgentRuntime,
+      secretStore: {} as unknown as EncryptedSecretStore,
+      memoryProviders: {
+        resolve: vi.fn(async () => ({
+          provider: new PermanentNeo4j(
+            {
+              uri: "bolt://127.0.0.1:7687",
+              database: "neo4j",
+              username: "neo4j",
+              password: "secret",
+              endpointTrust: "private",
+            },
+            () => {
+              throw new Error("driver");
+            },
+          ),
+          defaultScope: "isolated" as const,
+        })),
+      },
+    });
+    const sink = createTestSink();
+    const previousLogger = getLogger();
+    installLogger(createLogger({ service: "test", sinks: [sink] }));
+    try {
+      await handlers["memory.consolidate"]({
+        spaceId: "space-1",
+        userId: "user-1",
+        attempt: 0,
+        scheduleGeneration: 0,
+      });
+    } finally {
+      installLogger(previousLogger);
+    }
+    expect(sink.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          level: "error",
+          message: "memory.consolidate stopped",
+          "job.outcome": "permanent",
+        }),
+      ]),
+    );
+  });
+
+  it("rethrows an unexpected consolidate failure so a dropped connection can retry", async () => {
+    class BrokenNeo4j extends Neo4jMemoryProvider {
+      override listConsolidationPage(): Promise<never> {
+        throw new Error("connection reset");
+      }
+    }
+    const handlers = createBackgroundJobHandlers({
+      executor: {} as unknown as ReturnType<typeof createRunExecutor>,
+      prisma: {} as unknown as PrismaClient,
+      sandbox: {} as unknown as SandboxProvider,
+      home: {} as unknown as AgentHomeStore,
+      jobs: {} as unknown as JobPublisher,
+      events: {} as unknown as ThreadEvents,
+      workerId: "worker-1",
+      runtime: { run: vi.fn() } as unknown as AgentRuntime,
+      secretStore: {} as unknown as EncryptedSecretStore,
+      memoryProviders: {
+        resolve: vi.fn(async () => ({
+          provider: new BrokenNeo4j(
+            {
+              uri: "bolt://127.0.0.1:7687",
+              database: "neo4j",
+              username: "neo4j",
+              password: "secret",
+              endpointTrust: "private",
+            },
+            () => {
+              throw new Error("driver");
+            },
+          ),
+          defaultScope: "isolated" as const,
+        })),
+      },
+    });
+    await expect(
+      handlers["memory.consolidate"]({
+        spaceId: "space-1",
+        userId: "user-1",
+        attempt: 0,
+        scheduleGeneration: 0,
+      }),
+    ).rejects.toThrow("connection reset");
   });
 
   it("enqueues nightly consolidation only for spaces with dream mode on", async () => {

@@ -107,7 +107,10 @@ describe("Neo4j consolidation settings", () => {
     expect(dream?.checked).toBe(false);
     expect(thinking.value).toBe("low");
     expect(tokens.value).toBe("");
+    const timeout = labeled<HTMLInputElement>(container, "Consolidation timeout (ms)", "input");
     expect(tokens.placeholder).toBe("32768");
+    expect(timeout.placeholder).toBe("180000");
+    expect(timeout.value).toBe("");
     expect([...thinking.options].map((option) => option.value)).toEqual([
       "off",
       "minimal",
@@ -149,6 +152,25 @@ describe("Neo4j consolidation settings", () => {
     expect(updates.at(-1)).toMatchObject({
       dream: false,
       consolidateThinkingLevel: "",
+      consolidateMaxOutputTokens: "2048",
+      consolidateTimeoutMs: "",
+    });
+
+    const timeoutInput = labeled<HTMLInputElement>(
+      container,
+      "Consolidation timeout (ms)",
+      "input",
+    );
+    await act(async () => {
+      timeoutInput.focus();
+      inputSetter?.call(timeoutInput, "180000");
+      timeoutInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      timeoutInput.blur();
+    });
+    expect(updates.at(-1)).toMatchObject({
+      consolidateTimeoutMs: "180000",
       consolidateMaxOutputTokens: "2048",
     });
 

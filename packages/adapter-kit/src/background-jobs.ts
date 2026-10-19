@@ -221,9 +221,11 @@ export function memoryExtractJob(
 }
 
 /**
- * A dropped database connection can retry this row. Rate limits do not: the
- * handler reschedules a new row and returns. The key alternates with
- * scheduleGeneration so that follow-up survives the successful row's delete.
+ * A dropped database connection can retry this row. Rate limits and confirmation
+ * timeouts do not: the handler reschedules a new row and returns. A permanent
+ * model failure also returns, so Graphile does not spend the remaining attempts.
+ * The key alternates with scheduleGeneration so that follow-up survives the
+ * successful row's delete.
  */
 export const MEMORY_CONSOLIDATE_MAX_ATTEMPTS = 3;
 

@@ -85,6 +85,7 @@ export * from "./media-generation-provider.js";
 export {
   assertConsolidateMaxOutputTokens,
   assertConsolidateThinkingLevel,
+  assertConsolidateTimeoutMs,
 } from "./memory-consolidate.js";
 export {
   backfillMemoryConsolidation,

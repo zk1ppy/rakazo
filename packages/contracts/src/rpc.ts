@@ -510,6 +510,7 @@ export const appContract = {
           extractModelId: z.string().max(200).optional(),
           consolidateThinkingLevel: z.string().max(16).optional(),
           consolidateMaxOutputTokens: z.string().max(8).optional(),
+          consolidateTimeoutMs: z.string().max(8).optional(),
           dream: z.boolean().optional(),
         }),
       )
