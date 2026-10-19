@@ -412,12 +412,10 @@ async function callExtractor(
         tools: [],
         allowSilentEmpty: true,
         providerRetries: 0,
-        // One call. Thinking is requested off when the model allows it.
-        // GLM-5.3 cannot disable thinking, so that family is asked for "low"
-        // (reasoning_effort "low"). The runtime sizes the shared completion
-        // cap to that effort's allowance plus the visible budget, and the
-        // connection's max output still wins. A second call would spend
-        // another quota unit.
+        // One call. Thinking is requested off unless the connection stores a
+        // minimum effort. The runtime sizes a shared completion cap to that
+        // effort's allowance plus the visible budget, and the connection's
+        // max output still wins. A second call would spend another quota unit.
         visibleOutputTokens: EXTRACT_ANSWER_TOKENS,
         model: {
           ...model,

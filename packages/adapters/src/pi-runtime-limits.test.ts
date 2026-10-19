@@ -129,18 +129,16 @@ describe("resolveCompletionMaxTokens", () => {
 });
 
 describe("extractionThinkingLevel", () => {
-  it("disables thinking when the model allows it", () => {
-    expect(extractionThinkingLevel({ id: "gpt-test", reasoning: false })).toBe("off");
-    expect(extractionThinkingLevel({ id: "gpt-test", reasoning: true })).toBe("off");
-    expect(extractionThinkingLevel({ id: "glm-5.2", reasoning: true })).toBe("off");
+  it("disables thinking when the connection stores no floor", () => {
+    expect(extractionThinkingLevel({ reasoning: false })).toBe("off");
+    expect(extractionThinkingLevel({ reasoning: true })).toBe("off");
+    expect(extractionThinkingLevel({ reasoning: true, minReasoningEffort: null })).toBe("off");
   });
 
-  it("asks GLM-5.3 for low effort because thinking cannot be disabled", () => {
-    expect(extractionThinkingLevel({ id: "hf:zai-org/GLM-5.3-Flash", reasoning: true })).toBe(
-      "low",
-    );
-    expect(extractionThinkingLevel({ id: "zai-org/GLM-5.3", reasoning: true })).toBe("low");
-    expect(extractionThinkingLevel({ id: "glm-5.3-flash", reasoning: false })).toBe("off");
+  it("uses the connection's minimum effort", () => {
+    expect(extractionThinkingLevel({ reasoning: true, minReasoningEffort: "low" })).toBe("low");
+    expect(extractionThinkingLevel({ reasoning: true, minReasoningEffort: null })).toBe("off");
+    expect(extractionThinkingLevel({ reasoning: false, minReasoningEffort: "low" })).toBe("off");
   });
 });
 

@@ -3021,6 +3021,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
       maxTokens: resolved.maxTokens,
       acceptsImages: resolved.acceptsImages,
       maxImagesPerPrompt: resolved.maxImagesPerPrompt,
+      minReasoningEffort: resolved.minReasoningEffort ?? null,
       thinkingLevel:
         ((credential.defaultModel === modelId
           ? credential.thinkingLevel
@@ -3101,6 +3102,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
         maxTokens: resolved.maxTokens,
         acceptsImages: resolved.acceptsImages,
         maxImagesPerPrompt: resolved.maxImagesPerPrompt,
+        minReasoningEffort: resolved.minReasoningEffort ?? null,
         thinkingLevel: thinkingLevel ?? resolved.thinkingLevel ?? null,
         oauth: resolved.oauth
           ? {
@@ -7039,6 +7041,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
                 maxTokens: resolved.maxTokens,
                 acceptsImages: resolved.acceptsImages,
                 maxImagesPerPrompt: resolved.maxImagesPerPrompt,
+                minReasoningEffort: resolved.minReasoningEffort ?? null,
                 thinkingLevel: thinkingLevel ?? resolved.thinkingLevel ?? null,
                 oauth: resolved.oauth
                   ? {
@@ -9074,6 +9077,7 @@ async function resolveModelKey(
   reasoning?: boolean;
   maxTokens?: number;
   thinkingLevel?: AgentRunRequest["model"]["thinkingLevel"];
+  minReasoningEffort?: AgentRunRequest["model"]["minReasoningEffort"];
   acceptsImages?: boolean;
   maxImagesPerPrompt?: number;
   oauth?: AgentModelOAuthCredential;
@@ -9174,6 +9178,10 @@ async function resolveModelKey(
         maxTokens: resolved.secret.maxTokens,
         thinkingLevel:
           resolved.secret.kind === "openai_compatible" ? resolved.secret.thinkingLevel : undefined,
+        minReasoningEffort:
+          resolved.secret.kind === "openai_compatible"
+            ? resolved.secret.minReasoningEffort
+            : undefined,
         acceptsImages,
         maxImagesPerPrompt:
           resolved.secret.kind === "openai_compatible"

@@ -23,6 +23,9 @@ test("custom connections persist reasoning support and bot thinking", async ({
   await page.getByText("Advanced", { exact: true }).click();
   await page.getByRole("checkbox", { name: "Supports thinking" }).check();
   await page.getByRole("combobox", { name: "Reasoning effort", exact: true }).selectOption("low");
+  await page
+    .getByRole("combobox", { name: "Minimum reasoning effort", exact: true })
+    .selectOption("low");
   await page.getByLabel("Maximum output tokens").fill("8192");
   await page.getByLabel("Context limit").fill("65536");
   await page.getByRole("checkbox", { name: "Supports images" }).check();
@@ -35,6 +38,7 @@ test("custom connections persist reasoning support and bot thinking", async ({
       modelId?: string;
       reasoning?: boolean;
       thinkingLevel?: string | null;
+      minReasoningEffort?: string | null;
       maxTokens?: number;
       contextWindow?: number;
       supportsImages?: boolean;
@@ -43,6 +47,9 @@ test("custom connections persist reasoning support and bot thinking", async ({
   >(page, "models/credentials", {});
   expect(credentials.find((entry) => entry.modelId === "arbitrary-model")?.reasoning).toBe(true);
   expect(credentials.find((entry) => entry.modelId === "arbitrary-model")?.thinkingLevel).toBe(
+    "low",
+  );
+  expect(credentials.find((entry) => entry.modelId === "arbitrary-model")?.minReasoningEffort).toBe(
     "low",
   );
   expect(credentials.find((entry) => entry.modelId === "arbitrary-model")?.maxTokens).toBe(8192);
@@ -62,6 +69,9 @@ test("custom connections persist reasoning support and bot thinking", async ({
   await expect(page.getByRole("combobox", { name: "Reasoning effort", exact: true })).toHaveValue(
     "low",
   );
+  await expect(
+    page.getByRole("combobox", { name: "Minimum reasoning effort", exact: true }),
+  ).toHaveValue("low");
   await expect(page.getByLabel("Maximum output tokens")).toHaveValue("8192");
   await expect(page.getByLabel("Context limit")).toHaveValue("65536");
   await expect(page.getByRole("checkbox", { name: "Supports images" })).toBeChecked();

@@ -64,10 +64,9 @@ vi.mock("@earendil-works/pi-agent-core", () => ({
 vi.mock("@earendil-works/pi-ai/providers/all", () => ({
   builtinModels: () => ({
     getModel: (_provider: string, modelId: string) => {
-      if (modelId === "reasoning-model") return { provider: "test", id: modelId, reasoning: true };
-      if (/glm-5\.3/i.test(modelId)) {
+      if (modelId === "reasoning-model" || modelId === "hf:zai-org/GLM-5.3-Flash") {
         return {
-          provider: "openai-compatible",
+          provider: "test",
           id: modelId,
           api: "openai-completions",
           reasoning: true,
@@ -132,8 +131,12 @@ async function runWithModel(
   }>,
   maxImagesPerPrompt?: number,
   limits?: { contextWindow?: number; maxTokens?: number },
-  extra?: { visibleOutputTokens?: number },
+  extra?: {
+    visibleOutputTokens?: number;
+    minReasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
+  },
 ) {
+  const { minReasoningEffort, ...requestExtra } = extra ?? {};
   const runtime = new PiAgentRuntime();
   for await (const _event of runtime.run(
     {
@@ -149,11 +152,12 @@ async function runWithModel(
         id: modelId,
         thinkingLevel,
         maxImagesPerPrompt,
+        minReasoningEffort,
         ...limits,
       },
       executeTool: vi.fn(async () => ({ ok: true })),
       resolveModel,
-      ...extra,
+      ...requestExtra,
     },
     {
       operationId: "1",
@@ -219,7 +223,7 @@ describe("Pi agent thinking level", () => {
     expect(fakeAgentState.models[0]?.maxTokens).toBe(1_024);
   });
 
-  it("budgets low effort plus the visible answer for GLM-5.3, capped by the connection", async () => {
+  it("budgets the connection minimum effort plus the visible answer", async () => {
     const levels = await runWithModel(
       "hf:zai-org/GLM-5.3-Flash",
       "openai-compatible",
@@ -228,11 +232,26 @@ describe("Pi agent thinking level", () => {
       undefined,
       undefined,
       { maxTokens: 65_536, contextWindow: 524_288 },
-      { visibleOutputTokens: 1_024 },
+      { visibleOutputTokens: 1_024, minReasoningEffort: "low" },
     );
     expect(levels[0]).toBe("low");
     expect(fakeAgentState.models[0]?.maxTokens).toBe(1_024 + 2_048);
     expect(fakeAgentState.models[0]?.contextWindow).toBe(524_288);
+  });
+
+  it("does not raise the budget from the model id alone", async () => {
+    const levels = await runWithModel(
+      "hf:zai-org/GLM-5.3-Flash",
+      "openai-compatible",
+      new AbortController().signal,
+      null,
+      undefined,
+      undefined,
+      { maxTokens: 65_536 },
+      { visibleOutputTokens: 1_024 },
+    );
+    expect(levels[0]).toBe("off");
+    expect(fakeAgentState.models[0]?.maxTokens).toBe(1_024);
   });
 
   it("uses a stable provider session for each bot thread", async () => {

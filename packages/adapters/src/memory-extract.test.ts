@@ -192,7 +192,7 @@ describe("extractMemoryGraph", () => {
     expect(memory.applyExtraction.mock.calls[0]?.[0].entities[0].type).toBe("Person");
   });
 
-  it("asks GLM-5.3 for low effort and keeps the connection output cap", async () => {
+  it("uses the connection minimum effort and keeps its output cap", async () => {
     const run = vi.fn<AgentRuntime["run"]>(async function* () {
       yield { type: "done" as const, text: '{"entities":[],"relations":[]}' };
     });
@@ -201,6 +201,7 @@ describe("extractMemoryGraph", () => {
       id: "hf:zai-org/GLM-5.3-Flash",
       apiKey: "test-key",
       reasoning: true,
+      minReasoningEffort: "low" as const,
       maxTokens: 65_536,
       contextWindow: 524_288,
     } satisfies AgentRunRequest["model"];
@@ -216,8 +217,31 @@ describe("extractMemoryGraph", () => {
       model: {
         id: "hf:zai-org/GLM-5.3-Flash",
         thinkingLevel: "low",
+        minReasoningEffort: "low",
         maxTokens: 65_536,
       },
+    });
+  });
+
+  it("does not infer a reasoning floor from the model id", async () => {
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done" as const, text: '{"entities":[],"relations":[]}' };
+    });
+    const named = {
+      provider: "openai-compatible",
+      id: "hf:zai-org/GLM-5.3-Flash",
+      apiKey: "test-key",
+      reasoning: true,
+      maxTokens: 65_536,
+    } satisfies AgentRunRequest["model"];
+    await extractMemoryGraph(
+      deps(run, jobs(), false, named),
+      payload(),
+      store("Ada Lovelace founded the Analytical Society in London."),
+    );
+    expect(run.mock.calls[0]?.[0].model).toMatchObject({
+      thinkingLevel: "off",
+      maxTokens: 65_536,
     });
   });
 

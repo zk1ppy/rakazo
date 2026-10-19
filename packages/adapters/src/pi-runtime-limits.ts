@@ -104,28 +104,24 @@ const EXTRACT_THINKING_BUDGETS: Record<string, number> = {
   high: 16_384,
 };
 
-/**
- * GLM-5.3 and GLM-5.3-Flash force thinking. On an OpenAI-compatible API,
- * `reasoning_effort` other than `low`, `high`, or `max` is rejected, and
- * `thinking.type: disabled` is rejected too. The lowest accepted effort is
- * `low`. Pi sends that as `reasoning_effort` when the thinking level is `low`
- * (`thinkingFormat: "openai"`); it does not send `chat_template_kwargs` or
- * `thinking.type`.
- */
-const FORCED_LOW_EFFORT_MODEL = /glm-5\.3/i;
+const EXTRACTION_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+type ExtractionEffort = (typeof EXTRACTION_EFFORTS)[number];
 
 /**
- * Lowest effort extraction should request. `off` becomes `reasoning_effort`
- * `"none"` on an OpenAI-compatible connection, which disables thinking where
- * the model allows it. GLM-5.3 cannot disable thinking, so extraction asks
- * for `low` instead of `"none"`.
+ * Lowest effort extraction should request. Absent means thinking can be
+ * disabled: an OpenAI-compatible connection then sends `reasoning_effort`
+ * `"none"`. A stored minimum is that connection's floor, sent as
+ * `reasoning_effort` through the same thinking level.
  */
 export function extractionThinkingLevel(model: {
-  id?: string;
   reasoning?: boolean;
-}): "off" | "low" {
+  minReasoningEffort?: string | null;
+}): "off" | ExtractionEffort {
   if (!model.reasoning) return "off";
-  if (model.id && FORCED_LOW_EFFORT_MODEL.test(model.id)) return "low";
+  const floor = model.minReasoningEffort;
+  if (floor && (EXTRACTION_EFFORTS as readonly string[]).includes(floor)) {
+    return floor as ExtractionEffort;
+  }
   return "off";
 }
 

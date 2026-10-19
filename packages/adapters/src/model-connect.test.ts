@@ -538,6 +538,77 @@ it.each([true, false])(
 );
 
 it.each([null, "low", "high"] as const)(
+  "round-trips the nullable minimum reasoning effort %s",
+  (minReasoningEffort) => {
+    const plaintext = buildModelConnectPlaintext({
+      provider: "openai-compatible",
+      baseUrl: "http://localhost:8000/v1",
+      modelId: "arbitrary-model",
+      reasoning: true,
+      minReasoningEffort,
+    });
+    if (minReasoningEffort === null) {
+      expect(parseModelSecret(plaintext)).not.toHaveProperty("minReasoningEffort");
+    } else {
+      expect(parseModelSecret(plaintext)).toMatchObject({ minReasoningEffort });
+    }
+    expect(
+      modelCredentialDto(
+        {
+          id: "cred",
+          provider: "openai-compatible",
+          label: "Server",
+          isDefault: true,
+          defaultModel: "arbitrary-model",
+        },
+        plaintext,
+      ).minReasoningEffort,
+    ).toBe(minReasoningEffort ?? undefined);
+  },
+);
+
+it("keeps a saved minimum effort until the connection clears it", () => {
+  const saved = buildModelConnectPlaintext({
+    provider: "openai-compatible",
+    baseUrl: "http://localhost:8000/v1",
+    modelId: "arbitrary-model",
+    reasoning: true,
+    minReasoningEffort: "low",
+  });
+  const kept = buildModelConnectPlaintext(
+    {
+      provider: "openai-compatible",
+      baseUrl: "http://localhost:8000/v1",
+      modelId: "arbitrary-model",
+      reasoning: true,
+    },
+    saved,
+  );
+  expect(parseModelSecret(kept)).toMatchObject({ minReasoningEffort: "low" });
+  const cleared = buildModelConnectPlaintext(
+    {
+      provider: "openai-compatible",
+      baseUrl: "http://localhost:8000/v1",
+      modelId: "arbitrary-model",
+      reasoning: true,
+      minReasoningEffort: null,
+    },
+    saved,
+  );
+  expect(parseModelSecret(cleared)).not.toHaveProperty("minReasoningEffort");
+});
+
+it("drops a stored minimum effort that is not a positive level", () => {
+  const plaintext = JSON.stringify({
+    kind: "openai_compatible",
+    baseUrl: "http://localhost:8000/v1",
+    reasoning: true,
+    minReasoningEffort: "off",
+  });
+  expect(parseModelSecret(plaintext)).not.toHaveProperty("minReasoningEffort");
+});
+
+it.each([null, "low", "high"] as const)(
   "round-trips the nullable custom reasoning effort %s",
   (thinkingLevel) => {
     const plaintext = buildModelConnectPlaintext({

@@ -247,7 +247,13 @@ export class PiAgentRuntime implements AgentRuntime {
         }
         const { models, model, apiKey } = selectedModel;
         if (typeof request.visibleOutputTokens === "number") {
-          const level = thinkingLevelFor(model, extractionThinkingLevel(model));
+          const level = thinkingLevelFor(
+            model,
+            extractionThinkingLevel({
+              reasoning: model.reasoning,
+              minReasoningEffort: request.model.minReasoningEffort,
+            }),
+          );
           const maxTokens = extractionCompletionTokens(model, level, request.visibleOutputTokens);
           request.model = { ...request.model, thinkingLevel: level, maxTokens };
           if (model.reasoning && maxTokens > request.visibleOutputTokens) {
