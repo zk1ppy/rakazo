@@ -134,9 +134,14 @@ async function runWithModel(
   extra?: {
     visibleOutputTokens?: number;
     minReasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
+    taskOutput?: {
+      task: string;
+      thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+      maxOutputTokens: number;
+    };
   },
 ) {
-  const { minReasoningEffort, ...requestExtra } = extra ?? {};
+  const { minReasoningEffort, taskOutput, ...requestExtra } = extra ?? {};
   const runtime = new PiAgentRuntime();
   for await (const _event of runtime.run(
     {
@@ -155,6 +160,7 @@ async function runWithModel(
         minReasoningEffort,
         ...limits,
       },
+      ...(taskOutput ? { taskOutput } : {}),
       executeTool: vi.fn(async () => ({ ok: true })),
       resolveModel,
       ...requestExtra,
@@ -252,6 +258,29 @@ describe("Pi agent thinking level", () => {
     );
     expect(levels[0]).toBe("medium");
     expect(fakeAgentState.models[0]?.maxTokens).toBe(65_536);
+  });
+
+  it("uses the consolidate task budget instead of the chat max", async () => {
+    const levels = await runWithModel(
+      "hf:zai-org/GLM-5.3-Flash",
+      "openai-compatible",
+      new AbortController().signal,
+      "medium",
+      undefined,
+      undefined,
+      { maxTokens: 65_536, contextWindow: 524_288 },
+      {
+        visibleOutputTokens: 256,
+        minReasoningEffort: "medium",
+        taskOutput: {
+          task: "memory.consolidate",
+          thinkingLevel: "low",
+          maxOutputTokens: 1_024,
+        },
+      },
+    );
+    expect(levels[0]).toBe("low");
+    expect(fakeAgentState.models[0]?.maxTokens).toBe(1_024);
   });
 
   it("does not raise the budget from the model id alone", async () => {

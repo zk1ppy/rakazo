@@ -12,6 +12,9 @@ import type { MemoryExtractDeps, MemoryExtractStore } from "./memory-extract.js"
 import {
   extractMemoryGraph,
   isTrivialMemoryText,
+  MEMORY_EXTRACT_INSTRUCTIONS,
+  memoryExtractPrompt,
+  memorySubjectName,
   parseMemoryExtraction,
   planExtractionChunks,
   readNeo4jExtractionModel,
@@ -140,7 +143,8 @@ describe("memory extraction planning", () => {
       "shared",
     );
     expect(extracted.entities.map((entity) => entity.type)).toEqual(["Person", "Organization"]);
-    expect(extracted.entities[0]?.summary).toContain("role: 1");
+    expect(extracted.entities[0]?.summary).toBe("");
+    expect(extracted.entities[0]?.aliases).toEqual(["Ada"]);
     expect(extracted.relations).toEqual([
       {
         fromNorm: "ada lovelace",
@@ -179,6 +183,137 @@ const glmNicolasReply = [
   }),
   "```",
 ].join("\n");
+
+describe("extraction role and measurement guards", () => {
+  it("tells the model that roles, agents, and measurements are not entity names", () => {
+    expect(MEMORY_EXTRACT_INSTRUCTIONS).toContain("software agent, bot, or assistant is an Object");
+    expect(MEMORY_EXTRACT_INSTRUCTIONS).toContain("never in aliases");
+    expect(MEMORY_EXTRACT_INSTRUCTIONS).toContain("Dated measurements");
+    expect(memorySubjectName("  Ada Lovelace  ")).toBe("Ada Lovelace");
+    expect(memorySubjectName("ada@example.test")).toBeNull();
+    expect(memoryExtractPrompt("note", "Ada Lovelace")).toContain("<subject>");
+    expect(memoryExtractPrompt("note", "ada@example.test")).not.toContain("<subject>");
+  });
+
+  it("drops a role alias and dated measurements, and keeps a handle", () => {
+    const extracted = parseMemoryExtraction(
+      JSON.stringify({
+        entities: [
+          {
+            type: "Person",
+            name: "Nicolas Tremblier",
+            aliases: ["candidat", "ada42", "Nicolas"],
+            attributes: { role: "candidat", host: "db.example.test" },
+          },
+        ],
+        relations: [],
+      }),
+      "space-1",
+      "shared",
+    );
+    expect(extracted.entities[0]).toMatchObject({
+      name: "Nicolas Tremblier",
+      aliases: ["ada42", "Nicolas"],
+      summary: "role: candidat; host: db.example.test",
+    });
+    expect(extracted.entities[0]?.aliasNorms).not.toContain("candidat");
+  });
+
+  it("does not mint a person for a role that only holds measurements", () => {
+    const extracted = parseMemoryExtraction(
+      JSON.stringify({
+        entities: [
+          {
+            type: "Person",
+            name: "Runner",
+            aliases: ["athlete"],
+            attributes: {
+              score_16_18_oct: "LOW",
+              load_ratio: "2.5-3.0",
+              readiness_18_oct: "LOW",
+            },
+          },
+        ],
+        relations: [],
+      }),
+      "space-1",
+      "shared",
+      "Nicolas Tremblier",
+    );
+    expect(extracted.entities).toEqual([
+      expect.objectContaining({
+        type: "Person",
+        name: "Nicolas Tremblier",
+        normName: "nicolas tremblier",
+        summary: "",
+        aliases: [],
+      }),
+    ]);
+  });
+
+  it("moves a role's relations onto the one named person and leaves another person in place", () => {
+    const extracted = parseMemoryExtraction(
+      JSON.stringify({
+        entities: [
+          {
+            type: "Person",
+            name: "Runner",
+            aliases: ["athlete"],
+            attributes: { score_16_oct: "LOW" },
+          },
+          { type: "Person", name: "Nicolas Tremblier", aliases: ["ada42"] },
+          { type: "Person", name: "Marie Curie" },
+          { type: "Location", name: "Strasbourg" },
+        ],
+        relations: [
+          { source: "Runner", target: "Strasbourg", type: "trains_in" },
+          { source: "Marie Curie", target: "Strasbourg", type: "lives_in" },
+        ],
+      }),
+      "space-1",
+      "shared",
+    );
+    expect(extracted.entities.map((entity) => entity.name).sort()).toEqual([
+      "Marie Curie",
+      "Nicolas Tremblier",
+      "Strasbourg",
+    ]);
+    expect(extracted.relations).toEqual([
+      expect.objectContaining({ fromNorm: "marie curie", toNorm: "strasbourg" }),
+    ]);
+  });
+
+  it("attaches a metric role to the only concrete person in the same memory", () => {
+    const extracted = parseMemoryExtraction(
+      JSON.stringify({
+        entities: [
+          {
+            type: "Person",
+            name: "Runner",
+            aliases: ["athlete"],
+            attributes: { load_ratio: "2.5" },
+          },
+          { type: "Person", name: "Nicolas Tremblier" },
+          { type: "Location", name: "Strasbourg" },
+        ],
+        relations: [{ source: "Runner", target: "Strasbourg", type: "trains_in" }],
+      }),
+      "space-1",
+      "shared",
+    );
+    expect(extracted.entities.map((entity) => entity.name).sort()).toEqual([
+      "Nicolas Tremblier",
+      "Strasbourg",
+    ]);
+    expect(extracted.relations).toEqual([
+      expect.objectContaining({
+        fromNorm: "nicolas tremblier",
+        toNorm: "strasbourg",
+        type: "trains_in",
+      }),
+    ]);
+  });
+});
 
 describe("extractMemoryGraph", () => {
   afterEach(() => {

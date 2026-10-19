@@ -1,5 +1,5 @@
 import { Trans, useLingui } from "@lingui/react/macro";
-import type { SpaceMemoryConfig } from "@rakazo/contracts";
+import type { SpaceMemoryConfig, ThinkingLevel } from "@rakazo/contracts";
 import {
   Button,
   Field,
@@ -16,11 +16,22 @@ import {
   connectedModelOptions,
   modelOptionKey,
   parseModelOptionKey,
+  thinkingLevelLabel,
 } from "../../lib/model-catalog";
 import { rpc } from "../../lib/rpc";
 import type { Neo4jSettingsFieldError } from "./neo4j-settings";
 import { NEO4J_URI_PLACEHOLDER, neo4jConnectionDraft, neo4jExtractEnabled } from "./neo4j-settings";
 import type { MemoryProviderSettingsFormProps, Neo4jExtractionUpdate } from "./registry";
+
+const CONSOLIDATE_THINKING_LEVELS: ThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
 
 function useExtractionModelChoices() {
   const [choices, setChoices] = useState<ReturnType<typeof connectedModelOptions>>([]);
@@ -280,18 +291,36 @@ export function Neo4jExtractionSettings({
   const [extract, setExtract] = useState(() => neo4jExtractEnabled(config.settings));
   const [chunkSize, setChunkSize] = useState(config.settings.maxChunkChars ?? "");
   const [modelKey, setModelKey] = useState(() => extractionModelKey(config.settings));
+  const [consolidateThinking, setConsolidateThinking] = useState(
+    config.settings.consolidateThinkingLevel || "low",
+  );
+  const [consolidateMaxTokens, setConsolidateMaxTokens] = useState(
+    config.settings.consolidateMaxOutputTokens ?? "",
+  );
+  const thinkingId = useId();
+  const tokensId = useId();
 
   useEffect(() => {
     setExtract(neo4jExtractEnabled(config.settings));
     setChunkSize(config.settings.maxChunkChars ?? "");
     setModelKey(extractionModelKey(config.settings));
+    setConsolidateThinking(config.settings.consolidateThinkingLevel || "low");
+    setConsolidateMaxTokens(config.settings.consolidateMaxOutputTokens ?? "");
   }, [config.settings]);
 
-  async function save(nextExtract: boolean, nextChunk: string, nextModel: string) {
+  async function save(
+    nextExtract: boolean,
+    nextChunk: string,
+    nextModel: string,
+    nextThinking = consolidateThinking,
+    nextMaxTokens = consolidateMaxTokens,
+  ) {
     return onUpdateExtraction({
       extract: nextExtract,
       maxChunkChars: nextChunk,
       ...extractionModelPatch(nextModel),
+      consolidateThinkingLevel: nextThinking === "low" ? "" : nextThinking,
+      consolidateMaxOutputTokens: nextMaxTokens.trim(),
     });
   }
 
@@ -352,6 +381,55 @@ export function Neo4jExtractionSettings({
           }}
         />
       ) : null}
+      <Field className="mt-4">
+        <FieldLabel htmlFor={thinkingId}>
+          <Trans>Consolidation reasoning</Trans>
+        </FieldLabel>
+        <NativeSelect
+          id={thinkingId}
+          className="w-full"
+          value={consolidateThinking}
+          disabled={busy}
+          onChange={(event) => {
+            const next = event.target.value;
+            const previous = consolidateThinking;
+            setConsolidateThinking(next);
+            void save(extract, chunkSize, modelKey, next, consolidateMaxTokens).then((ok) => {
+              if (!ok) setConsolidateThinking(previous);
+            });
+          }}
+        >
+          {CONSOLIDATE_THINKING_LEVELS.map((level) => (
+            <NativeSelectOption key={level} value={level}>
+              {thinkingLevelLabel(level)}
+            </NativeSelectOption>
+          ))}
+        </NativeSelect>
+      </Field>
+      <Field className="mt-4">
+        <FieldLabel htmlFor={tokensId}>
+          <Trans>Consolidation output tokens</Trans>
+        </FieldLabel>
+        <Input
+          id={tokensId}
+          value={consolidateMaxTokens}
+          disabled={busy}
+          inputMode="numeric"
+          onChange={(event) => setConsolidateMaxTokens(event.target.value)}
+          onBlur={() => {
+            if (
+              consolidateMaxTokens.trim() === (config.settings.consolidateMaxOutputTokens ?? "")
+            ) {
+              return;
+            }
+            void save(extract, chunkSize, modelKey).then((ok) => {
+              if (!ok) setConsolidateMaxTokens(config.settings.consolidateMaxOutputTokens ?? "");
+            });
+          }}
+          placeholder="1024"
+          autoComplete="off"
+        />
+      </Field>
     </div>
   );
 }

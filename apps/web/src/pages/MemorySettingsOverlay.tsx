@@ -144,6 +144,8 @@ export function MemorySettingsOverlay({
     maxChunkChars?: string;
     extractModelProvider?: string;
     extractModelId?: string;
+    consolidateThinkingLevel?: string;
+    consolidateMaxOutputTokens?: string;
   }) {
     setError(null);
     markPending("extract");

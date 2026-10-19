@@ -71,6 +71,7 @@ import {
   modelStreamMaxRetries,
   REASONING_MODEL_MAX_TOKENS,
   resolveCompletionMaxTokens,
+  taskCompletionTokens,
 } from "./pi-runtime-limits.js";
 import type { PiSessionHandle, PiSessionRecorder } from "./pi-session.js";
 import { PiJsonlSessionRecorder } from "./pi-session.js";
@@ -247,18 +248,29 @@ export class PiAgentRuntime implements AgentRuntime {
         }
         const { models, model, apiKey } = selectedModel;
         if (typeof request.visibleOutputTokens === "number") {
+          const budget = request.taskOutput;
           const level = thinkingLevelFor(
             model,
-            extractionThinkingLevel({
-              reasoning: model.reasoning,
-              thinkingLevel: request.model.thinkingLevel,
-              minReasoningEffort: request.model.minReasoningEffort,
-            }),
+            budget
+              ? budget.thinkingLevel
+              : extractionThinkingLevel({
+                  reasoning: model.reasoning,
+                  thinkingLevel: request.model.thinkingLevel,
+                  minReasoningEffort: request.model.minReasoningEffort,
+                }),
           );
-          const maxTokens = extractionCompletionTokens(model, level, request.visibleOutputTokens);
+          const maxTokens = budget
+            ? taskCompletionTokens(
+                model,
+                level,
+                budget.maxOutputTokens,
+                request.visibleOutputTokens,
+              )
+            : extractionCompletionTokens(model, level, request.visibleOutputTokens);
           request.model = { ...request.model, thinkingLevel: level, maxTokens };
           if (model.reasoning && maxTokens > request.visibleOutputTokens) {
-            getLogger().info("memory.extract reserved output tokens for reasoning", {
+            const task = budget?.task?.trim() || "memory.extract";
+            getLogger().info(`${task} reserved output tokens for reasoning`, {
               "model.thinking_level": level,
               "model.max_output": maxTokens,
             });

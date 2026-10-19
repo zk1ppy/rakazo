@@ -864,12 +864,28 @@ export interface Neo4jDuplicateMerge {
   keepId: string;
   dropId: string;
   type: Neo4jEntityType;
+  /**
+   * Type labels present on the two nodes when they differ. The survivor is
+   * relabeled to `type`, which may be one of these or a third POLE+O type.
+   */
+  sourceTypes?: Neo4jEntityType[];
   name: string;
   normName: string;
   aliases: string[];
   aliasNorms: string[];
   summary: string;
   now: string;
+}
+
+export interface Neo4jEntityRename {
+  spaceId: string;
+  id: string;
+  type: Neo4jEntityType;
+  fromNorm: string;
+  name: string;
+  normName: string;
+  aliases: string[];
+  aliasNorms: string[];
 }
 
 export interface Neo4jDuplicateMergeResult {
@@ -882,10 +898,13 @@ const SAFE_RELATIONSHIP_TYPE = /^[A-Z][A-Z0-9_]{0,63}$/;
 
 /**
  * Move one duplicate entity onto the canonical node, then delete it.
- * Refuses a different type, namespace, or space. Known edges (ABOUT, RKZ_REL, FROM)
+ * Refuses a different namespace or space. A different type is refused unless
+ * `sourceTypes` lists the labels on the two nodes; the survivor is then relabeled
+ * to `type` and the other POLE+O labels are removed. Known edges (ABOUT, RKZ_REL, FROM)
  * keep their endpoints and properties. Any other safe relationship type is copied.
  * An unsafe type or a cross-space edge leaves both nodes in place.
  * A second call is a no-op once the duplicate id is gone.
+ * The kept id is not rewritten.
  */
 export async function mergeNeo4jDuplicateEntity(
   driver: Neo4jMemoryDriver,
@@ -895,6 +914,8 @@ export async function mergeNeo4jDuplicateEntity(
 ): Promise<Neo4jDuplicateMergeResult> {
   const label = entityLabel(input.type);
   if (input.keepId === input.dropId) return { merged: false, reason: "guard" };
+  const sourceTypes = mergeSourceTypes(input);
+  const crossType = sourceTypes.length >= 2;
   const read: Neo4jRunOptions = { database, access: "read", signal };
   const write: Neo4jRunOptions = { database, access: "write", signal };
   const scope = {
@@ -903,6 +924,8 @@ export async function mergeNeo4jDuplicateEntity(
     dropId: input.dropId,
     type: input.type,
     types: [...NEO4J_ENTITY_TYPES],
+    sourceTypes,
+    crossType,
   };
   const guard = await driver.run(
     `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
@@ -911,12 +934,30 @@ export async function mergeNeo4jDuplicateEntity(
        AND keep.ns = drop.ns
        AND keep.ns IS NOT NULL
        AND (
-         ($type IN labels(keep) AND $type IN labels(drop))
+         (
+           $crossType = false
+           AND (
+             ($type IN labels(keep) AND $type IN labels(drop))
+             OR (
+               keep.entityType = $type
+               AND drop.entityType = $type
+               AND none(label IN labels(keep) WHERE label IN $types AND label <> $type)
+               AND none(label IN labels(drop) WHERE label IN $types AND label <> $type)
+             )
+           )
+         )
          OR (
-           keep.entityType = $type
-           AND drop.entityType = $type
-           AND none(label IN labels(keep) WHERE label IN $types AND label <> $type)
-           AND none(label IN labels(drop) WHERE label IN $types AND label <> $type)
+           $crossType = true
+           AND all(label IN [label IN labels(keep) WHERE label IN $types] WHERE label IN $sourceTypes)
+           AND all(label IN [label IN labels(drop) WHERE label IN $types] WHERE label IN $sourceTypes)
+           AND (
+             size([label IN labels(keep) WHERE label IN $sourceTypes]) = 1
+             OR (size([label IN labels(keep) WHERE label IN $types]) = 0 AND keep.entityType IN $sourceTypes)
+           )
+           AND (
+             size([label IN labels(drop) WHERE label IN $sourceTypes]) = 1
+             OR (size([label IN labels(drop) WHERE label IN $types]) = 0 AND drop.entityType IN $sourceTypes)
+           )
          )
        )
      RETURN keep.id AS id`,
@@ -1003,6 +1044,7 @@ export async function mergeNeo4jDuplicateEntity(
            WHEN drop.lastSeen > keep.lastSeen THEN drop.lastSeen
            ELSE keep.lastSeen
          END
+     ${removeOtherTypeLabels(label)}
      DELETE drop
      RETURN keep.id AS id`,
     {
@@ -1020,6 +1062,52 @@ export async function mergeNeo4jDuplicateEntity(
     return { merged: false, reason: "leftover" };
   }
   return { merged: true };
+}
+
+function mergeSourceTypes(input: Neo4jDuplicateMerge): Neo4jEntityType[] {
+  const allowed = new Set<string>(NEO4J_ENTITY_TYPES);
+  const types = (input.sourceTypes ?? []).filter((type): type is Neo4jEntityType =>
+    allowed.has(type),
+  );
+  return [...new Set(types)];
+}
+
+function removeOtherTypeLabels(result: Neo4jEntityType): string {
+  const others = NEO4J_ENTITY_TYPES.filter((type) => type !== result);
+  return `REMOVE keep:${others.join(", keep:")}`;
+}
+
+/** Change name and normName on one entity. The id stays so edges and lookups keep working. */
+export async function renameNeo4jEntity(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: Neo4jEntityRename,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  entityLabel(input.type);
+  const result = await driver.run(
+    `MATCH (e:Rkz:Entity {id: $id, spaceId: $spaceId})
+     WHERE e.normName = $fromNorm
+       AND e.ns IS NOT NULL
+       AND ($type IN labels(e) OR e.entityType = $type)
+     SET e.name = $name,
+         e.normName = $normName,
+         e.aliases = $aliases,
+         e.aliasNorms = $aliasNorms
+     RETURN e.id AS id`,
+    {
+      id: input.id,
+      spaceId: input.spaceId,
+      type: input.type,
+      fromNorm: input.fromNorm,
+      name: input.name,
+      normName: input.normName,
+      aliases: input.aliases,
+      aliasNorms: input.aliasNorms,
+    },
+    { database, access: "write", signal },
+  );
+  return typeof result.records[0]?.get("id") === "string";
 }
 
 function rewireEntityRelation(direction: "in" | "out"): string {

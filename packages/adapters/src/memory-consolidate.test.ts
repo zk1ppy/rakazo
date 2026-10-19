@@ -11,12 +11,21 @@ import type { MemoryConsolidateDeps, MemoryConsolidateStore } from "./memory-con
 import {
   classifyConsolidationPair,
   consolidateMemoryGraph,
+  DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
+  DEFAULT_CONSOLIDATE_THINKING_LEVEL,
   MAX_CONSOLIDATE_LLM_CALLS,
   memoryConsolidatePrompt,
   parseConsolidationDecision,
+  parseConsolidationTypeDecision,
   planCanonicalEntity,
+  planCanonicalRename,
+  readConsolidateModelSettings,
 } from "./memory-consolidate.js";
-import type { Neo4jConsolidationEntity, Neo4jDuplicateMerge } from "./neo4j-memory-client.js";
+import type {
+  Neo4jConsolidationEntity,
+  Neo4jDuplicateMerge,
+  Neo4jEntityRename,
+} from "./neo4j-memory-client.js";
 
 const payload = {
   spaceId: "space-1",
@@ -63,11 +72,15 @@ function pageStore(
   options?: { pageFull?: boolean; pageIds?: string[] },
 ): MemoryConsolidateStore & {
   merges: Neo4jDuplicateMerge[];
+  renames: Neo4jEntityRename[];
 } {
   const merges: Neo4jDuplicateMerge[] = [];
+  const renames: Neo4jEntityRename[] = [];
   return {
     merges,
+    renames,
     extractionModel: () => null,
+    consolidateModelSettings: () => readConsolidateModelSettings({}),
     listConsolidationPage: async () => ({
       entities,
       pageIds: options?.pageIds ?? entities.map((item) => item.id),
@@ -76,6 +89,10 @@ function pageStore(
     mergeDuplicateEntity: async (input) => {
       merges.push(input);
       return { merged: true };
+    },
+    renameEntity: async (input) => {
+      renames.push(input);
+      return true;
     },
   };
 }
@@ -148,7 +165,7 @@ describe("consolidation decisions", () => {
     expect(plan.aliasNorms).toEqual(["nicolas"]);
   });
 
-  it("keeps the busier hub's name when its degree dominates", () => {
+  it("keeps the busier hub and gives it the more specific name", () => {
     const hub = entity({ id: "hub", degree: 20 });
     const full = entity({
       id: "full",
@@ -157,17 +174,137 @@ describe("consolidation decisions", () => {
       degree: 2,
     });
     const plan = planCanonicalEntity(hub, full);
-    expect(plan.name).toBe("Nicolas");
+    expect(plan.name).toBe("Nicolas Tremblier");
+    expect(plan.normName).toBe("nicolas tremblier");
     expect(plan.keep.id).toBe("hub");
-    expect(plan.aliases).toContain("Nicolas Tremblier");
-    expect(plan.aliasNorms).toContain("nicolas tremblier");
+    expect(plan.drop.id).toBe("full");
+    expect(plan.aliases).toContain("Nicolas");
+    expect(plan.aliasNorms).toContain("nicolas");
+    expect(plan.aliasNorms).not.toContain("nicolas tremblier");
+  });
+
+  it("promotes the only longer alias without changing the node id", () => {
+    const plan = planCanonicalRename(
+      entity({
+        aliases: ["Nicolas Tremblier", "ada42"],
+        aliasNorms: ["nicolas tremblier", "ada42"],
+      }),
+    );
+    expect(plan).toMatchObject({
+      name: "Nicolas Tremblier",
+      normName: "nicolas tremblier",
+    });
+    expect(plan?.aliases).toContain("Nicolas");
+    expect(plan?.aliases).toContain("ada42");
+    expect(plan?.aliasNorms).toContain("nicolas");
+    expect(plan?.aliasNorms).not.toContain("nicolas tremblier");
+    expect(
+      planCanonicalRename(
+        entity({
+          aliases: ["Nicolas Tremblier", "Nicolas Dupont"],
+          aliasNorms: ["nicolas tremblier", "nicolas dupont"],
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("does not treat a role alias as immediate merge evidence", () => {
+    const nicolas = entity({
+      id: "nicolas",
+      aliases: ["candidat", "ada42"],
+      aliasNorms: ["candidat", "ada42"],
+    });
+    const marie = entity({
+      id: "marie",
+      name: "Marie",
+      normName: "marie",
+      aliases: ["candidat"],
+      aliasNorms: ["candidat"],
+    });
+    expect(classifyConsolidationPair(nicolas, marie)).toEqual({ action: "skip", reason: "weak" });
+    const handle = entity({ id: "handle", name: "ada42", normName: "ada42" });
+    expect(classifyConsolidationPair(nicolas, handle)).toEqual({
+      action: "merge",
+      reason: "alias",
+    });
+  });
+
+  it("asks before attaching a role-named person that shares a fact", () => {
+    const runner = entity({
+      id: "runner",
+      name: "Runner",
+      normName: "runner",
+      aliases: ["athlete"],
+      aliasNorms: ["athlete"],
+      factIds: ["fact-1"],
+      summary: "score_16_oct: LOW",
+    });
+    const named = entity({
+      id: "full",
+      name: "Nicolas Tremblier",
+      normName: "nicolas tremblier",
+      factIds: ["fact-1"],
+    });
+    const stranger = entity({
+      id: "ada",
+      name: "Ada Lovelace",
+      normName: "ada lovelace",
+    });
+    expect(classifyConsolidationPair(runner, named)).toEqual({ action: "confirm", reason: "role" });
+    expect(classifyConsolidationPair(runner, stranger)).toEqual({ action: "skip", reason: "weak" });
+    const plan = planCanonicalEntity(runner, named);
+    expect(plan.keep.id).toBe("full");
+    expect(plan.name).toBe("Nicolas Tremblier");
+    expect(plan.summary).toBe("");
+  });
+
+  it("asks which type a same-name pair should keep", () => {
+    const org = entity({
+      id: "org",
+      type: "Organization",
+      name: "Quill",
+      normName: "quill",
+    });
+    const object = entity({
+      id: "object",
+      type: "Object",
+      name: "Quill",
+      normName: "quill",
+    });
+    expect(classifyConsolidationPair(org, object)).toEqual({
+      action: "confirm",
+      reason: "type-conflict",
+    });
+    expect(
+      classifyConsolidationPair(
+        org,
+        entity({
+          id: "other",
+          type: "Object",
+          name: "Quill",
+          normName: "quill",
+          ns: "isolated:bot",
+        }),
+      ).action,
+    ).toBe("skip");
+    expect(parseConsolidationTypeDecision('{"same":true,"type":"object"}')).toEqual({
+      same: true,
+      type: "Object",
+    });
+    expect(parseConsolidationTypeDecision('{"same":false}')).toEqual({ same: false, type: null });
+    expect(parseConsolidationTypeDecision('{"same":true}')).toEqual({ same: true, type: null });
+    expect(parseConsolidationTypeDecision('{"same":true,"type":"Animal"}')).toEqual({
+      same: true,
+      type: null,
+    });
   });
 
   it("refuses a merge across types, namespaces, or merely similar words", () => {
     const person = entity();
-    expect(
-      classifyConsolidationPair(person, entity({ id: "place", type: "Location" })).action,
-    ).toBe("skip");
+    expect(classifyConsolidationPair(person, entity({ id: "place", type: "Location" }))).toEqual({
+      action: "confirm",
+      reason: "type-conflict",
+    });
     expect(
       classifyConsolidationPair(person, entity({ id: "other", ns: "isolated:bot" })).action,
     ).toBe("skip");
@@ -288,7 +425,7 @@ describe("consolidateMemoryGraph", () => {
     });
   });
 
-  it("does not merge across entity types", async () => {
+  it("does not merge a same-name type conflict without a chosen type", async () => {
     const run = vi.fn(async function* () {
       yield { type: "done" as const, text: '{"same":true}' };
     });
@@ -302,7 +439,7 @@ describe("consolidateMemoryGraph", () => {
       }),
     ]);
     await consolidateMemoryGraph(deps(run), payload, store);
-    expect(run).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledTimes(1);
     expect(store.merges).toEqual([]);
   });
 
@@ -380,6 +517,149 @@ describe("consolidateMemoryGraph", () => {
     expect(job.payload.scheduleGeneration).toBe(1);
     expect(job.queueName).toBe("memory-extract");
     expect(job.availableAt).toBeInstanceOf(Date);
+  });
+
+  it("confirms with the consolidate budget instead of the chat max", async () => {
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done" as const, text: '{"same":true}' };
+    });
+    const chat = {
+      ...model,
+      thinkingLevel: "medium" as const,
+      minReasoningEffort: "medium" as const,
+      maxTokens: 65_536,
+    };
+    const store = pageStore([
+      entity({ id: "short" }),
+      entity({ id: "full", name: "Nicolas Tremblier", normName: "nicolas tremblier" }),
+    ]);
+    await consolidateMemoryGraph(
+      { ...deps(run), resolveModel: vi.fn(async () => chat) },
+      payload,
+      store,
+    );
+    expect(run.mock.calls[0]?.[0]).toMatchObject({
+      visibleOutputTokens: 256,
+      taskOutput: {
+        task: "memory.consolidate",
+        thinkingLevel: "low",
+        maxOutputTokens: 1_024,
+      },
+      model: { thinkingLevel: "low", maxTokens: 65_536 },
+    });
+  });
+
+  it("merges a role person onto the named person after confirmation and drops measurements", async () => {
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done" as const, text: '{"same":true}' };
+    });
+    const store = pageStore([
+      entity({
+        id: "runner",
+        name: "Runner",
+        normName: "runner",
+        aliases: ["athlete"],
+        aliasNorms: ["athlete"],
+        factIds: ["fact-1"],
+        summary: "score_16_oct: LOW; load_ratio: 2.5",
+      }),
+      entity({
+        id: "full",
+        name: "Nicolas Tremblier",
+        normName: "nicolas tremblier",
+        factIds: ["fact-1"],
+        summary: "Lives in Strasbourg",
+      }),
+    ]);
+    await consolidateMemoryGraph(deps(run), payload, store);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(store.merges[0]).toMatchObject({
+      keepId: "full",
+      dropId: "runner",
+      name: "Nicolas Tremblier",
+      normName: "nicolas tremblier",
+      summary: "Lives in Strasbourg",
+    });
+    expect(store.merges[0]?.summary).not.toContain("score_16");
+    expect(store.merges[0]?.aliases).toContain("Runner");
+  });
+
+  it("relabels a same-name type conflict when the model picks a type", async () => {
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done" as const, text: '{"same":true,"type":"Object"}' };
+    });
+    const store = pageStore([
+      entity({ id: "org", type: "Organization", name: "Quill", normName: "quill", degree: 4 }),
+      entity({ id: "tool", type: "Object", name: "Quill", normName: "quill", degree: 1 }),
+    ]);
+    await consolidateMemoryGraph(deps(run), payload, store);
+    expect(store.merges).toEqual([
+      expect.objectContaining({
+        keepId: "org",
+        dropId: "tool",
+        type: "Object",
+        sourceTypes: ["Organization", "Object"],
+        name: "Quill",
+      }),
+    ]);
+  });
+
+  it("leaves a person and an organization split when the model says they differ", async () => {
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done" as const, text: '{"same":false}' };
+    });
+    const store = pageStore([
+      entity({ id: "person", name: "Apple", normName: "apple" }),
+      entity({ id: "org", type: "Organization", name: "Apple", normName: "apple" }),
+    ]);
+    await consolidateMemoryGraph(deps(run), payload, store);
+    expect(store.merges).toEqual([]);
+  });
+
+  it("promotes a stored short name when no other node claims the longer one", async () => {
+    const store = pageStore([
+      entity({
+        id: "hub",
+        aliases: ["Nicolas Tremblier"],
+        aliasNorms: ["nicolas tremblier"],
+      }),
+    ]);
+    await consolidateMemoryGraph(
+      deps(async function* () {}),
+      payload,
+      store,
+    );
+    expect(store.merges).toEqual([]);
+    expect(store.renames).toEqual([
+      expect.objectContaining({
+        id: "hub",
+        fromNorm: "nicolas",
+        name: "Nicolas Tremblier",
+        normName: "nicolas tremblier",
+      }),
+    ]);
+  });
+
+  it("reads consolidate model settings and falls back when they are blank or invalid", () => {
+    expect(readConsolidateModelSettings({})).toEqual({
+      thinkingLevel: DEFAULT_CONSOLIDATE_THINKING_LEVEL,
+      maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
+    });
+    expect(
+      readConsolidateModelSettings({
+        consolidateThinkingLevel: " minimal ",
+        consolidateMaxOutputTokens: "2048",
+      }),
+    ).toEqual({ thinkingLevel: "minimal", maxOutputTokens: 2048 });
+    expect(
+      readConsolidateModelSettings({
+        consolidateThinkingLevel: "turbo",
+        consolidateMaxOutputTokens: "4",
+      }),
+    ).toEqual({
+      thinkingLevel: DEFAULT_CONSOLIDATE_THINKING_LEVEL,
+      maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
+    });
   });
 
   it("carries a short name forward when the page is full", async () => {

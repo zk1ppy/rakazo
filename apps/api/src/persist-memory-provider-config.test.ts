@@ -583,4 +583,40 @@ describe("updateNeo4jExtraction", () => {
       data: { settings: { ...stored, extract: "false" } },
     });
   });
+
+  it("stores consolidate model settings without changing the chat connection", async () => {
+    const stored = {
+      uri: "bolt://localhost:7687",
+      username: "neo4j",
+      extract: "true",
+    };
+    const { deps, update, findUnique, secretCreate } = makeDeps({
+      existing: { id: "cfg-1", secretId: "secret-existing" },
+    });
+    findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: stored,
+    });
+    await updateNeo4jExtraction(deps, actor, {
+      extract: true,
+      consolidateThinkingLevel: " minimal ",
+      consolidateMaxOutputTokens: "2048",
+    });
+    expect(secretCreate).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "cfg-1" },
+      data: {
+        settings: {
+          ...stored,
+          consolidateThinkingLevel: "minimal",
+          consolidateMaxOutputTokens: "2048",
+        },
+      },
+    });
+    await expect(
+      updateNeo4jExtraction(deps, actor, { extract: true, consolidateMaxOutputTokens: "4" }),
+    ).rejects.toThrow(/consolidateMaxOutputTokens/);
+  });
 });

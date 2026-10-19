@@ -499,6 +499,16 @@ export interface AgentRunRequest {
    * unset, shares the completion cap, so that call uses the connection max.
    */
   visibleOutputTokens?: number;
+  /**
+   * Task budget for one background model call. When set, thinking effort and
+   * max output come from here, capped by the connection, and do not follow
+   * the space chat settings. `task` is the log label, such as "memory.consolidate".
+   */
+  taskOutput?: {
+    task: string;
+    thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+    maxOutputTokens: number;
+  };
   /** Contextual fallback when a non-silent run produces no written response. */
   emptyResponseText?: string;
   executeTool?: (

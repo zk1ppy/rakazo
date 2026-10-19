@@ -20,6 +20,7 @@ import {
   readNeo4jFactText,
   realignNeo4jFactTimes,
   recallNeo4jFacts,
+  renameNeo4jEntity,
   resolveNeo4jBoltAddress,
   saveNeo4jFact,
   upsertNeo4jEntity,
@@ -573,6 +574,7 @@ describe("Neo4j memory client", () => {
     expect(cypher[8]).toContain("-[rel]-(drop)");
     const commit = cypher[9] ?? "";
     expect(commit).toContain("SET keep:Person");
+    expect(commit).toContain("REMOVE keep:Object, keep:Location, keep:Event, keep:Organization");
     expect(commit).toContain("DELETE drop");
     expect(commit).toContain("NOT (drop)--()");
     expect(commit).not.toContain("DETACH DELETE");
@@ -587,5 +589,75 @@ describe("Neo4j memory client", () => {
       aliasNorms: ["nicolas"],
     });
     expect(writes.every((call) => call.params.spaceId === "space-1")).toBe(true);
+  });
+
+  it("relabels the survivor when the duplicate has a different type", async () => {
+    const driver = new FakeDriver();
+    const empty = { records: [] as Array<{ get(key: string): unknown }> };
+    driver.rows.push(
+      { records: [row({ id: "keep" })] },
+      { records: [row({ foreign: 0 })] },
+      { records: [] },
+      empty,
+      empty,
+      empty,
+      empty,
+      empty,
+      empty,
+      empty,
+      { records: [row({ id: "keep" })] },
+    );
+    await expect(
+      mergeNeo4jDuplicateEntity(driver, "neo4j", {
+        spaceId: "space-1",
+        keepId: "keep",
+        dropId: "drop",
+        type: "Object",
+        sourceTypes: ["Organization", "Object"],
+        name: "Quill",
+        normName: "quill",
+        aliases: [],
+        aliasNorms: [],
+        summary: "",
+        now: "2026-01-01T00:00:00.000Z",
+      }),
+    ).resolves.toEqual({ merged: true });
+    const guard = driver.calls[0]?.cypher ?? "";
+    expect(guard).toContain("$crossType = true");
+    expect(driver.calls[0]?.params).toMatchObject({
+      crossType: true,
+      sourceTypes: ["Organization", "Object"],
+    });
+    const commit =
+      driver.calls.filter((call) => call.options.access === "write").at(-1)?.cypher ?? "";
+    expect(commit).toContain("SET keep:Object");
+    expect(commit).toContain("REMOVE keep:Person, keep:Location, keep:Event, keep:Organization");
+    expect(commit).not.toContain("REMOVE keep:Object");
+  });
+
+  it("renames an entity without changing its id", async () => {
+    const driver = new FakeDriver();
+    driver.rows.push({ records: [row({ id: "hub" })] });
+    await expect(
+      renameNeo4jEntity(driver, "neo4j", {
+        spaceId: "space-1",
+        id: "hub",
+        type: "Person",
+        fromNorm: "nicolas",
+        name: "Nicolas Tremblier",
+        normName: "nicolas tremblier",
+        aliases: ["Nicolas"],
+        aliasNorms: ["nicolas"],
+      }),
+    ).resolves.toBe(true);
+    const call = driver.calls[0];
+    expect(call?.cypher).toContain("e.normName = $fromNorm");
+    expect(call?.cypher).not.toContain("DELETE");
+    expect(call?.params).toMatchObject({
+      id: "hub",
+      fromNorm: "nicolas",
+      normName: "nicolas tremblier",
+    });
+    expect(call?.options.access).toBe("write");
   });
 });
