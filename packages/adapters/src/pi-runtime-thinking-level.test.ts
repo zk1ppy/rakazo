@@ -223,7 +223,7 @@ describe("Pi agent thinking level", () => {
     expect(fakeAgentState.models[0]?.maxTokens).toBe(1_024);
   });
 
-  it("budgets the connection minimum effort plus the visible answer", async () => {
+  it("uses the connection max output when extraction cannot disable thinking", async () => {
     const levels = await runWithModel(
       "hf:zai-org/GLM-5.3-Flash",
       "openai-compatible",
@@ -235,7 +235,7 @@ describe("Pi agent thinking level", () => {
       { visibleOutputTokens: 1_024, minReasoningEffort: "low" },
     );
     expect(levels[0]).toBe("low");
-    expect(fakeAgentState.models[0]?.maxTokens).toBe(1_024 + 2_048);
+    expect(fakeAgentState.models[0]?.maxTokens).toBe(65_536);
     expect(fakeAgentState.models[0]?.contextWindow).toBe(524_288);
   });
 

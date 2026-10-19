@@ -92,18 +92,6 @@ export const REASONING_MODEL_MAX_TOKENS = 32_768;
 /** Visible JSON budget for one memory.extract chunk. */
 export const EXTRACT_ANSWER_TOKENS = 1_024;
 
-/**
- * Pi thinking budgets. xhigh and max clamp to high before the lookup.
- * These are the reasoning allowance added to the visible answer when thinking
- * and the answer share one completion cap.
- */
-const EXTRACT_THINKING_BUDGETS: Record<string, number> = {
-  minimal: 1_024,
-  low: 2_048,
-  medium: 8_192,
-  high: 16_384,
-};
-
 const EXTRACTION_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 type ExtractionEffort = (typeof EXTRACTION_EFFORTS)[number];
 
@@ -125,13 +113,6 @@ export function extractionThinkingLevel(model: {
   return "off";
 }
 
-/** Tokens to reserve for the effort extraction actually requested. `off` reserves none. */
-export function extractionReasoningAllowance(thinkingLevel: string): number {
-  if (!thinkingLevel || thinkingLevel === "off") return 0;
-  const level = thinkingLevel === "xhigh" || thinkingLevel === "max" ? "high" : thinkingLevel;
-  return EXTRACT_THINKING_BUDGETS[level] ?? EXTRACT_THINKING_BUDGETS.low ?? 2_048;
-}
-
 /**
  * These APIs bill thinking beside the answer (Anthropic and Bedrock add a
  * budget on top of maxTokens; Google uses a separate thinking budget). The
@@ -146,10 +127,12 @@ const SEPARATED_THINKING_APIS = new Set([
 ]);
 
 /**
- * Size one extraction call. Separated providers bill thinking beside the
- * answer, so the completion cap stays the visible budget. A shared ceiling
- * (OpenAI-compatible included) is the reasoning allowance for the requested
- * effort plus the visible budget, and the model's max output still wins.
+ * Size one extraction call. A separated provider bills thinking beside the
+ * answer, and a connection that can disable thinking sends effort off, so
+ * both keep the visible budget. A requested effort means thinking cannot be
+ * disabled and shares this cap. An effort allowance is not a reliable budget
+ * for that case, so the call uses the model's max output — the connection's
+ * own cap when one is stored — and never asks for more than that.
  */
 export function extractionCompletionTokens(
   model: { api?: string; reasoning?: boolean; maxTokens?: number },
@@ -161,8 +144,10 @@ export function extractionCompletionTokens(
     typeof model.maxTokens === "number" && model.maxTokens >= 1 ? model.maxTokens : undefined;
   const cap = (total: number) => (ceiling === undefined ? total : Math.min(ceiling, total));
   const separated = model.api !== undefined && SEPARATED_THINKING_APIS.has(model.api);
-  if (!model.reasoning || separated) return cap(answer);
-  return cap(answer + extractionReasoningAllowance(thinkingLevel));
+  const thinkingSharesCap =
+    Boolean(model.reasoning) && !separated && Boolean(thinkingLevel) && thinkingLevel !== "off";
+  if (!thinkingSharesCap) return cap(answer);
+  return ceiling ?? REASONING_MODEL_MAX_TOKENS;
 }
 
 /**
