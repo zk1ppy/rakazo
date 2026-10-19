@@ -147,10 +147,10 @@ const SEPARATED_THINKING_APIS = new Set([
  * own cap when one is stored — and never asks for more than that.
  */
 /**
- * Cap one background task that brings its own budget. Thinking that shares the
- * completion cap uses `maxOutputTokens` (the task setting), never the chat
- * connection's max. Thinking that is off or billed separately stays within the
- * visible answer. The connection max, when set, is still a ceiling.
+ * Cap one background task that brings its own budget. When thinking is on,
+ * `maxOutputTokens` is the whole shared completion cap, so it has to leave room
+ * for reasoning and the answer. Thinking that is off stays within the visible
+ * answer. The connection max, when set, is still a ceiling.
  */
 export function taskCompletionTokens(
   model: { maxTokens?: number },

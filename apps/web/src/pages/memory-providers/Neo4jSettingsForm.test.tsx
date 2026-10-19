@@ -53,7 +53,7 @@ function config(settings: Record<string, string>): SpaceMemoryConfig {
   return {
     provider: "neo4j",
     settings,
-    defaultMemoryScope: "user",
+    defaultMemoryScope: "shared",
     updatedAt: "2026-10-19T00:00:00.000Z",
   };
 }
@@ -105,7 +105,7 @@ describe("Neo4j consolidation settings", () => {
     const tokens = labeled<HTMLInputElement>(container, "Consolidation output tokens", "input");
     expect(thinking.value).toBe("low");
     expect(tokens.value).toBe("");
-    expect(tokens.placeholder).toBe("1024");
+    expect(tokens.placeholder).toBe("32768");
     expect([...thinking.options].map((option) => option.value)).toEqual([
       "off",
       "minimal",

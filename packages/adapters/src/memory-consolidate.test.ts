@@ -26,6 +26,7 @@ import type {
   Neo4jDuplicateMerge,
   Neo4jEntityRename,
 } from "./neo4j-memory-client.js";
+import { REASONING_MODEL_MAX_TOKENS } from "./pi-runtime-limits.js";
 
 const payload = {
   spaceId: "space-1",
@@ -543,7 +544,7 @@ describe("consolidateMemoryGraph", () => {
       taskOutput: {
         task: "memory.consolidate",
         thinkingLevel: "low",
-        maxOutputTokens: 1_024,
+        maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
       },
       model: { thinkingLevel: "low", maxTokens: 65_536 },
     });
@@ -641,6 +642,7 @@ describe("consolidateMemoryGraph", () => {
   });
 
   it("reads consolidate model settings and falls back when they are blank or invalid", () => {
+    expect(DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS).toBe(REASONING_MODEL_MAX_TOKENS);
     expect(readConsolidateModelSettings({})).toEqual({
       thinkingLevel: DEFAULT_CONSOLIDATE_THINKING_LEVEL,
       maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,

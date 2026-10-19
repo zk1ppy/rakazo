@@ -20,6 +20,7 @@ import type {
   Neo4jEntityType,
 } from "./neo4j-memory-client.js";
 import { NEO4J_ENTITY_TYPES } from "./neo4j-memory-client.js";
+import { REASONING_MODEL_MAX_TOKENS } from "./pi-runtime-limits.js";
 
 /**
  * Merge duplicate Neo4j entities in one space.
@@ -138,9 +139,16 @@ export const MEMORY_CONSOLIDATE_TYPE_INSTRUCTIONS = [
 const CONSOLIDATE_EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ConsolidateThinkingLevel = (typeof CONSOLIDATE_EFFORTS)[number];
 
-/** Yes/no confirmation stays cheap. Chat effort and chat max output are not used. */
+/**
+ * Confirmation uses low effort. On OpenAI-compatible providers the output
+ * setting is the shared completion cap: reasoning and the JSON answer spend it
+ * together. A 1024 cap can be spent before the answer. The default is the same
+ * reasoning reservation extraction uses when the connection has no smaller cap.
+ * A stored chat max still ceilings the call. With thinking off, only the
+ * visible answer is sent.
+ */
 export const DEFAULT_CONSOLIDATE_THINKING_LEVEL: ConsolidateThinkingLevel = "low";
-export const DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS = 1_024;
+export const DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS = REASONING_MODEL_MAX_TOKENS;
 const MIN_CONSOLIDATE_MAX_OUTPUT_TOKENS = 64;
 const MAX_CONSOLIDATE_MAX_OUTPUT_TOKENS = 131_072;
 

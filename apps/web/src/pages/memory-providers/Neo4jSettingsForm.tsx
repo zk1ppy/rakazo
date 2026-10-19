@@ -426,7 +426,7 @@ export function Neo4jExtractionSettings({
               if (!ok) setConsolidateMaxTokens(config.settings.consolidateMaxOutputTokens ?? "");
             });
           }}
-          placeholder="1024"
+          placeholder="32768"
           autoComplete="off"
         />
       </Field>

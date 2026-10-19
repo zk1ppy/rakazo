@@ -221,6 +221,9 @@ describe("taskCompletionTokens", () => {
     expect(taskCompletionTokens({ maxTokens: 512 }, "low", 1_024, 256)).toBe(512);
     expect(taskCompletionTokens({ maxTokens: 65_536 }, "off", 1_024, 256)).toBe(256);
     expect(taskCompletionTokens({}, "minimal", 1_024, 256)).toBe(1_024);
+    expect(
+      taskCompletionTokens({ maxTokens: 65_536 }, "low", REASONING_MODEL_MAX_TOKENS, 256),
+    ).toBe(REASONING_MODEL_MAX_TOKENS);
   });
 });
 
