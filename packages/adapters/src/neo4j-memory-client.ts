@@ -547,6 +547,7 @@ export async function linkNeo4jEntities(
     ns: string;
     type: string;
     factId: string;
+    /** Write time. Stored on createdAt and left alone when the edge already exists. */
     now: string;
     /** Optional time from extraction. Null leaves an existing value alone. */
     time?: string | null;
@@ -554,16 +555,80 @@ export async function linkNeo4jEntities(
   signal?: AbortSignal,
 ): Promise<void> {
   const result = await driver.run(
-    `MATCH (a:Rkz:Entity {id: $fromId, spaceId: $spaceId, ns: $ns})
+    `MATCH (f:Rkz:Fact {id: $factId, spaceId: $spaceId})
+     MATCH (a:Rkz:Entity {id: $fromId, spaceId: $spaceId, ns: $ns})
      MATCH (b:Rkz:Entity {id: $toId, spaceId: $spaceId, ns: $ns})
      MERGE (a)-[r:${NEO4J_ENTITY_RELATIONSHIP} {type: $type, factId: $factId}]->(b)
-     ON CREATE SET r.validFrom = $now, r.validTo = null, r.createdAt = $now, r.time = $time
-     ON MATCH SET r.time = CASE WHEN $time IS NULL THEN r.time ELSE $time END
+     ON CREATE SET
+       r.validFrom = coalesce(f.createdAt, f.validFrom, $now),
+       r.validTo = null,
+       r.createdAt = $now,
+       r.time = $time
+     ON MATCH SET
+       r.validFrom = coalesce(f.createdAt, f.validFrom, r.validFrom),
+       r.time = CASE WHEN $time IS NULL THEN r.time ELSE $time END
      RETURN a.id AS id`,
     { ...input, time: input.time ?? null },
     { database, access: "write", signal },
   );
-  if (result.records.length === 0) throw new Error("Neo4j entities were not found.");
+  if (result.records.length === 0) throw new Error("Neo4j fact or entities were not found.");
+}
+
+/**
+ * Point existing relation edges and entity first-seen times at the fact that
+ * produced them. Idempotent: a second run changes nothing once the stamps match.
+ * createdAt on the edge stays the original write time.
+ */
+export async function realignNeo4jFactTimes(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string },
+  signal?: AbortSignal,
+): Promise<{ relations: number; entities: number }> {
+  const options: Neo4jRunOptions = { database, access: "write", signal };
+  const relations = await driver.run(
+    `MATCH (f:Rkz:Fact {spaceId: $spaceId})
+     WITH f, coalesce(f.createdAt, f.validFrom) AS learned
+     WHERE learned IS NOT NULL
+     MATCH ()-[r:${NEO4J_ENTITY_RELATIONSHIP} {factId: f.id}]-()
+     WHERE r.validFrom IS NULL OR r.validFrom <> learned
+     SET r.validFrom = learned
+     RETURN count(r) AS updated`,
+    input,
+    options,
+  );
+  const entities = await driver.run(
+    `MATCH (f:Rkz:Fact {spaceId: $spaceId})-[:ABOUT]->(e:Rkz:Entity)
+     WHERE f.expiredAt IS NULL AND coalesce(f.createdAt, f.validFrom) IS NOT NULL
+     WITH e, min(coalesce(f.createdAt, f.validFrom)) AS learned
+     WHERE e.firstSeen IS NULL OR e.firstSeen > learned
+     SET e.firstSeen = learned
+     RETURN count(e) AS updated`,
+    input,
+    options,
+  );
+  return {
+    relations: asNumber(relations.records[0]?.get("updated")),
+    entities: asNumber(entities.records[0]?.get("updated")),
+  };
+}
+
+/** When the fact was stored. Extraction uses this instead of the time the job runs. */
+export async function readNeo4jFactLearnedAt(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { factId: string; spaceId: string; ns: string },
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const result = await driver.run(
+    `MATCH (f:Rkz:Fact {id: $factId, spaceId: $spaceId, ns: $ns})
+     WHERE f.expiredAt IS NULL
+     RETURN coalesce(f.createdAt, f.validFrom) AS learnedAt`,
+    input,
+    { database, access: "read", signal },
+  );
+  const learnedAt = result.records[0]?.get("learnedAt");
+  return typeof learnedAt === "string" && learnedAt.trim() ? learnedAt : null;
 }
 
 export interface Neo4jUnextractedFact {
@@ -629,7 +694,10 @@ export interface Neo4jExtractedEntityMerge {
   aliases: string[];
   aliasNorms: string[];
   summary: string;
+  /** Write time. lastSeen uses this. */
   now: string;
+  /** Fact created/learned time. Absent uses `now`. */
+  learnedAt?: string;
 }
 
 /** MERGE by space, namespace, type, and normalized name or alias. Returns the kept id. */
@@ -678,13 +746,17 @@ export async function mergeExtractedNeo4jEntity(
        e.aliases = $aliases,
        e.aliasNorms = $aliasNorms,
        e.summary = $summary,
-       e.firstSeen = $now,
+       e.firstSeen = $learnedAt,
        e.lastSeen = $now
      ON MATCH SET
        e.entityType = $type,
        e.aliases = $aliases,
        e.aliasNorms = $aliasNorms,
        e.summary = CASE WHEN $summary = "" THEN e.summary ELSE $summary END,
+       e.firstSeen = CASE
+         WHEN e.firstSeen IS NULL OR e.firstSeen > $learnedAt THEN $learnedAt
+         ELSE e.firstSeen
+       END,
        e.lastSeen = $now,
        e.name = CASE WHEN e.normName = $normName THEN $name ELSE e.name END
      RETURN e.id AS id`,
@@ -699,6 +771,7 @@ export async function mergeExtractedNeo4jEntity(
       aliasNorms,
       summary: entity.summary,
       now: entity.now,
+      learnedAt: entity.learnedAt?.trim() || entity.now,
     },
     options,
   );

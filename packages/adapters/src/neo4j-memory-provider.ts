@@ -43,7 +43,9 @@ import {
   mergeExtractedNeo4jEntity,
   openNeo4jMemoryDriver,
   purgeNeo4jChatSources,
+  readNeo4jFactLearnedAt,
   readNeo4jFactText,
+  realignNeo4jFactTimes,
   recallNeo4jFacts,
   saveNeo4jFact,
 } from "./neo4j-memory-client.js";
@@ -630,6 +632,18 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
     }
   }
 
+  async realignExtractionTimes(
+    spaceId: string,
+    signal?: AbortSignal,
+  ): Promise<{ relations: number; entities: number }> {
+    return realignNeo4jFactTimes(
+      await this.ready(signal),
+      this.connection.database,
+      { spaceId },
+      signal,
+    );
+  }
+
   async listUnextractedFacts(
     spaceId: string,
     input: { limit: number; skip: number },
@@ -663,6 +677,13 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
   ): Promise<void> {
     const driver = await this.ready(signal);
     const database = this.connection.database;
+    const learnedAt =
+      (await readNeo4jFactLearnedAt(
+        driver,
+        database,
+        { factId: input.factId, spaceId: input.spaceId, ns: input.ns },
+        signal,
+      )) ?? input.now;
     const ids = new Map<string, string>();
     for (const entity of input.entities) {
       const id = await mergeExtractedNeo4jEntity(
@@ -679,6 +700,7 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
           aliasNorms: entity.aliasNorms,
           summary: entity.summary,
           now: input.now,
+          learnedAt,
         },
         signal,
       );

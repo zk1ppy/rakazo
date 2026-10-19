@@ -14,7 +14,9 @@ import {
   NEO4J_FACT_FULLTEXT_INDEX,
   NEO4J_MEMORY_SCHEMA_STATEMENTS,
   purgeNeo4jChatSources,
+  readNeo4jFactLearnedAt,
   readNeo4jFactText,
+  realignNeo4jFactTimes,
   recallNeo4jFacts,
   resolveNeo4jBoltAddress,
   saveNeo4jFact,
@@ -272,12 +274,48 @@ describe("Neo4j memory client", () => {
       now: "2026-01-01T00:00:00.000Z",
     });
     expect(driver.calls[1]?.cypher).toContain("MERGE (f)-[:ABOUT]->(e)");
-    expect(driver.calls[2]?.cypher).toContain(
-      "MERGE (a)-[r:RKZ_REL {type: $type, factId: $factId}]->(b)",
-    );
-    expect(driver.calls[2]?.cypher).toContain("r.validFrom = $now");
-    expect(driver.calls[2]?.cypher).toContain("r.createdAt = $now");
-    expect(driver.calls[2]?.params).toMatchObject({ time: null });
+    expect(driver.calls[1]?.cypher).not.toContain("validFrom");
+    const relation = driver.calls[2]?.cypher ?? "";
+    expect(relation).toContain("MERGE (a)-[r:RKZ_REL {type: $type, factId: $factId}]->(b)");
+    expect(relation).toContain("MATCH (f:Rkz:Fact {id: $factId, spaceId: $spaceId})");
+    expect(relation).toContain("r.validFrom = coalesce(f.createdAt, f.validFrom, $now)");
+    expect(relation).toContain("r.createdAt = $now");
+    const matched = relation.split("ON MATCH SET")[1] ?? "";
+    expect(matched).toContain("r.validFrom = coalesce(f.createdAt, f.validFrom, r.validFrom)");
+    expect(matched).not.toContain("r.createdAt");
+    expect(driver.calls[2]?.params).toMatchObject({
+      time: null,
+      now: "2026-01-01T00:00:00.000Z",
+    });
+  });
+
+  it("reads the fact's stored time and realigns existing edges without a model", async () => {
+    const driver = new FakeDriver();
+    driver.rows.push({ records: [row({ learnedAt: "2026-10-18T00:00:00.000Z" })] });
+    await expect(
+      readNeo4jFactLearnedAt(driver, "neo4j", {
+        factId: "fact-1",
+        spaceId: "space-1",
+        ns: "shared",
+      }),
+    ).resolves.toBe("2026-10-18T00:00:00.000Z");
+    expect(driver.calls[0]?.cypher).toContain("coalesce(f.createdAt, f.validFrom)");
+    expect(driver.calls[0]?.options.access).toBe("read");
+
+    driver.rows.push({ records: [row({ updated: 2 })] }, { records: [row({ updated: 1 })] });
+    await expect(realignNeo4jFactTimes(driver, "neo4j", { spaceId: "space-1" })).resolves.toEqual({
+      relations: 2,
+      entities: 1,
+    });
+    const relation = driver.calls[1]?.cypher ?? "";
+    const entity = driver.calls[2]?.cypher ?? "";
+    expect(relation).toContain("SET r.validFrom = learned");
+    expect(relation).not.toContain("r.createdAt");
+    expect(relation).toContain("r.validFrom IS NULL OR r.validFrom <> learned");
+    expect(entity).toContain("SET e.firstSeen = learned");
+    expect(entity).toContain("e.firstSeen IS NULL OR e.firstSeen > learned");
+    expect(entity).not.toContain("lastSeen");
+    expect(driver.calls[1]?.options.access).toBe("write");
   });
 
   it("merges an extracted entity onto an alias match and skips expired facts", async () => {
@@ -303,12 +341,20 @@ describe("Neo4j memory client", () => {
       aliasNorms: ["ada lovelace"],
       summary: "Founder",
       now: "2026-01-01T00:00:00.000Z",
+      learnedAt: "2026-10-18T00:00:00.000Z",
     });
     expect(id).toBe("existing");
     expect(driver.calls[0]?.cypher).toContain("aliasNorms");
     expect(driver.calls[0]?.cypher).toContain("Entity:Person");
-    expect(driver.calls[1]?.params.id).toBe("existing");
-    expect(driver.calls[1]?.params.normName).toBe("ada");
+    expect(driver.calls[1]?.cypher).toContain("e.firstSeen = $learnedAt");
+    expect(driver.calls[1]?.cypher).toContain("e.lastSeen = $now");
+    expect(driver.calls[1]?.cypher).toContain("e.firstSeen > $learnedAt THEN $learnedAt");
+    expect(driver.calls[1]?.params).toMatchObject({
+      id: "existing",
+      normName: "ada",
+      learnedAt: "2026-10-18T00:00:00.000Z",
+      now: "2026-01-01T00:00:00.000Z",
+    });
 
     driver.rows.push({ records: [row({ text: "Ada founded the lab." })] });
     await expect(
