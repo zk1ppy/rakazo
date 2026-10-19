@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { constants } from "node:fs";
 import {
   chmod,
+  copyFile,
   lstat,
   mkdir,
   mkdtemp,
@@ -28,32 +29,52 @@ function otherUserCanRun(): boolean {
   return probe.status === 0;
 }
 
-function checkHomeAsOtherUser(
+async function checkHomeAsOtherUser(
   home: string,
   uid: number,
   gid: number,
-): { status: number; output: string } | undefined {
-  const script = `
-    import { assertComputerHomeWritable } from ${JSON.stringify(ownershipModule)};
-    try {
-      await assertComputerHomeWritable(process.argv[1], Number(process.argv[2]), Number(process.argv[3]));
-      console.log("OK");
-    } catch (error) {
-      console.log(error instanceof Error ? error.message : String(error));
-      process.exitCode = 2;
-    }
-  `;
-  const nodeArgs = ["--input-type=module", "-e", script, home, String(uid), String(gid)];
-  const env = { ...process.env, HOME: "/tmp", XDG_CACHE_HOME: "/tmp" };
-  const result =
-    process.getuid?.() === 0
-      ? spawnSync(process.execPath, nodeArgs, { encoding: "utf8", env, uid: 65534, gid: 65534 })
-      : spawnSync("sudo", ["-n", "-u", "nobody", process.execPath, ...nodeArgs], {
-          encoding: "utf8",
-          env,
-        });
-  if (result.error || result.status === null) return undefined;
-  return { status: result.status, output: `${result.stdout ?? ""}\n${result.stderr ?? ""}` };
+): Promise<{ status: number; output: string } | undefined> {
+  // The checkout may live under a home directory other users cannot traverse.
+  // The checker only needs this module, which imports node builtins, so copy
+  // it somewhere nobody can read.
+  const scratch = await mkdtemp(path.join(tmpdir(), "rakazo-home-check-"));
+  try {
+    await chmod(scratch, 0o755);
+    const modulePath = path.join(scratch, "home-ownership.ts");
+    await copyFile(ownershipModule, modulePath);
+    await chmod(modulePath, 0o644);
+    const script = `
+      import { assertComputerHomeWritable } from ${JSON.stringify(modulePath)};
+      try {
+        await assertComputerHomeWritable(process.argv[1], Number(process.argv[2]), Number(process.argv[3]));
+        console.log("OK");
+      } catch (error) {
+        console.log(error instanceof Error ? error.message : String(error));
+        process.exitCode = 2;
+      }
+    `;
+    const nodeArgs = [
+      "--experimental-strip-types",
+      "--input-type=module",
+      "-e",
+      script,
+      home,
+      String(uid),
+      String(gid),
+    ];
+    const env = { ...process.env, HOME: "/tmp", XDG_CACHE_HOME: "/tmp" };
+    const result =
+      process.getuid?.() === 0
+        ? spawnSync(process.execPath, nodeArgs, { encoding: "utf8", env, uid: 65534, gid: 65534 })
+        : spawnSync("sudo", ["-n", "-u", "nobody", process.execPath, ...nodeArgs], {
+            encoding: "utf8",
+            env,
+          });
+    if (result.error || result.status === null) return undefined;
+    return { status: result.status, output: `${result.stdout ?? ""}\n${result.stderr ?? ""}` };
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
 }
 
 const roots: string[] = [];
@@ -244,21 +265,21 @@ describe("computer home ownership", () => {
       await chmod(path.join(cache, "uv"), 0o700);
 
       const stat = await lstat(cache);
-      const accepted = checkHomeAsOtherUser(home, stat.uid, stat.gid);
-      expect(accepted?.status).toBe(0);
+      const accepted = await checkHomeAsOtherUser(home, stat.uid, stat.gid);
+      expect(accepted?.status, accepted?.output).toBe(0);
       expect(accepted?.output).toContain("OK");
 
       const sticky = path.join(home, "sticky");
       await mkdir(sticky);
       await chmod(sticky, 0o1700);
-      const rejected = checkHomeAsOtherUser(home, stat.uid, stat.gid);
-      expect(rejected?.status).toBe(2);
+      const rejected = await checkHomeAsOtherUser(home, stat.uid, stat.gid);
+      expect(rejected?.status, rejected?.output).toBe(2);
       expect(rejected?.output).toMatch(/chown -R/);
       expect(rejected?.output).not.toContain("/proc/self/fd");
 
       await rm(sticky, { recursive: true, force: true });
-      const foreign = checkHomeAsOtherUser(home, stat.uid + 1, stat.gid + 1);
-      expect(foreign?.status).toBe(2);
+      const foreign = await checkHomeAsOtherUser(home, stat.uid + 1, stat.gid + 1);
+      expect(foreign?.status, foreign?.output).toBe(2);
       expect(foreign?.output).toMatch(/chown -R/);
       expect(foreign?.output).toContain(".cache");
     },
