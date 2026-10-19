@@ -89,6 +89,82 @@ export function billedPromptTokens(usage: {
  */
 export const REASONING_MODEL_MAX_TOKENS = 32_768;
 
+/** Visible JSON budget for one memory.extract chunk. */
+export const EXTRACT_ANSWER_TOKENS = 1_024;
+
+/**
+ * Pi thinking budgets. xhigh and max clamp to high before the lookup.
+ * These are the reasoning allowance added to the visible answer when thinking
+ * and the answer share one completion cap.
+ */
+const EXTRACT_THINKING_BUDGETS: Record<string, number> = {
+  minimal: 1_024,
+  low: 2_048,
+  medium: 8_192,
+  high: 16_384,
+};
+
+const EXTRACTION_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+type ExtractionEffort = (typeof EXTRACTION_EFFORTS)[number];
+
+/**
+ * Lowest effort extraction should request. Absent means thinking can be
+ * disabled: an OpenAI-compatible connection then sends `reasoning_effort`
+ * `"none"`. A stored minimum is that connection's floor, sent as
+ * `reasoning_effort` through the same thinking level.
+ */
+export function extractionThinkingLevel(model: {
+  reasoning?: boolean;
+  minReasoningEffort?: string | null;
+}): "off" | ExtractionEffort {
+  if (!model.reasoning) return "off";
+  const floor = model.minReasoningEffort;
+  if (floor && (EXTRACTION_EFFORTS as readonly string[]).includes(floor)) {
+    return floor as ExtractionEffort;
+  }
+  return "off";
+}
+
+/** Tokens to reserve for the effort extraction actually requested. `off` reserves none. */
+export function extractionReasoningAllowance(thinkingLevel: string): number {
+  if (!thinkingLevel || thinkingLevel === "off") return 0;
+  const level = thinkingLevel === "xhigh" || thinkingLevel === "max" ? "high" : thinkingLevel;
+  return EXTRACT_THINKING_BUDGETS[level] ?? EXTRACT_THINKING_BUDGETS.low ?? 2_048;
+}
+
+/**
+ * These APIs bill thinking beside the answer (Anthropic and Bedrock add a
+ * budget on top of maxTokens; Google uses a separate thinking budget). The
+ * others, including OpenAI-compatible providers, count thinking inside the
+ * same completion cap.
+ */
+const SEPARATED_THINKING_APIS = new Set([
+  "anthropic-messages",
+  "bedrock-converse-stream",
+  "google-generative-ai",
+  "google-vertex",
+]);
+
+/**
+ * Size one extraction call. Separated providers bill thinking beside the
+ * answer, so the completion cap stays the visible budget. A shared ceiling
+ * (OpenAI-compatible included) is the reasoning allowance for the requested
+ * effort plus the visible budget, and the model's max output still wins.
+ */
+export function extractionCompletionTokens(
+  model: { api?: string; reasoning?: boolean; maxTokens?: number },
+  thinkingLevel: string,
+  answerTokens: number = EXTRACT_ANSWER_TOKENS,
+): number {
+  const answer = Math.max(1, Math.floor(answerTokens));
+  const ceiling =
+    typeof model.maxTokens === "number" && model.maxTokens >= 1 ? model.maxTokens : undefined;
+  const cap = (total: number) => (ceiling === undefined ? total : Math.min(ceiling, total));
+  const separated = model.api !== undefined && SEPARATED_THINKING_APIS.has(model.api);
+  if (!model.reasoning || separated) return cap(answer);
+  return cap(answer + extractionReasoningAllowance(thinkingLevel));
+}
+
 /**
  * Completions default to a modest output cap so OpenRouter-style providers do not
  * hold credit for a model card's 128k ceiling. A configured maxTokens is the escape.

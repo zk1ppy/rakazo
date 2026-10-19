@@ -10,14 +10,14 @@ import {
   parseBackfillExtractArgs,
 } from "@rakazo/adapters";
 import { createDb } from "@rakazo/db";
+import { loadWorkerConfig } from "../config.js";
 import { createWorkerSecretStore } from "../secret-store.js";
 
 const options = parseBackfillExtractArgs(process.argv.slice(2));
-const databaseUrl = process.env.DATABASE_URL;
-if (!databaseUrl) throw new Error("DATABASE_URL is required");
+const config = loadWorkerConfig();
 
-const { prisma, pool } = createDb(databaseUrl);
-const secrets = await createWorkerSecretStore(process.env);
+const { prisma, pool } = createDb(config.databaseUrl);
+const secrets = await createWorkerSecretStore(config.env);
 const jobs = new GraphileJobPublisher(pool);
 try {
   const loaded = await loadNeo4jBackfillSpaces(prisma, secrets, options.spaceId);

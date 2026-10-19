@@ -7,6 +7,7 @@ import {
   type IntegrationSetupState,
   MAX_MODEL_CONTEXT_WINDOW,
   MAX_MODEL_MAX_TOKENS,
+  type MinReasoningEffort,
   OPENAI_COMPATIBLE_PROVIDER_ID,
   openAiCompatibleConnectReady,
   openAiCompatibleProbeSuccessMessage,
@@ -140,6 +141,7 @@ export function OnboardingPage() {
   const [gatewayId, setGatewayId] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [reasoning, setReasoning] = useState(false);
+  const [minReasoningEffort, setMinReasoningEffort] = useState<ThinkingLevel | null>(null);
   const [manualModelId, setManualModelId] = useState(false);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel | null>(null);
   const [maxTokens, setMaxTokens] = useState(String(DEFAULT_MODEL_MAX_TOKENS));
@@ -324,6 +326,7 @@ export function OnboardingPage() {
     setBaseUrl("");
     setReasoning(false);
     setThinkingLevel(null);
+    setMinReasoningEffort(null);
     setManualModelId(false);
     setSupportsImages(false);
     setMaxTokens(String(DEFAULT_MODEL_MAX_TOKENS));
@@ -478,6 +481,12 @@ export function OnboardingPage() {
           modelId: modelId.trim(),
           reasoning,
           thinkingLevel: stagedThinkingLevel(),
+          minReasoningEffort: reasoning
+            ? (clampCatalogThinkingLevel(
+                minReasoningEffort,
+                COMPATIBLE_THINKING_LEVELS,
+              ) as MinReasoningEffort | null)
+            : null,
           maxTokens: parsedMaxTokens,
           contextWindow: parsedContextWindow,
           supportsImages,
@@ -683,7 +692,10 @@ export function OnboardingPage() {
                     reasoning={reasoning}
                     onReasoningChange={(value) => {
                       setReasoning(value);
-                      if (!value) setThinkingLevel(null);
+                      if (!value) {
+                        setThinkingLevel(null);
+                        setMinReasoningEffort(null);
+                      }
                     }}
                     advancedLabel={t`Advanced`}
                     thinkingLabel={t`Supports thinking`}
@@ -701,6 +713,12 @@ export function OnboardingPage() {
                     ]}
                     thinkingLevelLabel={t`Reasoning effort`}
                     thinkingLevelDefaultLabel={t`Default`}
+                    minReasoningEffort={minReasoningEffort}
+                    onMinReasoningEffortChange={(value) =>
+                      setMinReasoningEffort(value as ThinkingLevel | null)
+                    }
+                    minReasoningEffortLabel={t`Minimum reasoning effort`}
+                    minReasoningEffortDefaultLabel={t`Off`}
                     maxTokens={maxTokens}
                     onMaxTokensChange={setMaxTokens}
                     maxTokensLabel={t`Maximum output tokens`}

@@ -106,11 +106,16 @@ export async function runCorrelatedJob<T>(options: {
     } catch (error) {
       logger.error("job.completed", error, {
         "job.duration_ms": Math.round(performance.now() - started),
-        "job.outcome": "error",
+        "job.outcome": jobOutcome(error),
       });
       throw error;
     }
   });
+}
+
+function jobOutcome(error: unknown): "error" | "permanent" {
+  if (!error || typeof error !== "object" || !("jobOutcome" in error)) return "error";
+  return error.jobOutcome === "permanent" ? "permanent" : "error";
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

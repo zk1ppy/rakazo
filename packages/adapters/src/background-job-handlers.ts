@@ -107,7 +107,14 @@ export function createBackgroundJobHandlers(deps: {
     "memory.extract": async (payload) => {
       const configured = await deps.memoryProviders.resolve(payload.spaceId);
       const provider = configured?.provider;
-      if (!(provider instanceof Neo4jMemoryProvider)) return;
+      if (!(provider instanceof Neo4jMemoryProvider)) {
+        getLogger().info(
+          configured
+            ? "memory.extract skipped: provider is not neo4j"
+            : "memory.extract skipped: no memory provider",
+        );
+        return;
+      }
       await extractMemoryGraph(
         {
           runtime: deps.runtime,

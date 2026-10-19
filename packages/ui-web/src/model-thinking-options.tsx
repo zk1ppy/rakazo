@@ -19,6 +19,10 @@ export function ModelThinkingOptions({
   thinkingLevelOptions,
   thinkingLevelLabel,
   thinkingLevelDefaultLabel,
+  minReasoningEffort,
+  onMinReasoningEffortChange,
+  minReasoningEffortLabel,
+  minReasoningEffortDefaultLabel,
   maxTokens,
   onMaxTokensChange,
   maxTokensLabel,
@@ -43,6 +47,10 @@ export function ModelThinkingOptions({
   thinkingLevelOptions?: ReadonlyArray<{ value: string; label: string }>;
   thinkingLevelLabel?: string;
   thinkingLevelDefaultLabel?: string;
+  minReasoningEffort?: string | null;
+  onMinReasoningEffortChange?: (minReasoningEffort: string | null) => void;
+  minReasoningEffortLabel?: string;
+  minReasoningEffortDefaultLabel?: string;
   maxTokens?: string;
   onMaxTokensChange?: (maxTokens: string) => void;
   maxTokensLabel?: string;
@@ -54,6 +62,7 @@ export function ModelThinkingOptions({
 }) {
   const id = useId();
   const thinkingLevelId = useId();
+  const minReasoningEffortId = useId();
   const maxTokensId = useId();
   const contextWindowId = useId();
   const imagesId = useId();
@@ -88,6 +97,31 @@ export function ModelThinkingOptions({
             className="h-8 w-32 text-foreground"
           >
             <NativeSelectOption value="">{thinkingLevelDefaultLabel}</NativeSelectOption>
+            {thinkingLevelOptions.map((option) => (
+              <NativeSelectOption key={option.value} value={option.value}>
+                {option.label}
+              </NativeSelectOption>
+            ))}
+          </NativeSelect>
+        </label>
+      ) : null}
+      {showThinking &&
+      reasoning &&
+      onMinReasoningEffortChange &&
+      thinkingLevelOptions &&
+      thinkingLevelOptions.length > 0 &&
+      minReasoningEffortLabel ? (
+        <label htmlFor={minReasoningEffortId} className="mt-3 flex items-center gap-2">
+          <span className="min-w-0 flex-1">{minReasoningEffortLabel}</span>
+          <NativeSelect
+            id={minReasoningEffortId}
+            value={minReasoningEffort ?? ""}
+            onChange={(event) => onMinReasoningEffortChange(event.target.value || null)}
+            disabled={disabled}
+            aria-label={minReasoningEffortLabel}
+            className="h-8 w-32 text-foreground"
+          >
+            <NativeSelectOption value="">{minReasoningEffortDefaultLabel}</NativeSelectOption>
             {thinkingLevelOptions.map((option) => (
               <NativeSelectOption key={option.value} value={option.value}>
                 {option.label}

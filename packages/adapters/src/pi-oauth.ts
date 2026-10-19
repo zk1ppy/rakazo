@@ -12,6 +12,7 @@ import type {
   SecretStore,
 } from "@rakazo/adapter-kit";
 import type {
+  MinReasoningEffort,
   ModelContextLimits,
   ModelOAuthBegin,
   ModelOAuthSignInMode,
@@ -20,6 +21,7 @@ import type {
 import {
   MAX_MODEL_CONTEXT_WINDOW,
   MAX_MODEL_MAX_TOKENS,
+  MinReasoningEffortSchema,
   ModelContextLimitsSchema,
   ThinkingLevelSchema,
 } from "@rakazo/contracts";
@@ -279,6 +281,7 @@ export type StoredModelSecret =
       apiKey?: string;
       reasoning?: boolean;
       thinkingLevel?: ThinkingLevel | null;
+      minReasoningEffort?: MinReasoningEffort;
       maxTokens?: number;
       contextWindow?: number;
       visionModelIds?: string[];
@@ -390,6 +393,8 @@ export function parseModelSecret(plaintext: string): StoredModelSecret {
     const apiKey = typeof parsed.apiKey === "string" ? parsed.apiKey : undefined;
     const parsedThinkingLevel = ThinkingLevelSchema.nullable().safeParse(parsed.thinkingLevel);
     const thinkingLevel = parsedThinkingLevel.success ? parsedThinkingLevel.data : undefined;
+    const parsedMinEffort = MinReasoningEffortSchema.safeParse(parsed.minReasoningEffort);
+    const minReasoningEffort = parsedMinEffort.success ? parsedMinEffort.data : undefined;
     const maxTokens = parsedMaxTokens(parsed.maxTokens);
     const contextWindow =
       typeof parsed.contextWindow === "number" &&
@@ -416,6 +421,7 @@ export function parseModelSecret(plaintext: string): StoredModelSecret {
       ...(apiKey ? { apiKey } : {}),
       ...(typeof parsed.reasoning === "boolean" ? { reasoning: parsed.reasoning } : {}),
       ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
+      ...(minReasoningEffort !== undefined ? { minReasoningEffort } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(visionModelIds ? { visionModelIds } : {}),
@@ -475,6 +481,9 @@ export function serializeModelSecret(secret: StoredModelSecret): string {
       ...(secret.apiKey ? { apiKey: secret.apiKey } : {}),
       ...(secret.reasoning !== undefined ? { reasoning: secret.reasoning } : {}),
       ...(secret.thinkingLevel !== undefined ? { thinkingLevel: secret.thinkingLevel } : {}),
+      ...(secret.minReasoningEffort !== undefined
+        ? { minReasoningEffort: secret.minReasoningEffort }
+        : {}),
       ...(secret.maxTokens !== undefined ? { maxTokens: secret.maxTokens } : {}),
       ...(secret.contextWindow !== undefined ? { contextWindow: secret.contextWindow } : {}),
       ...(secret.visionModelIds !== undefined ? { visionModelIds: secret.visionModelIds } : {}),

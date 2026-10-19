@@ -1,5 +1,10 @@
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
-import type { ModelConnectInput, ModelCredential, ThinkingLevel } from "@rakazo/contracts";
+import type {
+  MinReasoningEffort,
+  ModelConnectInput,
+  ModelCredential,
+  ThinkingLevel,
+} from "@rakazo/contracts";
 import {
   CLOUDFLARE_AI_GATEWAY_CONFIG_MESSAGE,
   OPENAI_COMPATIBLE_PROVIDER_ID as CONTRACT_OPENAI_COMPAT,
@@ -79,6 +84,10 @@ export function buildModelConnectPlaintext(
         : sameEndpoint
           ? previous.thinkingLevel
           : undefined;
+    const minReasoningEffort = connectMinReasoningEffort(
+      input.minReasoningEffort,
+      sameEndpoint ? previous.minReasoningEffort : undefined,
+    );
     const maxTokens = connectMaxTokens(
       input.maxTokens,
       sameEndpoint ? previous.maxTokens : undefined,
@@ -110,6 +119,7 @@ export function buildModelConnectPlaintext(
         : {}),
       ...(input.reasoning !== undefined ? { reasoning: input.reasoning } : {}),
       ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
+      ...(minReasoningEffort !== undefined ? { minReasoningEffort } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(prepared.apiKey ? { apiKey: prepared.apiKey } : {}),
@@ -218,6 +228,16 @@ function storedModelSecretHasApiKey(plaintext: string | undefined): boolean {
   return false;
 }
 
+/** `null` clears a saved floor. Omitting it keeps the previous connection's floor. */
+function connectMinReasoningEffort(
+  input: MinReasoningEffort | null | undefined,
+  previous: MinReasoningEffort | null | undefined,
+): MinReasoningEffort | undefined {
+  if (input === null) return undefined;
+  if (input !== undefined) return input;
+  return previous ?? undefined;
+}
+
 /** `null` clears a saved limit. Omitting it keeps the previous connection's limit. */
 function connectMaxTokens(
   input: number | null | undefined,
@@ -288,6 +308,9 @@ export function modelCredentialDto(
     reasoning: parsed.reasoning ?? false,
     ...(credential.thinkingLevel !== undefined || parsed.thinkingLevel !== undefined
       ? { thinkingLevel: credential.thinkingLevel ?? parsed.thinkingLevel }
+      : {}),
+    ...(parsed.minReasoningEffort !== undefined
+      ? { minReasoningEffort: parsed.minReasoningEffort }
       : {}),
     ...(parsed.maxTokens !== undefined ? { maxTokens: parsed.maxTokens } : {}),
     ...(parsed.contextWindow !== undefined ? { contextWindow: parsed.contextWindow } : {}),

@@ -427,6 +427,11 @@ export interface AgentRunModel {
   contextWindow?: number;
   /** Preferred thinking effort for reasoning models; clamped to the model’s supported set. */
   thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
+  /**
+   * Lowest effort this connection accepts. Absent or null means extraction may
+   * disable thinking. A set level is the floor for that one extract call.
+   */
+  minReasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
   /** In-process OAuth credential from the encrypted store for this run. */
   oauth?: {
     credential: AgentModelOAuthCredential;
@@ -487,6 +492,13 @@ export interface AgentRunRequest {
    * Memory extraction sets this so a 429 is rescheduled by the job queue.
    */
   providerRetries?: 0;
+  /**
+   * Visible answer budget. Memory extraction sets this so a reasoning model
+   * does not spend the whole completion cap before writing JSON. The runtime
+   * keeps this as max output when the provider bills thinking separately, and
+   * adds reasoning room when thinking shares that cap.
+   */
+  visibleOutputTokens?: number;
   /** Contextual fallback when a non-silent run produces no written response. */
   emptyResponseText?: string;
   executeTool?: (

@@ -1,4 +1,9 @@
-import type { ModelBackupChoice, ModelOAuthBegin, ThinkingLevel } from "@rakazo/contracts";
+import type {
+  MinReasoningEffort,
+  ModelBackupChoice,
+  ModelOAuthBegin,
+  ThinkingLevel,
+} from "@rakazo/contracts";
 import {
   backupChoiceKey,
   CLOUDFLARE_AI_GATEWAY_PROVIDER_ID,
@@ -121,6 +126,7 @@ export default function Models() {
   const [baseUrl, setBaseUrl] = useState("");
   const [reasoning, setReasoning] = useState(false);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel | null>(null);
+  const [minReasoningEffort, setMinReasoningEffort] = useState<MinReasoningEffort | null>(null);
   const [maxTokens, setMaxTokens] = useState(String(DEFAULT_MODEL_MAX_TOKENS));
   const [contextWindow, setContextWindow] = useState(String(DEFAULT_MODEL_CONTEXT_WINDOW));
   const [supportsImages, setSupportsImages] = useState(false);
@@ -242,6 +248,12 @@ export default function Models() {
           nextCredential?.reasoning ? COMPATIBLE_THINKING_LEVELS : [],
         ) as ThinkingLevel | null,
       );
+      setMinReasoningEffort(
+        clampCatalogThinkingLevel(
+          nextCredential?.modelId === nextModel ? nextCredential?.minReasoningEffort : null,
+          nextCredential?.reasoning ? COMPATIBLE_THINKING_LEVELS : [],
+        ) as MinReasoningEffort | null,
+      );
       setContextWindow(String(nextCredential?.contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW));
       setSupportsImages(nextCredential?.supportsImages ?? false);
       setMaxImagesPerPrompt(String(nextCredential?.maxImagesPerPrompt ?? ""));
@@ -256,6 +268,7 @@ export default function Models() {
           nextEntry?.thinkingLevels,
         ) as ThinkingLevel | null,
       );
+      setMinReasoningEffort(null);
     }
     setMaxTokens(connectionMaxTokensField(nextProvider, nextCredential?.maxTokens));
     setAccountId(nextCredential?.accountId ?? "");
@@ -469,6 +482,9 @@ export default function Models() {
       ? (selected.thinkingLevels ?? []).filter((level) => level !== "off")
       : [];
   const reasoningEffortValue = thinkingLevel ? thinkingLevelLabel(thinkingLevel, t) : t("Default");
+  const minReasoningEffortValue = minReasoningEffort
+    ? thinkingLevelLabel(minReasoningEffort, t)
+    : t("Off");
   const catalogThinkingValue = thinkingLevel
     ? thinkingLevelLabel(thinkingLevel, t)
     : t("Default ({level})", { level: thinkingLevelLabel("medium", t) });
@@ -519,6 +535,14 @@ export default function Models() {
             : []
           : nextEntry?.thinkingLevels,
       ) as ThinkingLevel | null,
+    );
+    setMinReasoningEffort(
+      nextProvider === OPENAI_COMPATIBLE_PROVIDER_ID
+        ? (clampCatalogThinkingLevel(
+            nextCredential?.minReasoningEffort,
+            nextCredential?.reasoning ? COMPATIBLE_THINKING_LEVELS : [],
+          ) as MinReasoningEffort | null)
+        : null,
     );
     setMaxTokens(connectionMaxTokensField(nextProvider, nextCredential?.maxTokens));
     setContextWindow(String(nextCredential?.contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW));
@@ -632,6 +656,12 @@ export default function Models() {
         reasoning ? COMPATIBLE_THINKING_LEVELS : [],
       ) as ThinkingLevel | null,
     );
+    setMinReasoningEffort(
+      clampCatalogThinkingLevel(
+        credential?.modelId === nextModelId ? credential.minReasoningEffort : null,
+        reasoning ? COMPATIBLE_THINKING_LEVELS : [],
+      ) as MinReasoningEffort | null,
+    );
   }
 
   async function connectKey() {
@@ -706,6 +736,12 @@ export default function Models() {
               modelId: modelId.trim(),
               reasoning,
               thinkingLevel: stagedThinking,
+              minReasoningEffort: reasoning
+                ? (clampCatalogThinkingLevel(
+                    minReasoningEffort,
+                    COMPATIBLE_THINKING_LEVELS,
+                  ) as MinReasoningEffort | null)
+                : null,
               maxTokens: parsedMaxTokens,
               contextWindow: parsedContextWindow,
               supportsImages,
@@ -989,7 +1025,10 @@ export default function Models() {
                 value={reasoning}
                 onValueChange={(value) => {
                   setReasoning(value);
-                  if (!value) setThinkingLevel(null);
+                  if (!value) {
+                    setThinkingLevel(null);
+                    setMinReasoningEffort(null);
+                  }
                 }}
                 disabled={busy}
               />
@@ -1022,6 +1061,36 @@ export default function Models() {
               >
                 <Text style={styles.modelLabel}>{t("Reasoning effort")}</Text>
                 <Text style={styles.rowValue}>{reasoningEffortValue}</Text>
+              </Pressable>
+            ) : null}
+            {reasoning ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t("Minimum reasoning effort")}
+                accessibilityValue={{ text: minReasoningEffortValue }}
+                disabled={busy}
+                onPress={() => {
+                  presentMessageActionSheet({
+                    title: t("Minimum reasoning effort"),
+                    cancel: t("Cancel"),
+                    more: t("More"),
+                    colorScheme,
+                    actions: [
+                      {
+                        text: t("Off"),
+                        onPress: () => setMinReasoningEffort(null),
+                      },
+                      ...THINKING_LEVEL_OPTIONS.map((level) => ({
+                        text: thinkingLevelLabel(level, t),
+                        onPress: () => setMinReasoningEffort(level as MinReasoningEffort),
+                      })),
+                    ],
+                  });
+                }}
+                style={({ pressed }) => [styles.modelRow, pressed && styles.pressed]}
+              >
+                <Text style={styles.modelLabel}>{t("Minimum reasoning effort")}</Text>
+                <Text style={styles.rowValue}>{minReasoningEffortValue}</Text>
               </Pressable>
             ) : null}
             <View style={[styles.modelRow, styles.singleRow]}>

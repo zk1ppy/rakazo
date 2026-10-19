@@ -18,6 +18,7 @@ import { z } from "zod";
 import { resolveDeploymentModel } from "./deployment-model.js";
 import type { Neo4jEntityType } from "./neo4j-memory-client.js";
 import { NEO4J_ENTITY_TYPES } from "./neo4j-memory-client.js";
+import { EXTRACT_ANSWER_TOKENS, extractionThinkingLevel } from "./pi-runtime-limits.js";
 
 export const NEO4J_DEFAULT_MAX_CHUNK_CHARS = 4_000;
 export const NEO4J_MIN_MAX_CHUNK_CHARS = 400;
@@ -28,7 +29,6 @@ export const MAX_MEMORY_EXTRACT_TEXT_CHARS = 20_000;
 /** Tries for one chunk, including the first call. Later tries are rescheduled, not failed. */
 export const MAX_EXTRACT_ATTEMPTS = 5;
 const EXTRACT_TIMEOUT_MS = 90_000;
-const EXTRACT_MAX_OUTPUT_TOKENS = 1_024;
 const MIN_EXTRACT_CHARS = 12;
 const MIN_EXTRACT_WORDS = 3;
 
@@ -241,7 +241,17 @@ export interface MemoryExtractDeps {
   deploymentModelConfigured?: boolean;
 }
 
-type ExtractCall = "ok" | "rate_limit" | "stop";
+type ExtractCall = "ok" | "rate_limit";
+
+/** Non-retryable extraction failure. The job outcome stays permanent and the fact keeps no :ABOUT edge. */
+export class MemoryExtractPermanentError extends Error {
+  readonly jobOutcome = "permanent" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "MemoryExtractPermanentError";
+  }
+}
 
 /**
  * One model call per remaining chunk, awaited in order. A 429 enqueues the rest
@@ -280,7 +290,6 @@ export async function extractMemoryGraph(
       await rescheduleExtract(deps, payload, index, attempt);
       return;
     }
-    if (call.kind === "stop") return;
     const extracted = parseMemoryExtraction(call.text, payload.spaceId, payload.ns);
     if (extracted.entities.length > 0) {
       await store.applyExtraction({
@@ -403,13 +412,14 @@ async function callExtractor(
         tools: [],
         allowSilentEmpty: true,
         providerRetries: 0,
+        // One call. Thinking is requested off unless the connection stores a
+        // minimum effort. The runtime sizes a shared completion cap to that
+        // effort's allowance plus the visible budget, and the connection's
+        // max output still wins. A second call would spend another quota unit.
+        visibleOutputTokens: EXTRACT_ANSWER_TOKENS,
         model: {
           ...model,
-          thinkingLevel: "off",
-          maxTokens: Math.min(
-            model.maxTokens ?? EXTRACT_MAX_OUTPUT_TOKENS,
-            EXTRACT_MAX_OUTPUT_TOKENS,
-          ),
+          thinkingLevel: extractionThinkingLevel(model),
         },
       },
       {
@@ -429,8 +439,14 @@ async function callExtractor(
     }
   } catch (error) {
     if (isRateLimitFailure(error)) return { kind: "rate_limit", text: "" };
-    getLogger().error("memory.extract model call failed", error);
-    return { kind: "stop", text: "" };
+    const reason = error instanceof Error ? error.message : "model call failed";
+    getLogger().error("memory.extract failed", {
+      "memory.fact_id": payload.factId,
+      "memory.chunk": chunkIndex,
+      "job.outcome": "permanent",
+      reason,
+    });
+    throw new MemoryExtractPermanentError(reason);
   } finally {
     clearTimeout(timer);
   }

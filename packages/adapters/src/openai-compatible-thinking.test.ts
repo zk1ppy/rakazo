@@ -27,6 +27,8 @@ type Payload = {
   max_completion_tokens?: number;
   chat_template_kwargs?: Record<string, unknown>;
   reasoning_effort?: string;
+  enable_thinking?: boolean;
+  thinking?: unknown;
 };
 
 function fixtureResponse(): Response {
@@ -118,10 +120,20 @@ describe("OpenAI-compatible standard thinking transport", () => {
     expect(payload.max_tokens ?? payload.max_completion_tokens).toBe(8192);
   });
 
-  it("sends none when thinking is off", async () => {
+  it("sends none when thinking is off and does not send a GLM thinking switch", async () => {
     const { payload } = await capture();
     expect(payload.reasoning_effort).toBe("none");
     expect(payload.chat_template_kwargs).toBeUndefined();
+    expect(payload.enable_thinking).toBeUndefined();
+    expect(payload.thinking).toBeUndefined();
+  });
+
+  it("sends low as reasoning_effort without a thinking switch", async () => {
+    const { payload } = await capture("low");
+    expect(payload.reasoning_effort).toBe("low");
+    expect(payload.chat_template_kwargs).toBeUndefined();
+    expect(payload.enable_thinking).toBeUndefined();
+    expect(payload.thinking).toBeUndefined();
   });
 
   it("does not send reasoning fields on a connection without support, even for the same model ID", async () => {

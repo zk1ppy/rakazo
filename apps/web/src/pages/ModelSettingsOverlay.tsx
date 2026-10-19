@@ -1,6 +1,6 @@
 import { i18n } from "@lingui/core";
 import { Plural, Trans, useLingui } from "@lingui/react/macro";
-import type { Me, ThinkingLevel } from "@rakazo/contracts";
+import type { Me, MinReasoningEffort, ThinkingLevel } from "@rakazo/contracts";
 import {
   CLOUDFLARE_AI_GATEWAY_PROVIDER_ID,
   cloudflareGatewayRouting,
@@ -102,6 +102,7 @@ export function ModelSettingsOverlay({
   const [baseUrl, setBaseUrl] = useState("");
   const [reasoning, setReasoning] = useState(false);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel | null>(null);
+  const [minReasoningEffort, setMinReasoningEffort] = useState<ThinkingLevel | null>(null);
   const [maxTokens, setMaxTokens] = useState(String(DEFAULT_MODEL_MAX_TOKENS));
   const [contextWindow, setContextWindow] = useState(String(DEFAULT_MODEL_CONTEXT_WINDOW));
   const [supportsImages, setSupportsImages] = useState(false);
@@ -189,6 +190,12 @@ export function ModelSettingsOverlay({
             nextCredential?.reasoning ? COMPATIBLE_THINKING_LEVELS : [],
           ) as ThinkingLevel | null,
         );
+        setMinReasoningEffort(
+          clampCatalogThinkingLevel(
+            nextCredential?.modelId === nextModel ? nextCredential?.minReasoningEffort : null,
+            nextCredential?.reasoning ? COMPATIBLE_THINKING_LEVELS : [],
+          ) as ThinkingLevel | null,
+        );
         setContextWindow(String(nextCredential?.contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW));
         setSupportsImages(nextCredential?.supportsImages ?? false);
         setMaxImagesPerPrompt(String(nextCredential?.maxImagesPerPrompt ?? ""));
@@ -203,6 +210,7 @@ export function ModelSettingsOverlay({
             nextEntry?.thinkingLevels,
           ) as ThinkingLevel | null,
         );
+        setMinReasoningEffort(null);
       }
       setMaxTokens(connectionMaxTokensField(nextProvider, nextCredential?.maxTokens));
       setAccountId(nextCredential?.accountId ?? "");
@@ -372,6 +380,12 @@ export function ModelSettingsOverlay({
         reasoning ? COMPATIBLE_THINKING_LEVELS : [],
       ) as ThinkingLevel | null,
     );
+    setMinReasoningEffort(
+      clampCatalogThinkingLevel(
+        credential?.modelId === nextModelId ? credential.minReasoningEffort : null,
+        reasoning ? COMPATIBLE_THINKING_LEVELS : [],
+      ) as ThinkingLevel | null,
+    );
   }
 
   function chooseProvider(nextProvider: string) {
@@ -396,6 +410,14 @@ export function ModelSettingsOverlay({
             : []
           : nextEntry?.thinkingLevels,
       ) as ThinkingLevel | null,
+    );
+    setMinReasoningEffort(
+      nextProvider === OPENAI_COMPATIBLE_PROVIDER_ID
+        ? (clampCatalogThinkingLevel(
+            nextCredential?.minReasoningEffort,
+            nextCredential?.reasoning ? COMPATIBLE_THINKING_LEVELS : [],
+          ) as ThinkingLevel | null)
+        : null,
     );
     setMaxTokens(connectionMaxTokensField(nextProvider, nextCredential?.maxTokens));
     setContextWindow(String(nextCredential?.contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW));
@@ -603,6 +625,12 @@ export function ModelSettingsOverlay({
               modelId: modelId.trim(),
               reasoning,
               thinkingLevel: stagedThinking,
+              minReasoningEffort: reasoning
+                ? (clampCatalogThinkingLevel(
+                    minReasoningEffort,
+                    COMPATIBLE_THINKING_LEVELS,
+                  ) as MinReasoningEffort | null)
+                : null,
               maxTokens: parsedMaxTokens,
               contextWindow: parsedContextWindow,
               supportsImages,
@@ -1335,7 +1363,10 @@ export function ModelSettingsOverlay({
                     onReasoningChange={(value) => {
                       selectionRevisionRef.current += 1;
                       setReasoning(value);
-                      if (!value) setThinkingLevel(null);
+                      if (!value) {
+                        setThinkingLevel(null);
+                        setMinReasoningEffort(null);
+                      }
                       setNotice(null);
                     }}
                     disabled={busy}
@@ -1357,6 +1388,14 @@ export function ModelSettingsOverlay({
                     ]}
                     thinkingLevelLabel={t`Reasoning effort`}
                     thinkingLevelDefaultLabel={t`Default`}
+                    minReasoningEffort={minReasoningEffort}
+                    onMinReasoningEffortChange={(value) => {
+                      selectionRevisionRef.current += 1;
+                      setMinReasoningEffort(value as ThinkingLevel | null);
+                      setNotice(null);
+                    }}
+                    minReasoningEffortLabel={t`Minimum reasoning effort`}
+                    minReasoningEffortDefaultLabel={t`Off`}
                     maxTokens={maxTokens}
                     onMaxTokensChange={(value) => {
                       selectionRevisionRef.current += 1;

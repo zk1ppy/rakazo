@@ -4,6 +4,10 @@ import {
   billedPromptTokens,
   clipToolResultContent,
   clipToolResultText,
+  EXTRACT_ANSWER_TOKENS,
+  extractionCompletionTokens,
+  extractionReasoningAllowance,
+  extractionThinkingLevel,
   modelStreamMaxRetries,
   REASONING_MODEL_MAX_TOKENS,
   resolveCompletionMaxTokens,
@@ -121,6 +125,72 @@ describe("resolveCompletionMaxTokens", () => {
     expect(resolveCompletionMaxTokens(128_000, undefined, undefined, false)).toBe(
       DEFAULT_MODEL_MAX_TOKENS,
     );
+  });
+});
+
+describe("extractionThinkingLevel", () => {
+  it("disables thinking when the connection stores no floor", () => {
+    expect(extractionThinkingLevel({ reasoning: false })).toBe("off");
+    expect(extractionThinkingLevel({ reasoning: true })).toBe("off");
+    expect(extractionThinkingLevel({ reasoning: true, minReasoningEffort: null })).toBe("off");
+  });
+
+  it("uses the connection's minimum effort", () => {
+    expect(extractionThinkingLevel({ reasoning: true, minReasoningEffort: "low" })).toBe("low");
+    expect(extractionThinkingLevel({ reasoning: true, minReasoningEffort: null })).toBe("off");
+    expect(extractionThinkingLevel({ reasoning: false, minReasoningEffort: "low" })).toBe("off");
+  });
+});
+
+describe("extractionCompletionTokens", () => {
+  it("keeps the answer cap when thinking is billed separately or the model does not reason", () => {
+    expect(
+      extractionCompletionTokens(
+        { api: "anthropic-messages", reasoning: true, maxTokens: 128_000 },
+        "off",
+      ),
+    ).toBe(EXTRACT_ANSWER_TOKENS);
+    expect(
+      extractionCompletionTokens(
+        { api: "google-generative-ai", reasoning: true, maxTokens: 128_000 },
+        "low",
+      ),
+    ).toBe(EXTRACT_ANSWER_TOKENS);
+    expect(
+      extractionCompletionTokens(
+        { api: "openai-completions", reasoning: false, maxTokens: 128_000 },
+        "off",
+      ),
+    ).toBe(EXTRACT_ANSWER_TOKENS);
+  });
+
+  it("adds the requested effort's allowance when thinking shares the completion cap", () => {
+    expect(extractionReasoningAllowance("off")).toBe(0);
+    expect(extractionReasoningAllowance("low")).toBe(2_048);
+    expect(
+      extractionCompletionTokens(
+        { api: "openai-completions", reasoning: true, maxTokens: 65_536 },
+        "off",
+      ),
+    ).toBe(EXTRACT_ANSWER_TOKENS);
+    expect(
+      extractionCompletionTokens(
+        { api: "openai-completions", reasoning: true, maxTokens: 65_536 },
+        "low",
+      ),
+    ).toBe(EXTRACT_ANSWER_TOKENS + 2_048);
+    expect(
+      extractionCompletionTokens(
+        { api: "openai-responses", reasoning: true, maxTokens: 128_000 },
+        "low",
+      ),
+    ).toBe(EXTRACT_ANSWER_TOKENS + 2_048);
+    expect(
+      extractionCompletionTokens(
+        { api: "openai-completions", reasoning: true, maxTokens: 2_048 },
+        "low",
+      ),
+    ).toBe(2_048);
   });
 });
 

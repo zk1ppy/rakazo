@@ -48,6 +48,8 @@ export function parseBackfillExtractArgs(argv: readonly string[]): {
   let dryRun = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+    // pnpm run forwards the `--` separator, so `-- --dry-run` arrives as ["--", "--dry-run"].
+    if (arg === "--") continue;
     if (arg === "--dry-run") {
       dryRun = true;
       continue;
@@ -69,7 +71,9 @@ export function parseBackfillExtractArgs(argv: readonly string[]): {
       spaceId = value;
       continue;
     }
-    throw new Error("Usage: memory:backfill-extract [--dry-run] [--space SPACE_ID] [--limit N]");
+    throw new Error(
+      "Usage: memory:backfill-extract [--] [--dry-run] [--space SPACE_ID] [--limit N]",
+    );
   }
   return { ...(spaceId ? { spaceId } : {}), limit, dryRun };
 }

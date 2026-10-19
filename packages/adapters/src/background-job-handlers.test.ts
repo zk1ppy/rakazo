@@ -6,7 +6,7 @@ import type {
   SandboxProvider,
 } from "@rakazo/adapter-kit";
 import type { PrismaClient, ThreadEvents } from "@rakazo/db";
-import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
+import { createLogger, createTestSink, getLogger, installLogger } from "@rakazo/logging";
 import { describe, expect, it, vi } from "vitest";
 import { createBackgroundJobHandlers } from "./background-job-handlers.js";
 import { createRunExecutor } from "./executor.js";
@@ -148,19 +148,29 @@ describe("createBackgroundJobHandlers", () => {
       memoryProviders: { resolve: vi.fn(async () => null) },
     });
 
-    await handlers["memory.extract"]({
-      spaceId: "space-1",
-      userId: "user-1",
-      botId: "bot-1",
-      factId: "fact-1",
-      ns: "shared",
-      maxChunkChars: 4_000,
-      chunkIndex: 0,
-      attempt: 0,
-      scheduleGeneration: 0,
-    });
+    const sink = createTestSink();
+    const previousLogger = getLogger();
+    installLogger(createLogger({ service: "test", sinks: [sink] }));
+    try {
+      await handlers["memory.extract"]({
+        spaceId: "space-1",
+        userId: "user-1",
+        botId: "bot-1",
+        factId: "fact-1",
+        ns: "shared",
+        maxChunkChars: 4_000,
+        chunkIndex: 0,
+        attempt: 0,
+        scheduleGeneration: 0,
+      });
+    } finally {
+      installLogger(previousLogger);
+    }
 
     expect(runtime.run).not.toHaveBeenCalled();
+    expect(sink.events.map((event) => event.message)).toEqual([
+      "memory.extract skipped: no memory provider",
+    ]);
   });
 
   it("resolves the deployment model when no user credential is configured", async () => {

@@ -2977,6 +2977,11 @@ msgstr "छोटा करें"
 msgid "Minimize bots"
 msgstr ""
 
+#: src/pages/ModelSettingsOverlay.tsx
+#: src/pages/Onboarding.tsx
+msgid "Minimum reasoning effort"
+msgstr ""
+
 #: src/pages/RoutineSchedule.tsx
 msgid "minute"
 msgstr "मिनट"
@@ -3321,6 +3326,11 @@ msgstr "OAuth कनेक्शन विफल"
 
 #: src/pages/McpServersOverlay.tsx
 msgid "OAuth expired"
+msgstr ""
+
+#: src/pages/ModelSettingsOverlay.tsx
+#: src/pages/Onboarding.tsx
+msgid "Off"
 msgstr ""
 
 #. placeholder {0}: call.botName
