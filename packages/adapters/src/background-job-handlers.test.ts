@@ -173,6 +173,41 @@ describe("createBackgroundJobHandlers", () => {
     ]);
   });
 
+  it("does not call the model when consolidate has no Neo4j provider", async () => {
+    const runtime = { run: vi.fn() } as unknown as AgentRuntime;
+    const handlers = createBackgroundJobHandlers({
+      executor: { resolveModel: vi.fn() } as unknown as ReturnType<typeof createRunExecutor>,
+      prisma: {} as unknown as PrismaClient,
+      sandbox: {} as unknown as SandboxProvider,
+      home: {} as unknown as AgentHomeStore,
+      jobs: {} as unknown as JobPublisher,
+      events: {} as unknown as ThreadEvents,
+      workerId: "worker-1",
+      runtime,
+      secretStore: {} as unknown as EncryptedSecretStore,
+      memoryProviders: { resolve: vi.fn(async () => null) },
+    });
+
+    const sink = createTestSink();
+    const previousLogger = getLogger();
+    installLogger(createLogger({ service: "test", sinks: [sink] }));
+    try {
+      await handlers["memory.consolidate"]({
+        spaceId: "space-1",
+        userId: "user-1",
+        attempt: 0,
+        scheduleGeneration: 0,
+      });
+    } finally {
+      installLogger(previousLogger);
+    }
+
+    expect(runtime.run).not.toHaveBeenCalled();
+    expect(sink.events.map((event) => event.message)).toEqual([
+      "memory.consolidate skipped: no memory provider",
+    ]);
+  });
+
   it("resolves the deployment model when no user credential is configured", async () => {
     const prisma = {
       spaceModelPreference: { findFirst: vi.fn(async () => null) },

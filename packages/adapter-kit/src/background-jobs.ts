@@ -34,6 +34,16 @@ const payloadSchemas = {
     attempt: z.number().int().min(0).max(8),
     scheduleGeneration: z.number().int().min(0).max(80),
   }),
+  "memory.consolidate": z.object({
+    spaceId: z.string().min(1),
+    userId: z.string().min(1),
+    ns: z.string().min(1).max(200).optional(),
+    afterId: z.string().min(1).max(200).optional(),
+    carryIds: z.array(z.string().min(1).max(200)).max(40).optional(),
+    rejected: z.array(z.string().min(3).max(400)).max(80).optional(),
+    attempt: z.number().int().min(0).max(8),
+    scheduleGeneration: z.number().int().min(0).max(400),
+  }),
 } satisfies { [Name in BackgroundJobName]: z.ZodType<BackgroundJobPayloads[Name]> };
 
 export function parseBackgroundJob(name: string, payload: unknown): BackgroundJob {
@@ -168,10 +178,11 @@ export function cloudAgentPollJobKey(agentId: string): string {
 }
 
 /**
- * One global queue for every space. Graphile runs a single job from a named
- * queue at a time, including across worker replicas, and TaskSpec has no
+ * One global queue for memory model work. Graphile runs a single job from a
+ * named queue at a time, including across worker replicas, and TaskSpec has no
  * concurrency field for that queue. Worker `concurrency` still applies to
- * other jobs; it cannot run two `memory-extract` jobs together.
+ * other jobs. `memory.extract` and `memory.consolidate` share this queue so
+ * their model calls cannot overlap.
  */
 export const MEMORY_EXTRACT_QUEUE_NAME = "memory-extract";
 
@@ -197,6 +208,35 @@ export function memoryExtractJob(
     replaceKey: memoryExtractJobKey(payload.factId, payload.scheduleGeneration),
     queueName: MEMORY_EXTRACT_QUEUE_NAME,
     maxAttempts: MEMORY_EXTRACT_MAX_ATTEMPTS,
+    ...(availableAt ? { availableAt } : {}),
+  };
+}
+
+/**
+ * A dropped database connection can retry this row. Rate limits do not: the
+ * handler reschedules a new row and returns. The key alternates with
+ * scheduleGeneration so that follow-up survives the successful row's delete.
+ */
+export const MEMORY_CONSOLIDATE_MAX_ATTEMPTS = 3;
+
+export function memoryConsolidateJobKey(
+  spaceId: string,
+  ns: string | undefined,
+  scheduleGeneration: number,
+): string {
+  return `memory.consolidate:${spaceId}:${ns?.trim() || "*"}:${scheduleGeneration % 2}`;
+}
+
+export function memoryConsolidateJob(
+  payload: BackgroundJobPayloads["memory.consolidate"],
+  availableAt?: Date,
+): BackgroundJob {
+  return {
+    name: "memory.consolidate",
+    payload,
+    replaceKey: memoryConsolidateJobKey(payload.spaceId, payload.ns, payload.scheduleGeneration),
+    queueName: MEMORY_EXTRACT_QUEUE_NAME,
+    maxAttempts: MEMORY_CONSOLIDATE_MAX_ATTEMPTS,
     ...(availableAt ? { availableAt } : {}),
   };
 }

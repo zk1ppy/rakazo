@@ -8,8 +8,10 @@ import {
   escapeLuceneQuery,
   linkNeo4jEntities,
   linkNeo4jFactEntity,
+  listNeo4jConsolidationEntities,
   listUnextractedNeo4jFacts,
   mergeExtractedNeo4jEntity,
+  mergeNeo4jDuplicateEntity,
   NEO4J_ENTITY_FULLTEXT_INDEX,
   NEO4J_FACT_FULLTEXT_INDEX,
   NEO4J_MEMORY_SCHEMA_STATEMENTS,
@@ -384,5 +386,206 @@ describe("Neo4j memory client", () => {
     expect(cypher).toContain("expiredAt IS NULL");
     expect(cypher).toContain("NOT (f)-[:ABOUT]->()");
     expect(cypher).toContain("ORDER BY f.id");
+  });
+
+  it("lists consolidation entities in id order without interpolating names", async () => {
+    const driver = new FakeDriver();
+    driver.rows.push({
+      records: [
+        row({
+          id: "nicolas-full",
+          ns: "shared",
+          labels: ["Entity", "Person"],
+          entityType: "Person",
+          name: "Nicolas Tremblier",
+          normName: "nicolas tremblier",
+          aliases: ["Nicolas"],
+          aliasNorms: ["nicolas"],
+          summary: "",
+          neighborIds: ["paris"],
+          factIds: ["fact-1"],
+          degree: 4,
+        }),
+        row({
+          id: "both-types",
+          ns: "shared",
+          labels: ["Person", "Location"],
+          entityType: "Person",
+          name: "Paris",
+          normName: "paris",
+          aliases: [],
+          aliasNorms: [],
+          summary: "",
+          neighborIds: [],
+          factIds: [],
+          degree: 1,
+        }),
+      ],
+    });
+    await expect(
+      listNeo4jConsolidationEntities(driver, "neo4j", {
+        spaceId: "space-1",
+        ns: "shared",
+        limit: 50,
+        afterId: "ada",
+      }),
+    ).resolves.toEqual([
+      {
+        id: "nicolas-full",
+        ns: "shared",
+        type: "Person",
+        name: "Nicolas Tremblier",
+        normName: "nicolas tremblier",
+        aliases: ["Nicolas"],
+        aliasNorms: ["nicolas"],
+        summary: "",
+        degree: 4,
+        neighborIds: ["paris"],
+        factIds: ["fact-1"],
+      },
+    ]);
+    const cypher = driver.calls[0]?.cypher ?? "";
+    expect(cypher).toContain("spaceId: $spaceId");
+    expect(cypher).toContain("ORDER BY e.id");
+    expect(cypher).toContain("COUNT { (e)--() }");
+    expect(cypher).toContain("aliasNorms");
+    expect(cypher).toContain("RKZ_REL");
+    expect(cypher).not.toContain("Nicolas");
+    expect(driver.calls[0]?.params).toMatchObject({
+      spaceId: "space-1",
+      ns: "shared",
+      afterId: "ada",
+      limit: 50,
+    });
+    expect(driver.calls[0]?.options.access).toBe("read");
+  });
+
+  it("refuses a duplicate merge when the nodes are not the same type", async () => {
+    const driver = new FakeDriver();
+    driver.rows.push({ records: [] });
+    await expect(
+      mergeNeo4jDuplicateEntity(driver, "neo4j", {
+        spaceId: "space-1",
+        keepId: "keep",
+        dropId: "drop",
+        type: "Person",
+        name: "Nicolas",
+        normName: "nicolas",
+        aliases: [],
+        aliasNorms: [],
+        summary: "",
+        now: "2026-01-01T00:00:00.000Z",
+      }),
+    ).resolves.toEqual({ merged: false, reason: "guard" });
+    expect(driver.calls).toHaveLength(1);
+    expect(driver.calls[0]?.cypher).toContain("$type IN labels(keep)");
+    expect(driver.calls[0]?.cypher).toContain("$type IN labels(drop)");
+    expect(driver.calls[0]?.options.access).toBe("read");
+  });
+
+  it("leaves the duplicate in place when an edge type is not safe to copy", async () => {
+    const driver = new FakeDriver();
+    driver.rows.push(
+      { records: [row({ id: "keep" })] },
+      { records: [row({ foreign: 0 })] },
+      { records: [row({ relType: "bad-type" })] },
+    );
+    await expect(
+      mergeNeo4jDuplicateEntity(driver, "neo4j", {
+        spaceId: "space-1",
+        keepId: "keep",
+        dropId: "drop",
+        type: "Person",
+        name: "Nicolas Tremblier",
+        normName: "nicolas tremblier",
+        aliases: ["Nicolas"],
+        aliasNorms: ["nicolas"],
+        summary: "",
+        now: "2026-01-01T00:00:00.000Z",
+      }),
+    ).resolves.toEqual({ merged: false, reason: "unsafe" });
+    expect(driver.calls).toHaveLength(3);
+    expect(driver.calls.every((call) => call.options.access === "read")).toBe(true);
+    expect(driver.calls.map((call) => call.cypher).join("\n")).not.toContain("bad-type");
+  });
+
+  it("rewires ABOUT, RKZ_REL, and FROM onto the kept entity before deleting the duplicate", async () => {
+    const driver = new FakeDriver();
+    const empty = { records: [] as Array<{ get(key: string): unknown }> };
+    driver.rows.push(
+      { records: [row({ id: "keep" })] },
+      { records: [row({ foreign: 0 })] },
+      {
+        records: [
+          row({ relType: "ABOUT" }),
+          row({ relType: "RKZ_REL" }),
+          row({ relType: "FROM" }),
+          row({ relType: "MENTIONS" }),
+        ],
+      },
+      empty,
+      empty,
+      empty,
+      empty,
+      empty,
+      empty,
+      empty,
+      empty,
+      empty,
+      { records: [row({ id: "keep" })] },
+    );
+    await expect(
+      mergeNeo4jDuplicateEntity(driver, "neo4j", {
+        spaceId: "space-1",
+        keepId: "keep",
+        dropId: "drop",
+        type: "Person",
+        name: "Nicolas Tremblier",
+        normName: "nicolas tremblier",
+        aliases: ["Nicolas"],
+        aliasNorms: ["nicolas"],
+        summary: "Lives in Paris",
+        now: "2026-01-01T00:00:00.000Z",
+      }),
+    ).resolves.toEqual({ merged: true });
+
+    const writes = driver.calls.filter((call) => call.options.access === "write");
+    const cypher = writes.map((call) => call.cypher);
+    expect(cypher[0]).toContain("MERGE (src)-[:ABOUT]->(keep)");
+    expect(cypher[0]).toContain("DELETE rel");
+    expect(cypher[1]).toContain("-[rel:RKZ_REL]->(other)");
+    expect(cypher[1]).toContain(
+      "MERGE (keep)-[moved:RKZ_REL {type: coalesce(rel.type, ''), factId: coalesce(rel.factId, '')}]->(other)",
+    );
+    expect(cypher[1]).toContain("moved.validFrom = rel.validFrom");
+    expect(cypher[2]).toContain("-[rel:RKZ_REL]->(drop:Rkz:Entity");
+    expect(cypher[2]).toContain(
+      "MERGE (other)-[moved:RKZ_REL {type: coalesce(rel.type, ''), factId: coalesce(rel.factId, '')}]->(keep)",
+    );
+    expect(cypher[3]).toContain("-[rel:FROM]->(other)");
+    expect(cypher[3]).toContain("MERGE (keep)-[moved:FROM]->(other)");
+    expect(cypher[4]).toContain("-[rel:FROM]->(drop:Rkz:Entity");
+    expect(cypher[4]).toContain("MERGE (other)-[moved:FROM]->(keep)");
+    expect(cypher[5]).toContain("-[rel:MENTIONS]->(other)");
+    expect(cypher[5]).toContain("MERGE (keep)-[moved:MENTIONS]->(other)");
+    expect(cypher[6]).toContain("-[rel:MENTIONS]->(drop:Rkz:Entity");
+    expect(cypher[7]).toContain("DELETE rel");
+    expect(cypher[8]).toContain("-[rel]-(drop)");
+    const commit = cypher[9] ?? "";
+    expect(commit).toContain("SET keep:Person");
+    expect(commit).toContain("DELETE drop");
+    expect(commit).toContain("NOT (drop)--()");
+    expect(commit).not.toContain("DETACH DELETE");
+    expect(writes[9]?.params).toMatchObject({
+      keepId: "keep",
+      dropId: "drop",
+      spaceId: "space-1",
+      type: "Person",
+      name: "Nicolas Tremblier",
+      normName: "nicolas tremblier",
+      aliases: ["Nicolas"],
+      aliasNorms: ["nicolas"],
+    });
+    expect(writes.every((call) => call.params.spaceId === "space-1")).toBe(true);
   });
 });
