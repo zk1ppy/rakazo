@@ -43,7 +43,15 @@ const payloadSchemas = {
     rejected: z.array(z.string().min(3).max(400)).max(80).optional(),
     attempt: z.number().int().min(0).max(8),
     scheduleGeneration: z.number().int().min(0).max(400),
+    automatic: z.boolean().optional(),
   }),
+  // Graphile cron merges `{ _cron: { ts, backfilled } }` into the payload.
+  "memory.dream": z.preprocess((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const record = { ...(value as Record<string, unknown>) };
+    delete record._cron;
+    return record;
+  }, z.object({}).strict()),
 } satisfies { [Name in BackgroundJobName]: z.ZodType<BackgroundJobPayloads[Name]> };
 
 export function parseBackgroundJob(name: string, payload: unknown): BackgroundJob {

@@ -103,6 +103,8 @@ describe("Neo4j consolidation settings", () => {
 
     const thinking = labeled<HTMLSelectElement>(container, "Consolidation reasoning", "select");
     const tokens = labeled<HTMLInputElement>(container, "Consolidation output tokens", "input");
+    const dream = container.querySelector<HTMLInputElement>("[data-testid=dream-mode-toggle]");
+    expect(dream?.checked).toBe(false);
     expect(thinking.value).toBe("low");
     expect(tokens.value).toBe("");
     expect(tokens.placeholder).toBe("32768");
@@ -122,6 +124,7 @@ describe("Neo4j consolidation settings", () => {
       thinking.dispatchEvent(new Event("change", { bubbles: true }));
     });
     expect(updates.at(-1)).toMatchObject({
+      dream: false,
       consolidateThinkingLevel: "minimal",
       consolidateMaxOutputTokens: "",
     });
@@ -144,6 +147,7 @@ describe("Neo4j consolidation settings", () => {
       budget.blur();
     });
     expect(updates.at(-1)).toMatchObject({
+      dream: false,
       consolidateThinkingLevel: "",
       consolidateMaxOutputTokens: "2048",
     });

@@ -18,6 +18,8 @@ import { performComputerUpdate } from "./computer-update.js";
 import type { createRunExecutor } from "./executor.js";
 import { compactHistory } from "./history-compaction.js";
 import { consolidateMemoryGraph } from "./memory-consolidate.js";
+import { loadNeo4jConsolidationSpaces } from "./memory-consolidate-backfill.js";
+import { maybeScheduleDreamConsolidation, sweepDreamConsolidation } from "./memory-dream.js";
 import { extractMemoryGraph } from "./memory-extract.js";
 import type { MemoryProviderResolver } from "./memory-provider-factory.js";
 import { deliverMessagingOutbound, mirrorMessagingOutbound } from "./messaging-delivery.js";
@@ -116,7 +118,7 @@ export function createBackgroundJobHandlers(deps: {
         );
         return;
       }
-      await extractMemoryGraph(
+      const wrote = await extractMemoryGraph(
         {
           runtime: deps.runtime,
           prisma: deps.prisma,
@@ -140,6 +142,20 @@ export function createBackgroundJobHandlers(deps: {
         payload,
         provider,
       );
+      await maybeScheduleDreamConsolidation(
+        deps.jobs,
+        provider.dreamEnabled(),
+        { spaceId: payload.spaceId, userId: payload.userId },
+        wrote,
+      );
+    },
+    "memory.dream": async () => {
+      const loaded = await loadNeo4jConsolidationSpaces(deps.prisma, deps.secretStore);
+      const scheduled = await sweepDreamConsolidation(loaded.spaces, deps.jobs);
+      getLogger().info("memory.dream sweep", {
+        "memory.spaces": scheduled,
+        "memory.failed": loaded.failed,
+      });
     },
     "memory.consolidate": async (payload) => {
       const configured = await deps.memoryProviders.resolve(payload.spaceId);
@@ -150,6 +166,10 @@ export function createBackgroundJobHandlers(deps: {
             ? "memory.consolidate skipped: provider is not neo4j"
             : "memory.consolidate skipped: no memory provider",
         );
+        return;
+      }
+      if (payload.automatic && !provider.dreamEnabled()) {
+        getLogger().info("memory.consolidate skipped: dream mode is off");
         return;
       }
       await consolidateMemoryGraph(

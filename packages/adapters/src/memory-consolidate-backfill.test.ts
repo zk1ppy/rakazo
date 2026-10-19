@@ -19,6 +19,7 @@ function jobs(): JobPublisher & {
 const space = (overrides: Partial<ConsolidateSpace> = {}): ConsolidateSpace => ({
   spaceId: "space-1",
   userId: "user-1",
+  dreamEnabled: false,
   ...overrides,
 });
 

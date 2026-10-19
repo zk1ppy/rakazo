@@ -2,6 +2,7 @@ import type { JobPublisher, SecretStore } from "@rakazo/adapter-kit";
 import { memoryConsolidateJob } from "@rakazo/adapter-kit";
 import type { PrismaClient } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
+import { neo4jDreamEnabled } from "./memory-dream.js";
 import { toStringRecord } from "./memory-provider-factory.js";
 import { createNeo4jProvider, Neo4jMemoryProvider } from "./neo4j-memory-provider.js";
 
@@ -21,6 +22,8 @@ const MAX_LIMIT = 5_000;
 export interface ConsolidateSpace {
   spaceId: string;
   userId: string;
+  /** Set by the loader. Manual backfill ignores it and still enqueues. */
+  dreamEnabled?: boolean;
 }
 
 export interface BackfillConsolidateOptions {
@@ -139,7 +142,11 @@ export async function loadNeo4jConsolidationSpaces(
         failed += 1;
         continue;
       }
-      spaces.push({ spaceId: config.spaceId, userId: config.userId });
+      spaces.push({
+        spaceId: config.spaceId,
+        userId: config.userId,
+        dreamEnabled: neo4jDreamEnabled(settings),
+      });
     } catch (error) {
       failed += 1;
       getLogger().error("memory consolidate skipped a space", {

@@ -275,35 +275,36 @@ export async function extractMemoryGraph(
   deps: MemoryExtractDeps,
   payload: BackgroundJobPayloads["memory.extract"],
   store: MemoryExtractStore,
-): Promise<void> {
+): Promise<boolean> {
   if (!store.extractionEnabled()) {
     getLogger().info("memory.extract skipped: extraction is off");
-    return;
+    return false;
   }
   const text = await store.readFactText({
     factId: payload.factId,
     spaceId: payload.spaceId,
     ns: payload.ns,
   });
-  if (!text || isTrivialMemoryText(text)) return;
+  if (!text || isTrivialMemoryText(text)) return false;
   const { chunks } = planExtractionChunks(text, payload.maxChunkChars);
-  if (payload.chunkIndex >= chunks.length) return;
+  if (payload.chunkIndex >= chunks.length) return false;
 
   const model = await resolveExtractModel(deps, payload, store);
   if (!model || model.provider === "scripted" || deps.runtime.describe().capabilities.scripted) {
     getLogger().info("memory.extract skipped: no usable model");
-    return;
+    return false;
   }
   const subjectName = await resolveSubjectName(deps, payload.userId);
 
   let attempt = payload.attempt;
+  let wrote = false;
   for (let index = payload.chunkIndex; index < chunks.length; index += 1) {
     const chunk = chunks[index];
     if (!chunk) continue;
     const call = await callExtractor(deps, payload, model, chunk, index, subjectName);
     if (call.kind === "rate_limit") {
       await rescheduleExtract(deps, payload, index, attempt);
-      return;
+      return wrote;
     }
     const extracted = parseMemoryExtraction(call.text, payload.spaceId, payload.ns, subjectName);
     const counts = {
@@ -323,6 +324,7 @@ export async function extractMemoryGraph(
         relations: extracted.relations,
         now: new Date().toISOString(),
       });
+      wrote = true;
       getLogger().info("memory.extract wrote a graph", counts);
     } else if (!isTrivialMemoryText(chunk)) {
       getLogger().warn("memory.extract kept no entities", {
@@ -332,6 +334,7 @@ export async function extractMemoryGraph(
     }
     attempt = 0;
   }
+  return wrote;
 }
 
 export function parseMemoryExtraction(

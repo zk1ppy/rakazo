@@ -667,6 +667,8 @@ export interface BackgroundJobPayloads {
   "messaging.deliver": { runId?: string };
   /** Reconcile durable remote-agent intent; scope is loaded from the database. */
   "cloud_agent.poll": { agentId: string };
+  /** Nightly dream-mode sweep. The payload is empty; spaces are loaded from config. */
+  "memory.dream": Record<string, never>;
   /**
    * Extract POLE+O entities for one saved fact. Chunks run inside this job,
    * starting at chunkIndex. attempt counts rate-limit reschedules for that chunk.
@@ -689,6 +691,8 @@ export interface BackgroundJobPayloads {
    * the previous page that might match a later, more specific name. `rejected`
    * pairs were already refused, so a follow-up does not ask the model again.
    * attempt counts rate-limit reschedules. scheduleGeneration alternates the job key.
+   * `automatic` marks a dream-mode run. The handler drops it when dream mode is off.
+   * A manual enqueue leaves it unset and still runs.
    */
   "memory.consolidate": {
     spaceId: string;
@@ -699,6 +703,7 @@ export interface BackgroundJobPayloads {
     rejected?: string[];
     attempt: number;
     scheduleGeneration: number;
+    automatic?: boolean;
   };
 }
 

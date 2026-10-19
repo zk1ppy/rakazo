@@ -31,10 +31,24 @@ function handlers(): BackgroundJobHandlers {
     "cloud_agent.poll": vi.fn(async () => undefined),
     "memory.extract": vi.fn(async () => undefined),
     "memory.consolidate": vi.fn(async () => undefined),
+    "memory.dream": vi.fn(async () => undefined),
   };
 }
 
 describe("background job contracts", () => {
+  it("accepts an empty dream sweep, drops the cron marker, and rejects a payload", () => {
+    expect(parseBackgroundJob("memory.dream", {})).toEqual({
+      name: "memory.dream",
+      payload: {},
+    });
+    expect(
+      parseBackgroundJob("memory.dream", {
+        _cron: { ts: "2026-10-20T03:00:00.000Z", backfilled: false },
+      }),
+    ).toEqual({ name: "memory.dream", payload: {} });
+    expect(() => parseBackgroundJob("memory.dream", { spaceId: "space-1" })).toThrow();
+  });
+
   it("validates and dispatches messaging.deliver", async () => {
     const target = handlers();
     await dispatchBackgroundJob(target, "messaging.deliver", { runId: "run-1" });

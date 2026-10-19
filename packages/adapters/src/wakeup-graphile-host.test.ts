@@ -13,11 +13,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const run = vi.hoisted(() => vi.fn());
 
-vi.mock("graphile-worker", () => ({
-  run: (...args: unknown[]) => run(...args),
-  makeWorkerUtils: vi.fn(),
-}));
+vi.mock("graphile-worker", async () => {
+  const actual = await vi.importActual<typeof import("graphile-worker")>("graphile-worker");
+  return {
+    run: (...args: unknown[]) => run(...args),
+    makeWorkerUtils: vi.fn(),
+    parseCronItems: actual.parseCronItems,
+  };
+});
 
+import { DREAM_CRON_ITEM } from "./memory-dream.js";
 import {
   createRoutineRetryNoticeReconciler,
   databaseCapacityBackoffMs,
@@ -39,6 +44,7 @@ function handlers(): BackgroundJobHandlers {
     "cloud_agent.poll": vi.fn(async () => undefined),
     "memory.extract": vi.fn(async () => undefined),
     "memory.consolidate": vi.fn(async () => undefined),
+    "memory.dream": vi.fn(async () => undefined),
   };
 }
 
@@ -272,6 +278,11 @@ describe("GraphileJobWorkerHost runner lifecycle", () => {
 
     await host.start(handlers());
     expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]?.[0]).toMatchObject({
+      parsedCronItems: [
+        expect.objectContaining({ task: DREAM_CRON_ITEM.task, identifier: "memory-dream" }),
+      ],
+    });
 
     first.rejectLife(tooMany);
     await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));

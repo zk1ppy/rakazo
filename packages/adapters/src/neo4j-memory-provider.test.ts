@@ -87,6 +87,15 @@ describe("Neo4jMemoryProvider", () => {
       { uri: "neo4j+s://db.example.test", username: "reader" },
       { password: "secret" },
     );
+    expect(created).toBeInstanceOf(Neo4jMemoryProvider);
+    if (!(created instanceof Neo4jMemoryProvider)) throw new Error("expected Neo4j");
+    expect(created.dreamEnabled()).toBe(false);
+    const dreaming = createNeo4jProvider(
+      { uri: "neo4j+s://db.example.test", username: "reader", dream: "on" },
+      { password: "secret" },
+    );
+    if (!(dreaming instanceof Neo4jMemoryProvider)) throw new Error("expected Neo4j");
+    expect(dreaming.dreamEnabled()).toBe(true);
     expect(created.describe()).toEqual({
       id: "neo4j",
       contractVersion: "1",
@@ -175,6 +184,23 @@ describe("Neo4jMemoryProvider", () => {
       extract: "false",
       maxChunkChars: "800",
     });
+    const dreamed = await classifyNeo4jConnectionSettings(
+      {
+        uri: "neo4j+s://db.example.test",
+        username: "neo4j",
+        dream: " true ",
+      },
+      { resolveHostname: async () => [{ address: "203.0.113.10", family: 4 }] },
+    );
+    expect(dreamed.dream).toBe("true");
+    expect(
+      (
+        await classifyNeo4jConnectionSettings(
+          { uri: "neo4j+s://db.example.test", username: "neo4j" },
+          { resolveHostname: async () => [{ address: "203.0.113.10", family: 4 }] },
+        )
+      ).dream,
+    ).toBeUndefined();
     await expect(
       classifyNeo4jConnectionSettings(
         { uri: "neo4j+s://db.example.test", username: "neo4j", maxChunkChars: "10" },

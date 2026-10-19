@@ -147,6 +147,7 @@ export async function updateNeo4jExtraction(
     extractModelId?: string;
     consolidateThinkingLevel?: string;
     consolidateMaxOutputTokens?: string;
+    dream?: boolean;
   },
 ) {
   await requireSpaceOwner(deps.prisma, actor);
@@ -210,6 +211,7 @@ export async function updateNeo4jExtraction(
       settings.extractModelId = modelId;
     }
   }
+  if (input.dream !== undefined) settings.dream = input.dream ? "true" : "false";
   const updated = await deps.prisma.spaceMemoryConfig.update({
     where: { id: existing.id },
     data: { settings },

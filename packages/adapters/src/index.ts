@@ -92,6 +92,13 @@ export {
   parseBackfillConsolidateArgs,
 } from "./memory-consolidate-backfill.js";
 export {
+  DREAM_BACKFILL_MS,
+  DREAM_CRON_ITEM,
+  DREAM_DEBOUNCE_MS,
+  DREAM_NIGHTLY_CRON,
+  neo4jDreamEnabled,
+} from "./memory-dream.js";
+export {
   assertNeo4jMaxChunkChars,
   neo4jExtractionEnabled,
   neo4jMaxChunkChars,
