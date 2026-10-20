@@ -307,9 +307,11 @@ export function Neo4jExtractionSettings({
   const [consolidateTimeout, setConsolidateTimeout] = useState(
     config.settings.consolidateTimeoutMs ?? "",
   );
+  const [ownerAliases, setOwnerAliases] = useState(config.settings.ownerAliases ?? "");
   const thinkingId = useId();
   const tokensId = useId();
   const timeoutId = useId();
+  const aliasesId = useId();
 
   useEffect(() => {
     setExtract(neo4jExtractEnabled(config.settings));
@@ -319,6 +321,7 @@ export function Neo4jExtractionSettings({
     setConsolidateThinking(config.settings.consolidateThinkingLevel || "low");
     setConsolidateMaxTokens(config.settings.consolidateMaxOutputTokens ?? "");
     setConsolidateTimeout(config.settings.consolidateTimeoutMs ?? "");
+    setOwnerAliases(config.settings.ownerAliases ?? "");
   }, [config.settings]);
 
   async function save(
@@ -329,6 +332,7 @@ export function Neo4jExtractionSettings({
     nextThinking = consolidateThinking,
     nextMaxTokens = consolidateMaxTokens,
     nextTimeout = consolidateTimeout,
+    nextAliases = ownerAliases,
   ) {
     return onUpdateExtraction({
       extract: nextExtract,
@@ -338,6 +342,7 @@ export function Neo4jExtractionSettings({
       consolidateThinkingLevel: nextThinking === "low" ? "" : nextThinking,
       consolidateMaxOutputTokens: nextMaxTokens.trim(),
       consolidateTimeoutMs: nextTimeout.trim(),
+      ownerAliases: nextAliases.trim(),
     });
   }
 
@@ -485,6 +490,34 @@ export function Neo4jExtractionSettings({
             });
           }}
           placeholder="180000"
+          autoComplete="off"
+        />
+      </Field>
+      <Field className="mt-4">
+        <FieldLabel htmlFor={aliasesId}>
+          <Trans>Owner aliases</Trans>
+        </FieldLabel>
+        <Input
+          id={aliasesId}
+          value={ownerAliases}
+          disabled={busy}
+          onChange={(event) => setOwnerAliases(event.target.value)}
+          onBlur={() => {
+            if (ownerAliases.trim() === (config.settings.ownerAliases ?? "")) return;
+            void save(
+              extract,
+              chunkSize,
+              modelKey,
+              dream,
+              consolidateThinking,
+              consolidateMaxTokens,
+              consolidateTimeout,
+              ownerAliases,
+            ).then((ok) => {
+              if (!ok) setOwnerAliases(config.settings.ownerAliases ?? "");
+            });
+          }}
+          placeholder="runner, coureur, athlete"
           autoComplete="off"
         />
       </Field>

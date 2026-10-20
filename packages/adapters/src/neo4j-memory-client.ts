@@ -896,6 +896,41 @@ RETURN e.id AS id,
        COUNT { (e)--() } AS degree
 `;
 
+/** People whose normalized name or alias is in the list. An empty list does no query. */
+export async function findNeo4jPeopleByNorms(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string; ns?: string; norms: string[] },
+  signal?: AbortSignal,
+): Promise<Neo4jConsolidationEntity[]> {
+  const norms = [
+    ...new Set(input.norms.map((norm) => norm.trim()).filter((norm) => norm.length >= 2)),
+  ];
+  if (norms.length === 0) return [];
+  const result = await driver.run(
+    `MATCH (e:Rkz:Entity:Person {spaceId: $spaceId})
+     WHERE ($ns = '' OR e.ns = $ns)
+       AND (
+         e.normName IN $norms
+         OR any(alias IN coalesce(e.aliasNorms, []) WHERE alias IN $norms)
+       )
+     ${CONSOLIDATION_ENTITY_QUERY}`,
+    {
+      spaceId: input.spaceId,
+      ns: input.ns?.trim() ?? "",
+      norms,
+      limit: 40,
+    },
+    { database, access: "read", signal },
+  );
+  const entities: Neo4jConsolidationEntity[] = [];
+  for (const record of result.records) {
+    const entity = consolidationEntity(record);
+    if (entity) entities.push(entity);
+  }
+  return entities;
+}
+
 /** One page of entities in a space, optionally restricted to a namespace or an id list. */
 export async function listNeo4jConsolidationEntities(
   driver: Neo4jMemoryDriver,

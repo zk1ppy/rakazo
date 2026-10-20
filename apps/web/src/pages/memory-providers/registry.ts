@@ -23,6 +23,7 @@ export interface Neo4jExtractionUpdate {
   consolidateThinkingLevel?: string;
   consolidateMaxOutputTokens?: string;
   consolidateTimeoutMs?: string;
+  ownerAliases?: string;
   dream?: boolean;
 }
 

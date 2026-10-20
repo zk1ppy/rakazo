@@ -10,7 +10,9 @@ import { createLogger, createTestSink, getLogger, installLogger } from "@rakazo/
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MemoryExtractDeps, MemoryExtractStore } from "./memory-extract.js";
 import {
+  assertOwnerAliases,
   extractMemoryGraph,
+  isNonReferentName,
   isTrivialMemoryText,
   MEMORY_EXTRACT_INSTRUCTIONS,
   memoryExtractPrompt,
@@ -19,6 +21,7 @@ import {
   parseMemoryExtraction,
   planExtractionChunks,
   readNeo4jExtractionModel,
+  readOwnerAliases,
 } from "./memory-extract.js";
 
 const payload = (
@@ -60,11 +63,16 @@ function jobs(): JobPublisher & {
 
 function store(
   text: string | null,
-  options?: { enabled?: boolean; model?: { provider: string; id: string } | null },
+  options?: {
+    enabled?: boolean;
+    model?: { provider: string; id: string } | null;
+    aliases?: readonly string[];
+  },
 ): MemoryExtractStore & { applyExtraction: ReturnType<typeof vi.fn> } {
   return {
     extractionEnabled: () => options?.enabled ?? true,
     extractionModel: () => options?.model ?? null,
+    ownerAliases: () => options?.aliases ?? readOwnerAliases({}),
     readFactText: vi.fn(async () => text),
     applyExtraction: vi.fn(
       async (_input: Parameters<MemoryExtractStore["applyExtraction"]>[0]) => undefined,
@@ -218,6 +226,12 @@ describe("extraction role and measurement guards", () => {
     expect(memorySubjectName("ada@example.test")).toBeNull();
     expect(memoryExtractPrompt("note", "Ada Lovelace")).toContain("<subject>");
     expect(memoryExtractPrompt("note", "ada@example.test")).not.toContain("<subject>");
+    expect(MEMORY_EXTRACT_INSTRUCTIONS).toContain("owner-aliases");
+    expect(MEMORY_EXTRACT_INSTRUCTIONS).toContain("Option A");
+    expect(memoryExtractPrompt("note", "Ada Lovelace", ["runner", "le coureur"])).toContain(
+      "<owner-aliases>",
+    );
+    expect(memoryExtractPrompt("note", null, ["runner"])).not.toContain("<owner-aliases>");
   });
 
   it("drops a role alias and dated measurements, and keeps a handle", () => {
@@ -337,6 +351,148 @@ describe("extraction role and measurement guards", () => {
         type: "trains_in",
       }),
     ]);
+  });
+
+  it("attaches an owner alias to the space member and drops option labels", () => {
+    const extracted = parseMemoryExtraction(
+      JSON.stringify({
+        entities: [
+          { type: "Person", name: "Runner" },
+          { type: "Person", name: "The Runner", aliases: ["athlete"] },
+          { type: "Event", name: "Sunday session 18 October 2026" },
+          { type: "Event", name: "Séance du dimanche 18 octobre 2026" },
+          { type: "Event", name: "Option B" },
+          { type: "Event", name: "Step 1" },
+          { type: "Object", name: "N/A" },
+        ],
+        relations: [
+          {
+            source: "Runner",
+            target: "Sunday session 18 October 2026",
+            type: "performed_by",
+          },
+          {
+            source: "The Runner",
+            target: "Séance du dimanche 18 octobre 2026",
+            type: "planned_for",
+          },
+        ],
+      }),
+      "space-1",
+      "shared",
+      "Ada Lovelace",
+    );
+    expect(extracted.entities.map((entity) => entity.name).sort()).toEqual([
+      "Ada Lovelace",
+      "Sunday session 18 October 2026",
+      "Séance du dimanche 18 octobre 2026",
+    ]);
+    expect(extracted.entities.find((entity) => entity.name === "Ada Lovelace")).toMatchObject({
+      type: "Person",
+      normName: "ada lovelace",
+      aliases: [],
+    });
+    expect(extracted.relations).toEqual([
+      expect.objectContaining({
+        fromNorm: "ada lovelace",
+        toNorm: "sunday session 18 october 2026",
+        type: "performed_by",
+      }),
+      expect.objectContaining({
+        fromNorm: "ada lovelace",
+        toNorm: "séance du dimanche 18 octobre 2026",
+        type: "planned_for",
+      }),
+    ]);
+  });
+
+  it("prefers the space member when an alias only holds measurements", () => {
+    const extracted = parseMemoryExtraction(
+      JSON.stringify({
+        entities: [
+          { type: "Person", name: "Runner", attributes: { load_ratio: "2.5" } },
+          { type: "Person", name: "Marie Curie" },
+          { type: "Location", name: "London" },
+        ],
+        relations: [{ source: "Runner", target: "London", type: "trains_in" }],
+      }),
+      "space-1",
+      "shared",
+      "Ada Lovelace",
+    );
+    expect(extracted.entities.map((entity) => entity.name).sort()).toEqual([
+      "Ada Lovelace",
+      "London",
+      "Marie Curie",
+    ]);
+    expect(extracted.relations).toEqual([
+      expect.objectContaining({ fromNorm: "ada lovelace", toNorm: "london", type: "trains_in" }),
+    ]);
+  });
+
+  it("uses a stored alias list instead of the built-in roles", () => {
+    const extracted = parseMemoryExtraction(
+      JSON.stringify({
+        entities: [
+          { type: "Person", name: "Runner" },
+          { type: "Person", name: "Pilote" },
+          { type: "Event", name: "Sunday session 18 October 2026" },
+        ],
+        relations: [
+          { source: "Pilote", target: "Sunday session 18 October 2026", type: "performed_by" },
+          { source: "Runner", target: "Sunday session 18 October 2026", type: "watched" },
+        ],
+      }),
+      "space-1",
+      "shared",
+      "Ada Lovelace",
+      ["pilote"],
+    );
+    expect(extracted.entities.map((entity) => entity.name).sort()).toEqual([
+      "Ada Lovelace",
+      "Runner",
+      "Sunday session 18 October 2026",
+    ]);
+    expect(extracted.relations.map((relation) => relation.fromNorm).sort()).toEqual([
+      "ada lovelace",
+      "runner",
+    ]);
+  });
+
+  it("leaves an owner-alias person in place when the space member has no name", () => {
+    const extracted = parseMemoryExtraction(
+      JSON.stringify({
+        entities: [
+          { type: "Person", name: "Runner" },
+          { type: "Event", name: "Sunday session 18 October 2026" },
+        ],
+        relations: [
+          { source: "Runner", target: "Sunday session 18 October 2026", type: "performed_by" },
+        ],
+      }),
+      "space-1",
+      "shared",
+    );
+    expect(extracted.entities.map((entity) => entity.name).sort()).toEqual([
+      "Runner",
+      "Sunday session 18 October 2026",
+    ]);
+  });
+
+  it("reads owner aliases and rejects placeholders", () => {
+    expect(readOwnerAliases({})).toContain("runner");
+    expect(readOwnerAliases({ ownerAliases: "pilote" })).toEqual(["pilote"]);
+    expect(assertOwnerAliases("  pilote, le coureur ")).toBe("pilote, le coureur");
+    expect(assertOwnerAliases("")).toBeUndefined();
+    expect(() => assertOwnerAliases("!!!")).toThrow(/Owner aliases/);
+    expect(isNonReferentName("Option B")).toBe(true);
+    expect(isNonReferentName("Plan A")).toBe(true);
+    expect(isNonReferentName("Step 1")).toBe(true);
+    expect(isNonReferentName("N/A")).toBe(true);
+    expect(isNonReferentName("Séance du dimanche 18 octobre 2026")).toBe(false);
+    expect(isNonReferentName("Sunday session 18 October 2026")).toBe(false);
+    expect(isNonReferentName("Option B training")).toBe(false);
+    expect(isNonReferentName("Step 1: warmup")).toBe(false);
   });
 });
 

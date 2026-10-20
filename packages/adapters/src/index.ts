@@ -101,6 +101,7 @@ export {
 } from "./memory-dream.js";
 export {
   assertNeo4jMaxChunkChars,
+  assertOwnerAliases,
   neo4jExtractionEnabled,
   neo4jMaxChunkChars,
 } from "./memory-extract.js";

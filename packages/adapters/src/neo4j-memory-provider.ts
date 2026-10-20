@@ -35,6 +35,7 @@ import {
   neo4jMaxChunkChars,
   planExtractionChunks,
   readNeo4jExtractionModel,
+  readOwnerAliases,
 } from "./memory-extract.js";
 import type {
   Neo4jConsolidationEntity,
@@ -47,6 +48,7 @@ import {
   collapseNeo4jParallelRelations,
   ensureNeo4jMemorySchema,
   escapeLuceneQuery,
+  findNeo4jPeopleByNorms,
   forgetNeo4jFact,
   linkNeo4jEntities,
   linkNeo4jFactEntity,
@@ -325,6 +327,7 @@ export function createNeo4jProvider(
       maxChunkChars: neo4jMaxChunkChars(settings),
       extractionModel: readNeo4jExtractionModel(settings),
       consolidateModelSettings: readConsolidateModelSettings(settings),
+      ownerAliases: readOwnerAliases(settings),
     },
   );
 }
@@ -462,6 +465,7 @@ export interface Neo4jProviderOptions {
   maxChunkChars?: number;
   extractionModel?: Neo4jExtractionModel | null;
   consolidateModelSettings?: ConsolidateModelSettings;
+  ownerAliases?: readonly string[];
 }
 
 export class Neo4jMemoryProvider implements SemanticMemoryProvider {
@@ -472,6 +476,7 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
   private readonly maxChunkChars: number;
   private readonly pinnedModel: Neo4jExtractionModel | null;
   private readonly consolidateSettings: ConsolidateModelSettings;
+  private readonly ownerAliasList: readonly string[];
 
   constructor(
     private readonly connection: Neo4jMemoryConnection,
@@ -485,6 +490,7 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
     this.pinnedModel = options?.extractionModel ?? null;
     this.consolidateSettings =
       options?.consolidateModelSettings ?? readConsolidateModelSettings({});
+    this.ownerAliasList = options?.ownerAliases ?? readOwnerAliases({});
   }
 
   extractionEnabled(): boolean {
@@ -501,6 +507,10 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
 
   consolidateModelSettings(): ConsolidateModelSettings {
     return this.consolidateSettings;
+  }
+
+  ownerAliases(): readonly string[] {
+    return this.ownerAliasList;
   }
 
   extractionChunkChars(): number {
@@ -769,6 +779,18 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
     signal?: AbortSignal,
   ): Promise<boolean> {
     return renameNeo4jEntity(await this.ready(signal), this.connection.database, input, signal);
+  }
+
+  async findPeopleByNorms(
+    input: { spaceId: string; ns?: string; norms: string[] },
+    signal?: AbortSignal,
+  ) {
+    return findNeo4jPeopleByNorms(
+      await this.ready(signal),
+      this.connection.database,
+      input,
+      signal,
+    );
   }
 
   async collapseParallelRelations(

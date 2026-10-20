@@ -178,6 +178,13 @@ export function createBackgroundJobHandlers(deps: {
             runtime: deps.runtime,
             prisma: deps.prisma,
             jobs: deps.jobs,
+            resolveSubjectName: async (userId) => {
+              const user = await deps.prisma.user.findUnique({
+                where: { id: userId },
+                select: { name: true },
+              });
+              return user?.name ?? null;
+            },
             ...(deps.executor.resolveModel ? { resolveModel: deps.executor.resolveModel } : {}),
             ...(deps.executor.resolveConnectedModel
               ? { resolveConnectedModel: deps.executor.resolveConnectedModel }

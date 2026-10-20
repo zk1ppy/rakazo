@@ -3474,6 +3474,10 @@ msgstr "다른 모델 직접 입력…"
 msgid "Owner"
 msgstr ""
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Owner aliases"
+msgstr ""
+
 #: src/pages/RoutineEditor.tsx
 msgid "PagerDuty incident"
 msgstr "PagerDuty 인시던트"

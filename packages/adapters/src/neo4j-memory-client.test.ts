@@ -7,6 +7,7 @@ import {
   collapseNeo4jParallelRelations,
   ensureNeo4jMemorySchema,
   escapeLuceneQuery,
+  findNeo4jPeopleByNorms,
   linkNeo4jEntities,
   linkNeo4jFactEntity,
   listNeo4jConsolidationEntities,
@@ -499,6 +500,53 @@ describe("Neo4j memory client", () => {
       ns: "shared",
       afterId: "ada",
       limit: 50,
+    });
+    expect(driver.calls[0]?.options.access).toBe("read");
+  });
+
+  it("loads owner-alias people by normalized name and skips an empty list", async () => {
+    const driver = new FakeDriver();
+    await expect(
+      findNeo4jPeopleByNorms(driver, "neo4j", { spaceId: "space-1", norms: [" ", "a"] }),
+    ).resolves.toEqual([]);
+    expect(driver.calls).toEqual([]);
+
+    driver.rows.push({
+      records: [
+        row({
+          id: "ada",
+          ns: "shared",
+          labels: ["Rkz", "Entity", "Person"],
+          entityType: "Person",
+          name: "Ada Lovelace",
+          normName: "ada lovelace",
+          aliases: [],
+          aliasNorms: [],
+          summary: "",
+          neighborIds: [],
+          factIds: [],
+          degree: 2,
+        }),
+      ],
+    });
+    await expect(
+      findNeo4jPeopleByNorms(driver, "neo4j", {
+        spaceId: "space-1",
+        ns: "shared",
+        norms: ["ada lovelace", "runner", "ada lovelace"],
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({ id: "ada", type: "Person", normName: "ada lovelace" }),
+    ]);
+    const cypher = driver.calls[0]?.cypher ?? "";
+    expect(cypher).toContain(":Rkz:Entity:Person");
+    expect(cypher).toContain("e.normName IN $norms");
+    expect(cypher).not.toContain("Ada");
+    expect(driver.calls[0]?.params).toMatchObject({
+      spaceId: "space-1",
+      ns: "shared",
+      norms: ["ada lovelace", "runner"],
+      limit: 40,
     });
     expect(driver.calls[0]?.options.access).toBe("read");
   });

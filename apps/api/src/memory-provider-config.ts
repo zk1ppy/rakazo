@@ -5,6 +5,7 @@ import {
   assertConsolidateThinkingLevel,
   assertConsolidateTimeoutMs,
   assertNeo4jMaxChunkChars,
+  assertOwnerAliases,
   classifyMemoryProviderSettings,
   MemoryProviderDeploymentOwnerRequiredError,
   memoryProviderRequiresDeploymentOwner,
@@ -149,6 +150,7 @@ export async function updateNeo4jExtraction(
     consolidateThinkingLevel?: string;
     consolidateMaxOutputTokens?: string;
     consolidateTimeoutMs?: string;
+    ownerAliases?: string;
     dream?: boolean;
   },
 ) {
@@ -224,6 +226,18 @@ export async function updateNeo4jExtraction(
       settings.extractModelProvider = provider;
       settings.extractModelId = modelId;
     }
+  }
+  if (input.ownerAliases !== undefined) {
+    let aliases: string | undefined;
+    try {
+      aliases = assertOwnerAliases(input.ownerAliases);
+    } catch (error) {
+      throw new ORPCError("BAD_REQUEST", {
+        message: error instanceof Error ? error.message : "Owner aliases are invalid",
+      });
+    }
+    if (aliases) settings.ownerAliases = aliases;
+    else delete settings.ownerAliases;
   }
   if (input.dream !== undefined) settings.dream = input.dream ? "true" : "false";
   const updated = await deps.prisma.spaceMemoryConfig.update({

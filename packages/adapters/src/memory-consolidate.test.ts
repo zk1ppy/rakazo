@@ -74,7 +74,12 @@ function jobs(): JobPublisher & {
 
 function pageStore(
   entities: Neo4jConsolidationEntity[],
-  options?: { pageFull?: boolean; pageIds?: string[] },
+  options?: {
+    pageFull?: boolean;
+    pageIds?: string[];
+    aliases?: readonly string[];
+    people?: Neo4jConsolidationEntity[];
+  },
 ): MemoryConsolidateStore & {
   merges: Neo4jDuplicateMerge[];
   renames: Neo4jEntityRename[];
@@ -106,6 +111,8 @@ function pageStore(
       collapses.push(input);
       return { relations: 0, about: 0, from: 0 };
     },
+    ownerAliases: () => options?.aliases ?? [],
+    findPeopleByNorms: async () => options?.people ?? [],
   };
 }
 
@@ -122,12 +129,14 @@ function deps(
   },
   queue = jobs(),
   scripted = false,
+  subjectName: string | null = null,
 ): MemoryConsolidateDeps & { jobs: ReturnType<typeof jobs> } {
   return {
     runtime: runtime(run, scripted),
     prisma: { usageRecord: { create: vi.fn() } } as unknown as Pick<PrismaClient, "usageRecord">,
     jobs: queue,
     resolveModel: vi.fn(async () => model),
+    resolveSubjectName: async () => subjectName,
   };
 }
 
@@ -264,6 +273,20 @@ describe("consolidation decisions", () => {
     });
     expect(classifyConsolidationPair(runner, named)).toEqual({ action: "confirm", reason: "role" });
     expect(classifyConsolidationPair(runner, stranger)).toEqual({ action: "skip", reason: "weak" });
+    expect(
+      classifyConsolidationPair(runner, stranger, {
+        subjectNorm: "ada lovelace",
+        aliases: new Set(["runner"]),
+      }),
+    ).toEqual({ action: "confirm", reason: "role" });
+    const titled = entity({ id: "titled", name: "The Runner", normName: "the runner" });
+    expect(classifyConsolidationPair(titled, stranger)).toEqual({ action: "skip", reason: "weak" });
+    expect(
+      classifyConsolidationPair(titled, stranger, {
+        subjectNorm: "ada lovelace",
+        aliases: new Set(["the runner"]),
+      }),
+    ).toEqual({ action: "confirm", reason: "role" });
     const plan = planCanonicalEntity(runner, named);
     expect(plan.keep.id).toBe("full");
     expect(plan.name).toBe("Nicolas Tremblier");
@@ -638,6 +661,44 @@ describe("consolidateMemoryGraph", () => {
     });
     expect(store.merges[0]?.summary).not.toContain("score_16");
     expect(store.merges[0]?.aliases).toContain("Runner");
+  });
+
+  it("asks to merge an owner alias that shares nothing, including one loaded off the page", async () => {
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done" as const, text: '{"same":true}' };
+    });
+    const owner = entity({
+      id: "ada",
+      name: "Ada Lovelace",
+      normName: "ada lovelace",
+      degree: 1,
+    });
+    const runner = entity({
+      id: "runner",
+      name: "Runner",
+      normName: "runner",
+      degree: 4,
+    });
+    const together = pageStore([runner, owner], { aliases: ["runner"] });
+    await consolidateMemoryGraph(deps(run, jobs(), false, "Ada Lovelace"), payload, together);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(together.merges[0]).toMatchObject({
+      keepId: "ada",
+      dropId: "runner",
+      name: "Ada Lovelace",
+    });
+
+    const declined = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done" as const, text: '{"same":false}' };
+    });
+    const refused = pageStore([runner], { aliases: ["runner"], people: [owner] });
+    await consolidateMemoryGraph(deps(declined, jobs(), false, "Ada Lovelace"), payload, refused);
+    expect(declined).toHaveBeenCalledTimes(1);
+    expect(refused.merges).toEqual([]);
+
+    const offPage = pageStore([runner], { aliases: ["runner"], people: [owner] });
+    await consolidateMemoryGraph(deps(run, jobs(), false, "Ada Lovelace"), payload, offPage);
+    expect(offPage.merges[0]).toMatchObject({ keepId: "ada", dropId: "runner" });
   });
 
   it("relabels a same-name type conflict when the model picks a type", async () => {

@@ -174,6 +174,19 @@ describe("Neo4j consolidation settings", () => {
       consolidateMaxOutputTokens: "2048",
     });
 
+    const aliases = labeled<HTMLInputElement>(container, "Owner aliases", "input");
+    expect(aliases.placeholder).toBe("runner, coureur, athlete");
+    expect(aliases.value).toBe("");
+    await act(async () => {
+      aliases.focus();
+      inputSetter?.call(aliases, "pilote");
+      aliases.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      aliases.blur();
+    });
+    expect(updates.at(-1)).toMatchObject({ ownerAliases: "pilote" });
+
     act(() => root.unmount());
   });
 
@@ -185,6 +198,7 @@ describe("Neo4j consolidation settings", () => {
           config={config({
             consolidateThinkingLevel: "high",
             consolidateMaxOutputTokens: "2048",
+            ownerAliases: "pilote, le coureur",
           })}
           busy={false}
           onUpdateExtraction={async () => true}
@@ -196,6 +210,9 @@ describe("Neo4j consolidation settings", () => {
     );
     expect(labeled<HTMLInputElement>(container, "Consolidation output tokens", "input").value).toBe(
       "2048",
+    );
+    expect(labeled<HTMLInputElement>(container, "Owner aliases", "input").value).toBe(
+      "pilote, le coureur",
     );
     act(() => root.unmount());
   });
