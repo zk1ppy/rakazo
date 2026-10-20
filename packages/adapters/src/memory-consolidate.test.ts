@@ -78,12 +78,15 @@ function pageStore(
 ): MemoryConsolidateStore & {
   merges: Neo4jDuplicateMerge[];
   renames: Neo4jEntityRename[];
+  collapses: Array<{ spaceId: string; ids: string[]; ns?: string }>;
 } {
   const merges: Neo4jDuplicateMerge[] = [];
   const renames: Neo4jEntityRename[] = [];
+  const collapses: Array<{ spaceId: string; ids: string[]; ns?: string }> = [];
   return {
     merges,
     renames,
+    collapses,
     extractionModel: () => null,
     consolidateModelSettings: () => readConsolidateModelSettings({}),
     listConsolidationPage: async () => ({
@@ -98,6 +101,10 @@ function pageStore(
     renameEntity: async (input) => {
       renames.push(input);
       return true;
+    },
+    collapseParallelRelations: async (input) => {
+      collapses.push(input);
+      return { relations: 0, about: 0, from: 0 };
     },
   };
 }
@@ -346,6 +353,36 @@ describe("consolidation decisions", () => {
 });
 
 describe("consolidateMemoryGraph", () => {
+  it("collapses parallel relations even when the page has nothing to merge", async () => {
+    const store = pageStore([entity({ id: "ada", name: "Ada", normName: "ada" })]);
+    await consolidateMemoryGraph(deps(), payload, store);
+    expect(store.merges).toHaveLength(0);
+    expect(store.collapses).toEqual([
+      { spaceId: "space-1", ids: ["ada"] },
+      { spaceId: "space-1", ids: ["ada"] },
+    ]);
+  });
+
+  it("collapses relations on entities carried from the previous page", async () => {
+    const store = pageStore(
+      [
+        entity({ id: "ada", name: "Ada", normName: "ada" }),
+        entity({ id: "bea", name: "Bea", normName: "bea" }),
+      ],
+      { pageIds: ["ada"] },
+    );
+    await consolidateMemoryGraph(deps(), payload, store);
+    expect(store.merges).toHaveLength(0);
+    expect(store.collapses[0]?.ids).toEqual(["ada", "bea"]);
+    expect(store.collapses[1]?.ids).toEqual(["ada", "bea"]);
+  });
+
+  it("does not collapse an empty page", async () => {
+    const store = pageStore([], { pageIds: [] });
+    await consolidateMemoryGraph(deps(), payload, store);
+    expect(store.collapses).toEqual([]);
+  });
+
   it("merges overlapping alias norms without calling the model", async () => {
     const run = vi.fn(async function* () {
       yield { type: "done" as const, text: '{"same":true}' };
@@ -373,6 +410,10 @@ describe("consolidateMemoryGraph", () => {
     });
     expect(store.merges[0]?.aliases).toContain("Ada");
     expect(store.merges[0]?.aliasNorms).toContain("ada");
+    expect(store.collapses.map((call) => call.ids)).toEqual([
+      ["ada-full", "ada-short"],
+      ["ada-full", "ada-short"],
+    ]);
   });
 
   it("merges Nicolas into Nicolas Tremblier after one confirmation", async () => {

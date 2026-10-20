@@ -18,6 +18,7 @@ import type {
   Neo4jDuplicateMergeResult,
   Neo4jEntityRename,
   Neo4jEntityType,
+  ParallelRelationCollapse,
 } from "./neo4j-memory-client.js";
 import { NEO4J_ENTITY_TYPES } from "./neo4j-memory-client.js";
 import { REASONING_MODEL_MAX_TOKENS } from "./pi-runtime-limits.js";
@@ -84,6 +85,12 @@ import { REASONING_MODEL_MAX_TOKENS } from "./pi-runtime-limits.js";
  * DELETE rel
  * Then rewire RKZ_REL and FROM the same way mergeNeo4jDuplicateEntity does,
  * and DELETE role. Do not copy role.summary onto person.
+ *
+ * Parallel edges of the same type between the same pair collapse in this job,
+ * before and after entity merges. Case, spaces, and hyphens do not make a
+ * second type. Fact and source ids are unioned onto the surviving edge.
+ * Different types stay, and so does the reverse direction. ABOUT and FROM
+ * duplicates between one pair collapse too. None of that calls a model.
  *
  * Enqueue one space from a running worker:
  * `pnpm --filter @rakazo/worker memory:backfill-consolidate -- --space SPACE_ID`
@@ -282,6 +289,11 @@ export interface MemoryConsolidateStore {
   ): Promise<Neo4jDuplicateMergeResult>;
   /** Set the canonical name on one node. The id does not change. */
   renameEntity(input: Neo4jEntityRename, signal?: AbortSignal): Promise<boolean>;
+  /** Collapse same-type parallel edges that touch this page. No model call. */
+  collapseParallelRelations(
+    input: { spaceId: string; ids: string[]; ns?: string },
+    signal?: AbortSignal,
+  ): Promise<ParallelRelationCollapse>;
 }
 
 export interface MemoryConsolidateDeps {
@@ -585,6 +597,8 @@ export async function consolidateMemoryGraph(
   });
   if (page.pageIds.length === 0) return;
 
+  const relationIds = relationPageIds(page);
+  const collapsedBefore = await collapseParallel(store, payload, relationIds);
   const rejected = new Set(payload.rejected ?? []);
   const pairs = selectCandidates(page.entities, rejected);
   const needsModel = pairs.some((pair) => pair.action === "confirm");
@@ -697,6 +711,14 @@ export async function consolidateMemoryGraph(
 
   if (!rateLimited) await promoteCanonicalNames(store, payload.spaceId, live, rejected);
 
+  const collapsedAfter = await collapseParallel(store, payload, relationIds);
+  getLogger().info("memory.consolidate collapsed parallel relations", {
+    "memory.space_id": payload.spaceId,
+    "memory.relations": collapsedBefore.relations + collapsedAfter.relations,
+    "memory.about": collapsedBefore.about + collapsedAfter.about,
+    "memory.from": collapsedBefore.from + collapsedAfter.from,
+  });
+
   const retryTimeout = timedOutKeys.length > 0 && payload.attempt + 1 < MAX_CONSOLIDATE_ATTEMPTS;
   if (!retryTimeout) {
     for (const key of timedOutKeys) rejected.add(key);
@@ -744,6 +766,30 @@ export async function consolidateMemoryGraph(
     carryIds: nextCarry(payload.carryIds ?? [], [...live.values()], scanned),
     rejected: rejectedList,
     attempt: 0,
+  });
+}
+
+/** Page members plus entities carried forward so a merge across the boundary still collapses. */
+function relationPageIds(page: ConsolidationPage): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const id of [...page.pageIds, ...page.entities.map((entity) => entity.id)]) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+function collapseParallel(
+  store: MemoryConsolidateStore,
+  payload: BackgroundJobPayloads["memory.consolidate"],
+  ids: string[],
+): Promise<ParallelRelationCollapse> {
+  return store.collapseParallelRelations({
+    spaceId: payload.spaceId,
+    ids,
+    ...(payload.ns ? { ns: payload.ns } : {}),
   });
 }
 

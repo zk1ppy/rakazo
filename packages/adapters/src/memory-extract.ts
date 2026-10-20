@@ -19,6 +19,9 @@ import { resolveDeploymentModel } from "./deployment-model.js";
 import type { Neo4jEntityType } from "./neo4j-memory-client.js";
 import { NEO4J_ENTITY_TYPES } from "./neo4j-memory-client.js";
 import { EXTRACT_ANSWER_TOKENS, extractionThinkingLevel } from "./pi-runtime-limits.js";
+import { normalizeRelationType } from "./relation-type.js";
+
+export { normalizeRelationType } from "./relation-type.js";
 
 export const NEO4J_DEFAULT_MAX_CHUNK_CHARS = 4_000;
 export const NEO4J_MIN_MAX_CHUNK_CHARS = 400;
@@ -840,19 +843,6 @@ function prepareRelation(raw: unknown): unknown {
     type: record.type,
     time: typeof record.time === "string" ? record.time : undefined,
   };
-}
-
-function normalizeRelationType(value: string): string | null {
-  const normalized = value
-    .normalize("NFKC")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, "_")
-    .replace(/[^a-z0-9_]/g, "")
-    .replace(/_+/g, "_")
-    .replace(/^_|_$/g, "");
-  if (!normalized || normalized.length > 64) return null;
-  return normalized;
 }
 
 /**
