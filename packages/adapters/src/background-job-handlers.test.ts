@@ -219,6 +219,8 @@ describe("createBackgroundJobHandlers", () => {
       }
 
       override async applyExtraction() {}
+
+      override async markExtracted() {}
     }
     const connection = {
       uri: "bolt://127.0.0.1:7687",

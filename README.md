@@ -254,6 +254,17 @@ pnpm --filter @rakazo/worker memory:backfill-consolidate -- --space SPACE_ID
 
 `--dry-run` counts matching spaces. Omit `--space` to enqueue every Neo4j space. `--ns shared` limits that job to one namespace.
 
+Extraction backfill repairs `validFrom` and `firstSeen` on edges already written, then enqueues `memory.extract` only for facts that are not extracted yet. A fact is extracted when it has `extractedAt` or an outgoing `:ABOUT` edge. The extraction job sets `extractedAt` after the last chunk, including a result that stores no entities. Facts extracted before that property existed are recognized by the `:ABOUT` edge. The backfill copies the fact's stored time onto `extractedAt` for those facts and does not call a model. A finished extraction that stored nothing and predates the property has neither signal, so the next default run enqueues it once. The fact node stays `:Rkz:Fact`. The marker is a property.
+
+```bash
+pnpm --filter @rakazo/worker memory:backfill-extract -- --space SPACE_ID
+pnpm --filter @rakazo/worker memory:backfill-extract -- --repair-only --space SPACE_ID
+pnpm --filter @rakazo/worker memory:backfill-extract -- --force --space SPACE_ID
+pnpm --filter @rakazo/worker memory:backfill-extract -- --dry-run
+```
+
+`--repair-only` rewrites the stamps and enqueues nothing. `--force` enqueues facts that are already extracted. `--force` and `--repair-only` cannot be combined. `--dry-run` writes nothing and still counts. Omit `--space` to visit every Neo4j space. The summary reports `repaired`, `skipped`, and `enqueued`. `skipped` counts already-extracted facts unless `--force` is set, plus trivial or incomplete facts on a scanned page. `--repair-only` does not scan pages, so `skipped` is the already-extracted count and `enqueued` is 0. `repaired` is the number of relation and entity stamps rewritten.
+
 ## Documentation
 
 - [Self-hosting](./docs/self-host.md)

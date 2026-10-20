@@ -366,6 +366,16 @@ export interface MemoryExtractStore {
     },
     signal?: AbortSignal,
   ): Promise<void>;
+  /**
+   * Set when every chunk of this job has finished, including a result that
+   * stores no entities. A rate limit or a permanent failure leaves it unset.
+   */
+  markExtracted(input: {
+    factId: string;
+    spaceId: string;
+    ns: string;
+    extractedAt: string;
+  }): Promise<void>;
 }
 
 export interface MemoryExtractDeps {
@@ -391,7 +401,10 @@ export interface MemoryExtractDeps {
 
 type ExtractCall = "ok" | "rate_limit";
 
-/** Non-retryable extraction failure. The job outcome stays permanent and the fact keeps no :ABOUT edge. */
+/**
+ * Non-retryable extraction failure. The job outcome stays permanent.
+ * The fact keeps no :ABOUT edge and no extractedAt, so a later backfill can retry it.
+ */
 export class MemoryExtractPermanentError extends Error {
   readonly jobOutcome = "permanent" as const;
 
@@ -475,6 +488,12 @@ export async function extractMemoryGraph(
     }
     attempt = 0;
   }
+  await store.markExtracted({
+    factId: payload.factId,
+    spaceId: payload.spaceId,
+    ns: payload.ns,
+    extractedAt: new Date().toISOString(),
+  });
   return wrote;
 }
 
