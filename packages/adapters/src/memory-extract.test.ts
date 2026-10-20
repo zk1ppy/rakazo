@@ -15,6 +15,7 @@ import {
   MEMORY_EXTRACT_INSTRUCTIONS,
   memoryExtractPrompt,
   memorySubjectName,
+  normalizeRelationType,
   parseMemoryExtraction,
   planExtractionChunks,
   readNeo4jExtractionModel,
@@ -152,6 +153,30 @@ describe("memory extraction planning", () => {
         type: "founded",
         time: "1843",
       },
+    ]);
+  });
+
+  it("treats lives in, LIVES_IN, and lives_in as one relation", () => {
+    expect(normalizeRelationType("lives in")).toBe("lives_in");
+    expect(normalizeRelationType("LIVES_IN")).toBe("lives_in");
+    expect(normalizeRelationType("lives_in")).toBe("lives_in");
+    const extracted = parseMemoryExtraction(
+      JSON.stringify({
+        entities: [
+          { type: "Person", name: "Ada Lovelace" },
+          { type: "Location", name: "The Lab" },
+        ],
+        relations: [
+          { source: "Ada Lovelace", target: "The Lab", type: "lives in" },
+          { source: "Ada Lovelace", target: "The Lab", type: "LIVES_IN" },
+          { source: "Ada Lovelace", target: "The Lab", type: "lives_in" },
+        ],
+      }),
+      "space-1",
+      "shared",
+    );
+    expect(extracted.relations).toEqual([
+      { fromNorm: "ada lovelace", toNorm: "the lab", type: "lives_in", time: null },
     ]);
   });
 });

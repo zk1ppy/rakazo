@@ -44,6 +44,7 @@ import type {
   Neo4jMemoryDriverFactory,
 } from "./neo4j-memory-client.js";
 import {
+  collapseNeo4jParallelRelations,
   ensureNeo4jMemorySchema,
   escapeLuceneQuery,
   forgetNeo4jFact,
@@ -768,6 +769,18 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
     signal?: AbortSignal,
   ): Promise<boolean> {
     return renameNeo4jEntity(await this.ready(signal), this.connection.database, input, signal);
+  }
+
+  async collapseParallelRelations(
+    input: { spaceId: string; ids: string[]; ns?: string },
+    signal?: AbortSignal,
+  ) {
+    return collapseNeo4jParallelRelations(
+      await this.ready(signal),
+      this.connection.database,
+      input,
+      signal,
+    );
   }
 
   async readFactText(

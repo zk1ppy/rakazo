@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { Neo4jMemoryDriver, Neo4jMemoryRows, Neo4jRunOptions } from "./neo4j-memory-client.js";
 import {
+  collapseNeo4jParallelRelations,
   ensureNeo4jMemorySchema,
   escapeLuceneQuery,
   linkNeo4jEntities,
@@ -25,6 +26,11 @@ import {
   saveNeo4jFact,
   upsertNeo4jEntity,
 } from "./neo4j-memory-client.js";
+import {
+  mergeRelationProvenance,
+  normalizeRelationType,
+  unionRelationIds,
+} from "./relation-type.js";
 
 class FakeDriver implements Neo4jMemoryDriver {
   readonly calls: Array<{
@@ -222,6 +228,9 @@ describe("Neo4j memory client", () => {
     });
     expect(driver.calls).toHaveLength(2);
     expect(driver.calls[0]?.cypher).toContain('kind: "chat"');
+    expect(driver.calls[0]?.cypher).toContain("rel.factId IN doomedFactIds");
+    expect(driver.calls[0]?.cypher).toContain("rel.factIds =");
+    expect(driver.calls[0]?.cypher).toContain("rel.mentions = size");
     expect(driver.calls[0]?.cypher).toContain("DETACH DELETE f");
     expect(driver.calls[1]?.cypher).toContain("DETACH DELETE s");
     expect(driver.calls[0]?.params).toMatchObject({ generations: [2, 3] });
@@ -279,17 +288,49 @@ describe("Neo4j memory client", () => {
     expect(driver.calls[1]?.cypher).toContain("MERGE (f)-[:ABOUT]->(e)");
     expect(driver.calls[1]?.cypher).not.toContain("validFrom");
     const relation = driver.calls[2]?.cypher ?? "";
-    expect(relation).toContain("MERGE (a)-[r:RKZ_REL {type: $type, factId: $factId}]->(b)");
     expect(relation).toContain("MATCH (f:Rkz:Fact {id: $factId, spaceId: $spaceId})");
-    expect(relation).toContain("r.validFrom = coalesce(f.createdAt, f.validFrom, $now)");
-    expect(relation).toContain("r.createdAt = $now");
-    const matched = relation.split("ON MATCH SET")[1] ?? "";
-    expect(matched).toContain("r.validFrom = coalesce(f.createdAt, f.validFrom, r.validFrom)");
-    expect(matched).not.toContain("r.createdAt");
+    expect(relation).toContain("OPTIONAL MATCH (a)-[r:RKZ_REL]->(b)");
+    expect(relation).not.toContain("factId: $factId");
+    expect(relation).toContain("keeper.factIds = factIds");
+    expect(relation).toContain("keeper.factId = head(factIds)");
+    expect(relation).toContain("keeper.sourceIds = sourceIds");
+    expect(relation).toContain("keeper.mentions = size(factIds)");
+    expect(relation).toContain("keeper.firstSeen");
+    expect(relation).toContain("keeper.lastSeen");
+    expect(relation).toContain("FOREACH (extra IN extras | DELETE extra)");
+    expect(relation).not.toContain("keeper.createdAt");
     expect(driver.calls[2]?.params).toMatchObject({
+      type: "founded",
       time: null,
       now: "2026-01-01T00:00:00.000Z",
     });
+    expect(driver.calls).toHaveLength(3);
+  });
+
+  it("creates one relation when the pair has none, and normalizes the type", async () => {
+    const driver = new FakeDriver();
+    driver.rows.push({ records: [] }, { records: [row({ id: "ada" })] });
+    await linkNeo4jEntities(driver, "neo4j", {
+      fromId: "ada",
+      toId: "lab",
+      spaceId: "space-1",
+      ns: "shared",
+      type: "Lives In",
+      factId: "fact-1",
+      now: "2026-01-01T00:00:00.000Z",
+    });
+    expect(driver.calls).toHaveLength(2);
+    const created = driver.calls[1]?.cypher ?? "";
+    expect(created).toContain("CREATE (a)-[r:RKZ_REL {type: $type}]->(b)");
+    expect(created).toContain("r.factIds = [$factId]");
+    expect(created).toContain("r.mentions = 1");
+    expect(created).toContain("r.firstSeen = learned");
+    expect(created).toContain("r.lastSeen = learned");
+    expect(created).toContain("r.createdAt = $now");
+    expect(created).toContain("r.sourceIds = sourceIds");
+    expect(driver.calls[1]?.params).toMatchObject({ type: "lives_in" });
+    expect(normalizeRelationType("lives in")).toBe("lives_in");
+    expect(normalizeRelationType("LIVES_IN")).toBe("lives_in");
   });
 
   it("reads the fact's stored time and realigns existing edges without a model", async () => {
@@ -312,9 +353,10 @@ describe("Neo4j memory client", () => {
     });
     const relation = driver.calls[1]?.cypher ?? "";
     const entity = driver.calls[2]?.cypher ?? "";
-    expect(relation).toContain("SET r.validFrom = learned");
+    expect(relation).toContain("r.factId = f.id OR f.id IN coalesce(r.factIds, [])");
+    expect(relation).toContain("r.validFrom IS NULL OR r.validFrom > earliest");
+    expect(relation).toContain("r.lastSeen IS NULL OR r.lastSeen < latest");
     expect(relation).not.toContain("r.createdAt");
-    expect(relation).toContain("r.validFrom IS NULL OR r.validFrom <> learned");
     expect(entity).toContain("SET e.firstSeen = learned");
     expect(entity).toContain("e.firstSeen IS NULL OR e.firstSeen > learned");
     expect(entity).not.toContain("lastSeen");
@@ -555,14 +597,13 @@ describe("Neo4j memory client", () => {
     expect(cypher[0]).toContain("MERGE (src)-[:ABOUT]->(keep)");
     expect(cypher[0]).toContain("DELETE rel");
     expect(cypher[1]).toContain("-[rel:RKZ_REL]->(other)");
-    expect(cypher[1]).toContain(
-      "MERGE (keep)-[moved:RKZ_REL {type: coalesce(rel.type, ''), factId: coalesce(rel.factId, '')}]->(other)",
-    );
-    expect(cypher[1]).toContain("moved.validFrom = rel.validFrom");
+    expect(cypher[1]).toContain("MERGE (keep)-[moved:RKZ_REL {type: relType}]->(other)");
+    expect(cypher[1]).toContain("moved.factIds = factIds");
+    expect(cypher[1]).toContain("moved.mentions = size(factIds)");
+    expect(cypher[1]).toContain("moved.validFrom = firstSeen");
+    expect(cypher[1]).not.toContain("factId: coalesce(rel.factId, '')");
     expect(cypher[2]).toContain("-[rel:RKZ_REL]->(drop:Rkz:Entity");
-    expect(cypher[2]).toContain(
-      "MERGE (other)-[moved:RKZ_REL {type: coalesce(rel.type, ''), factId: coalesce(rel.factId, '')}]->(keep)",
-    );
+    expect(cypher[2]).toContain("MERGE (other)-[moved:RKZ_REL {type: relType}]->(keep)");
     expect(cypher[3]).toContain("-[rel:FROM]->(other)");
     expect(cypher[3]).toContain("MERGE (keep)-[moved:FROM]->(other)");
     expect(cypher[4]).toContain("-[rel:FROM]->(drop:Rkz:Entity");
@@ -589,6 +630,7 @@ describe("Neo4j memory client", () => {
       aliasNorms: ["nicolas"],
     });
     expect(writes.every((call) => call.params.spaceId === "space-1")).toBe(true);
+    expect(writes).toHaveLength(10);
   });
 
   it("relabels the survivor when the duplicate has a different type", async () => {
@@ -659,5 +701,97 @@ describe("Neo4j memory client", () => {
       normName: "nicolas tremblier",
     });
     expect(call?.options.access).toBe("write");
+  });
+
+  it("collapses same-type parallel relations and leaves different types apart", async () => {
+    const driver = new FakeDriver();
+    driver.rows.push(
+      { records: [row({ removed: 5 })] },
+      { records: [row({ removed: 0 })] },
+      { records: [row({ removed: 1 })] },
+    );
+    await expect(
+      collapseNeo4jParallelRelations(driver, "neo4j", {
+        spaceId: "space-1",
+        ids: ["ada", "lab"],
+        ns: "shared",
+      }),
+    ).resolves.toEqual({ relations: 5, about: 0, from: 1 });
+    expect(driver.calls).toHaveLength(3);
+    const relations = driver.calls[0]?.cypher ?? "";
+    expect(relations).toContain("MATCH (a:Rkz:Entity)-[r:RKZ_REL]->(b:Rkz:Entity)");
+    expect(relations).toContain("a.id IN $ids OR b.id IN $ids");
+    expect(relations).toContain("a.spaceId = $spaceId");
+    expect(relations).toContain("size(rels) > 1");
+    expect(relations).toContain("coalesce(edge.type, '') <> relType");
+    expect(relations).toContain("toLower(trim(");
+    expect(relations).toContain("keeper.factIds = factIds");
+    expect(relations).toContain("keeper.mentions = size(factIds)");
+    expect(relations).toContain("FOREACH (extra IN extras | DELETE extra)");
+    expect(relations).not.toContain("MERGE (a)-[r:RKZ_REL");
+    expect(driver.calls[0]?.params).toMatchObject({
+      spaceId: "space-1",
+      ids: ["ada", "lab"],
+      ns: "shared",
+    });
+    expect(driver.calls[1]?.cypher).toContain("[r:ABOUT]");
+    expect(driver.calls[1]?.cypher).toContain("size(rels) > 1");
+    expect(driver.calls[2]?.cypher).toContain("[r:FROM]");
+    expect(driver.calls[2]?.cypher).toContain("keeper.provenance");
+    expect(driver.calls[2]?.cypher).toContain("MATCH (a)-[:ABOUT]->(mentioned:Rkz)");
+    expect(driver.calls.every((call) => call.options.access === "write")).toBe(true);
+
+    const quiet = new FakeDriver();
+    await expect(
+      collapseNeo4jParallelRelations(quiet, "neo4j", { spaceId: "space-1", ids: [] }),
+    ).resolves.toEqual({ relations: 0, about: 0, from: 0 });
+    expect(quiet.calls).toHaveLength(0);
+  });
+
+  it("unions relation provenance without counting a repeated fact twice", () => {
+    const merged = mergeRelationProvenance(
+      [
+        {
+          factIds: ["fact-a"],
+          sourceIds: ["source-a"],
+          firstSeen: "2026-02-01T00:00:00.000Z",
+          lastSeen: "2026-02-01T00:00:00.000Z",
+          validFrom: "2026-02-01T00:00:00.000Z",
+          validTo: "2026-03-01T00:00:00.000Z",
+          time: "1843",
+          createdAt: "2026-02-02T00:00:00.000Z",
+        },
+        {
+          factIds: ["fact-b", "fact-a"],
+          sourceIds: ["source-b"],
+          firstSeen: null,
+          lastSeen: null,
+          validFrom: "2026-01-01T00:00:00.000Z",
+          validTo: null,
+          time: null,
+          createdAt: "2026-01-15T00:00:00.000Z",
+        },
+      ],
+      {
+        factId: "fact-a",
+        sourceIds: ["source-a"],
+        learnedAt: "2026-04-01T00:00:00.000Z",
+      },
+    );
+    expect(merged.factIds).toEqual(["fact-a", "fact-b"]);
+    expect(merged.factId).toBe("fact-a");
+    expect(merged.mentions).toBe(2);
+    expect(merged.sourceIds).toEqual(["source-a", "source-b"]);
+    expect(merged.firstSeen).toBe("2026-01-01T00:00:00.000Z");
+    expect(merged.lastSeen).toBe("2026-04-01T00:00:00.000Z");
+    expect(merged.validTo).toBeNull();
+    expect(merged.time).toBe("1843");
+    expect(merged.createdAt).toBe("2026-01-15T00:00:00.000Z");
+    expect(
+      unionRelationIds(
+        ["fact-a"],
+        Array.from({ length: 80 }, (_, index) => `fact-${index}`),
+      ),
+    ).toHaveLength(64);
   });
 });

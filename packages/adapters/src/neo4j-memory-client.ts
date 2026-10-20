@@ -4,6 +4,7 @@ import type { Driver } from "neo4j-driver";
 import neo4j from "neo4j-driver";
 import type { ResolvedAddress, ResolveHostname } from "./network-address.js";
 import { isCloudMetadataAddress, isPrivateAddress } from "./network-address.js";
+import { MAX_RELATION_PROVENANCE_IDS, normalizeRelationType } from "./relation-type.js";
 
 /**
  * The only module that imports `neo4j-driver`. Graph reads and writes stay on the
@@ -98,6 +99,9 @@ const ACTIVE_FACT = `fact:Rkz AND fact:Fact
   AND fact.expiredAt IS NULL
   AND ($historyNs IS NULL OR fact.ns <> $historyNs OR fact.generation = $historyGeneration)`;
 
+/** Zero when the edge has no mention count yet, so older edges keep their rank. */
+const RELATION_MENTION_BOOST = `log10(toFloat(CASE WHEN rel.mentions IS NULL OR rel.mentions < 1 THEN 1 ELSE rel.mentions END)) * 0.05`;
+
 /** Fulltext match, then one :RKZ_REL hop from the matched entities to their facts. */
 const RECALL_CYPHER = `
 CALL {
@@ -131,7 +135,7 @@ CALL {
   WHERE neighbor.spaceId = $spaceId AND neighbor.ns IN $namespaces AND rel.validTo IS NULL
   MATCH (fact:Rkz:Fact)-[:ABOUT]->(neighbor)
   WHERE ${ACTIVE_FACT}
-  RETURN fact, score * 0.7 AS score, neighbor.name AS entityName
+  RETURN fact, score * 0.7 + ${RELATION_MENTION_BOOST} AS score, neighbor.name AS entityName
   LIMIT 25
   UNION ALL
   CALL db.index.fulltext.queryNodes('${NEO4J_FACT_FULLTEXT_INDEX}', $q) YIELD node AS hit, score
@@ -145,7 +149,7 @@ CALL {
   WHERE neighbor.spaceId = $spaceId AND neighbor.ns IN $namespaces AND rel.validTo IS NULL
   MATCH (fact:Rkz:Fact)-[:ABOUT]->(neighbor)
   WHERE ${ACTIVE_FACT} AND fact.id <> hit.id
-  RETURN fact, score * 0.6 AS score, neighbor.name AS entityName
+  RETURN fact, score * 0.6 + ${RELATION_MENTION_BOOST} AS score, neighbor.name AS entityName
   LIMIT 25
 }
 WITH fact, max(score) AS score,
@@ -446,12 +450,38 @@ export async function purgeNeo4jChatSources(
     `MATCH (s:Rkz:Source {spaceId: $spaceId, botId: $botId, kind: "chat"})
      WHERE s.generation IN $generations
      OPTIONAL MATCH (s)-[:HAS_CHUNK]->(c:Rkz:Chunk)
-     WITH collect(DISTINCT s) + collect(DISTINCT c) AS endpoints
+     WITH collect(DISTINCT s) AS sources, collect(DISTINCT c) AS chunks
+     WITH [source IN sources | source.id] AS doomedSourceIds,
+          sources + [chunk IN chunks WHERE chunk IS NOT NULL] AS endpoints
      UNWIND endpoints AS endpoint
-     WITH endpoint WHERE endpoint IS NOT NULL
+     WITH endpoint, doomedSourceIds
+     WHERE endpoint IS NOT NULL
      MATCH (f:Rkz:Fact)-[:FROM]->(endpoint)
-     OPTIONAL MATCH ()-[rel:${NEO4J_ENTITY_RELATIONSHIP} {factId: f.id}]-()
-     DELETE rel
+     WHERE f.spaceId = $spaceId
+     WITH collect(DISTINCT f) AS facts,
+          collect(DISTINCT f.id) AS doomedFactIds,
+          head(collect(doomedSourceIds)) AS doomedSourceIds
+     OPTIONAL MATCH (a:Rkz)-[rel:${NEO4J_ENTITY_RELATIONSHIP}]-(b:Rkz)
+     WHERE a.spaceId = $spaceId AND b.spaceId = $spaceId
+       AND (
+         rel.factId IN doomedFactIds
+         OR any(id IN coalesce(rel.factIds, []) WHERE id IN doomedFactIds)
+       )
+     WITH facts, doomedFactIds, doomedSourceIds, collect(DISTINCT rel) AS matched
+     WITH facts, doomedFactIds, doomedSourceIds,
+          [rel IN matched WHERE rel IS NOT NULL] AS rels
+     WITH facts, doomedFactIds, doomedSourceIds, rels,
+          [rel IN rels WHERE size(${cypherDropIds("rel", "doomedFactIds")}) = 0] AS emptyRels,
+          [rel IN rels WHERE size(${cypherDropIds("rel", "doomedFactIds")}) > 0] AS keepRels
+     FOREACH (rel IN keepRels |
+       SET rel.factIds = ${cypherDropIds("rel", "doomedFactIds")},
+           rel.factId = head(${cypherDropIds("rel", "doomedFactIds")}),
+           rel.sourceIds = ${cypherDropIds("rel", "doomedSourceIds", "sourceIds")},
+           rel.mentions = size(${cypherDropIds("rel", "doomedFactIds")})
+     )
+     FOREACH (rel IN emptyRels | DELETE rel)
+     WITH DISTINCT facts
+     UNWIND facts AS f
      DETACH DELETE f`,
     input,
     options,
@@ -554,24 +584,16 @@ export async function linkNeo4jEntities(
   },
   signal?: AbortSignal,
 ): Promise<void> {
-  const result = await driver.run(
-    `MATCH (f:Rkz:Fact {id: $factId, spaceId: $spaceId})
-     MATCH (a:Rkz:Entity {id: $fromId, spaceId: $spaceId, ns: $ns})
-     MATCH (b:Rkz:Entity {id: $toId, spaceId: $spaceId, ns: $ns})
-     MERGE (a)-[r:${NEO4J_ENTITY_RELATIONSHIP} {type: $type, factId: $factId}]->(b)
-     ON CREATE SET
-       r.validFrom = coalesce(f.createdAt, f.validFrom, $now),
-       r.validTo = null,
-       r.createdAt = $now,
-       r.time = $time
-     ON MATCH SET
-       r.validFrom = coalesce(f.createdAt, f.validFrom, r.validFrom),
-       r.time = CASE WHEN $time IS NULL THEN r.time ELSE $time END
-     RETURN a.id AS id`,
-    { ...input, time: input.time ?? null },
-    { database, access: "write", signal },
-  );
-  if (result.records.length === 0) throw new Error("Neo4j fact or entities were not found.");
+  const type = normalizeRelationType(input.type);
+  if (!type) throw new Error("Neo4j relation type is empty.");
+  const params = { ...input, type, time: input.time ?? null };
+  const options: Neo4jRunOptions = { database, access: "write", signal };
+  // MERGE on {type} would update every parallel edge instead of collapsing them.
+  // The queue is serialized, so a read of the current edges then one write is safe.
+  const updated = await driver.run(LINK_EXISTING_RELATION, params, options);
+  if (updated.records.length > 0) return;
+  const created = await driver.run(LINK_NEW_RELATION, params, options);
+  if (created.records.length === 0) throw new Error("Neo4j fact or entities were not found.");
 }
 
 /**
@@ -590,9 +612,25 @@ export async function realignNeo4jFactTimes(
     `MATCH (f:Rkz:Fact {spaceId: $spaceId})
      WITH f, coalesce(f.createdAt, f.validFrom) AS learned
      WHERE learned IS NOT NULL
-     MATCH ()-[r:${NEO4J_ENTITY_RELATIONSHIP} {factId: f.id}]-()
-     WHERE r.validFrom IS NULL OR r.validFrom <> learned
-     SET r.validFrom = learned
+     MATCH (a:Rkz)-[r:${NEO4J_ENTITY_RELATIONSHIP}]-(b:Rkz)
+     WHERE a.spaceId = $spaceId AND b.spaceId = $spaceId
+       AND (r.factId = f.id OR f.id IN coalesce(r.factIds, []))
+     WITH r, min(learned) AS earliest, max(learned) AS latest
+     WHERE r.firstSeen IS NULL OR r.firstSeen > earliest
+        OR r.validFrom IS NULL OR r.validFrom > earliest
+        OR r.lastSeen IS NULL OR r.lastSeen < latest
+     SET r.firstSeen = CASE
+           WHEN r.firstSeen IS NULL OR earliest < r.firstSeen THEN earliest
+           ELSE r.firstSeen
+         END,
+         r.validFrom = CASE
+           WHEN r.validFrom IS NULL OR earliest < r.validFrom THEN earliest
+           ELSE r.validFrom
+         END,
+         r.lastSeen = CASE
+           WHEN r.lastSeen IS NULL OR latest > r.lastSeen THEN latest
+           ELSE r.lastSeen
+         END
      RETURN count(r) AS updated`,
     input,
     options,
@@ -610,6 +648,40 @@ export async function realignNeo4jFactTimes(
   return {
     relations: asNumber(relations.records[0]?.get("updated")),
     entities: asNumber(entities.records[0]?.get("updated")),
+  };
+}
+
+export interface ParallelRelationCollapse {
+  /** Parallel RKZ_REL edges deleted. The surviving edge keeps the unioned provenance. */
+  relations: number;
+  /** Extra ABOUT edges deleted. Writers already merge one ABOUT per pair. */
+  about: number;
+  /** Extra FROM edges deleted. Writers already merge one FROM per pair. */
+  from: number;
+}
+
+/**
+ * Collapse parallel edges that share a type between the same directed pair.
+ * One page of entity ids is enough: an edge is included when either end is in
+ * the page. Comparison ignores case, spaces, and hyphens. Different types stay.
+ * The reverse direction stays. No model call.
+ */
+export async function collapseNeo4jParallelRelations(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string; ids: string[]; ns?: string },
+  signal?: AbortSignal,
+): Promise<ParallelRelationCollapse> {
+  if (input.ids.length === 0) return { relations: 0, about: 0, from: 0 };
+  const options: Neo4jRunOptions = { database, access: "write", signal };
+  const params = { spaceId: input.spaceId, ids: input.ids, ns: input.ns ?? "" };
+  const relations = await driver.run(COLLAPSE_RELATIONS, params, options);
+  const about = await driver.run(COLLAPSE_ABOUT, params, options);
+  const fromEdges = await driver.run(COLLAPSE_FROM, params, options);
+  return {
+    relations: asNumber(relations.records[0]?.get("removed")),
+    about: asNumber(about.records[0]?.get("removed")),
+    from: asNumber(fromEdges.records[0]?.get("removed")),
   };
 }
 
@@ -1115,27 +1187,72 @@ function rewireEntityRelation(direction: "in" | "out"): string {
     direction === "out"
       ? `MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})-[rel:${NEO4J_ENTITY_RELATIONSHIP}]->(other)`
       : `MATCH (other)-[rel:${NEO4J_ENTITY_RELATIONSHIP}]->(drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})`;
+  const existing =
+    direction === "out"
+      ? `OPTIONAL MATCH (keep)-[existing:${NEO4J_ENTITY_RELATIONSHIP}]->(other)`
+      : `OPTIONAL MATCH (other)-[existing:${NEO4J_ENTITY_RELATIONSHIP}]->(keep)`;
   const merge =
     direction === "out"
-      ? `MERGE (keep)-[moved:${NEO4J_ENTITY_RELATIONSHIP} {type: coalesce(rel.type, ''), factId: coalesce(rel.factId, '')}]->(other)`
-      : `MERGE (other)-[moved:${NEO4J_ENTITY_RELATIONSHIP} {type: coalesce(rel.type, ''), factId: coalesce(rel.factId, '')}]->(keep)`;
+      ? `MERGE (keep)-[moved:${NEO4J_ENTITY_RELATIONSHIP} {type: relType}]->(other)`
+      : `MERGE (other)-[moved:${NEO4J_ENTITY_RELATIONSHIP} {type: relType}]->(keep)`;
+  const factIds = cypherUnionIds(
+    cypherEdgeFactIds("rel"),
+    cypherUnionIds(cypherEdgeFactIds("existing"), "[]", "baseIds", "baseItem"),
+    "nextIds",
+    "nextItem",
+  );
+  const sourceIds = cypherUnionIds(
+    `CASE WHEN rel IS NULL THEN [] ELSE coalesce(rel.sourceIds, []) END`,
+    cypherUnionIds(
+      `CASE WHEN existing IS NULL THEN [] ELSE coalesce(existing.sourceIds, []) END`,
+      "[]",
+      "baseSources",
+      "baseSource",
+    ),
+    "nextSources",
+    "nextSource",
+  );
   return `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
      ${match}
      WHERE other.spaceId = $spaceId AND other <> keep AND other <> drop
+     WITH keep, drop, other, rel, ${cypherRelationType("rel.type")} AS relType
+     WHERE relType <> ''
+     ${existing}
+     WHERE ${cypherRelationType("existing.type")} = relType AND existing <> rel
+     WITH keep, drop, other, rel, relType, existing
+     ORDER BY coalesce(existing.createdAt, '9999'), elementId(existing)
+     WITH keep, drop, other, rel, relType, head(collect(existing)) AS existing
+     WITH keep, drop, other, rel, relType,
+          ${factIds} AS factIds,
+          ${sourceIds} AS sourceIds,
+          ${cypherEarlier(cypherEdgeSeen("existing"), cypherEdgeSeen("rel"))} AS firstSeen,
+          ${cypherLater(cypherEdgeLast("existing"), cypherEdgeLast("rel"))} AS lastSeen,
+          ${cypherValidTo("existing", "rel")} AS validTo,
+          ${cypherEarlier(cypherProp("existing", "createdAt"), cypherProp("rel", "createdAt"))} AS createdAt,
+          ${cypherPreferTime("existing", "rel")} AS edgeTime
      ${merge}
      ON CREATE SET
-       moved.validFrom = rel.validFrom,
-       moved.validTo = rel.validTo,
-       moved.createdAt = rel.createdAt,
-       moved.time = rel.time
+       moved.factIds = factIds,
+       moved.factId = head(factIds),
+       moved.sourceIds = sourceIds,
+       moved.mentions = size(factIds),
+       moved.firstSeen = firstSeen,
+       moved.lastSeen = lastSeen,
+       moved.validFrom = firstSeen,
+       moved.validTo = validTo,
+       moved.createdAt = createdAt,
+       moved.time = edgeTime
      ON MATCH SET
-       moved.validFrom = coalesce(moved.validFrom, rel.validFrom),
-       moved.createdAt = coalesce(moved.createdAt, rel.createdAt),
-       moved.time = coalesce(moved.time, rel.time),
-       moved.validTo = CASE
-         WHEN moved.validTo IS NULL OR rel.validTo IS NULL THEN null
-         ELSE moved.validTo
-       END
+       moved.factIds = factIds,
+       moved.factId = head(factIds),
+       moved.sourceIds = sourceIds,
+       moved.mentions = size(factIds),
+       moved.firstSeen = firstSeen,
+       moved.lastSeen = lastSeen,
+       moved.validFrom = firstSeen,
+       moved.validTo = validTo,
+       moved.createdAt = createdAt,
+       moved.time = CASE WHEN moved.time IS NULL THEN edgeTime ELSE moved.time END
      DELETE rel`;
 }
 
@@ -1175,6 +1292,238 @@ function rewireCopiedRelationship(relType: string, direction: "in" | "out"): str
      ON CREATE SET moved = properties(rel)
      DELETE rel`;
 }
+
+/**
+ * Cypher counterpart of normalizeRelationType for case, trim, spaces, and hyphens.
+ * Other punctuation is stripped in TypeScript before a write. Stored values that
+ * still contain it are grouped only by this expression.
+ */
+function cypherRelationType(expr: string): string {
+  let value = `toLower(trim(coalesce(${expr}, '')))`;
+  value = `replace(replace(${value}, '-', '_'), ' ', '_')`;
+  for (let step = 0; step < 6; step += 1) value = `replace(${value}, '__', '_')`;
+  return value;
+}
+
+function cypherEdgeFactIds(rel: string): string {
+  return `CASE WHEN ${rel} IS NULL THEN [] ELSE (coalesce(${rel}.factIds, []) + CASE WHEN ${rel}.factId IS NULL OR ${rel}.factId IN coalesce(${rel}.factIds, []) THEN [] ELSE [${rel}.factId] END) END`;
+}
+
+function cypherUnionIds(listExpr: string, into: string, acc: string, item: string): string {
+  return `reduce(${acc} = ${into}, ${item} IN ${listExpr} | CASE WHEN ${item} IS NULL OR ${item} IN ${acc} OR size(${acc}) >= ${MAX_RELATION_PROVENANCE_IDS} THEN ${acc} ELSE ${acc} + [${item}] END)`;
+}
+
+function cypherUnionEdgeFacts(rels: string): string {
+  return `reduce(factAcc = [], factEdge IN ${rels} | reduce(step = factAcc, factItem IN ${cypherEdgeFactIds("factEdge")} | CASE WHEN factItem IS NULL OR factItem IN step OR size(step) >= ${MAX_RELATION_PROVENANCE_IDS} THEN step ELSE step + [factItem] END))`;
+}
+
+function cypherUnionEdgeSources(rels: string): string {
+  return `reduce(sourceAcc = [], sourceEdge IN ${rels} | reduce(step = sourceAcc, sourceItem IN coalesce(sourceEdge.sourceIds, []) | CASE WHEN sourceItem IS NULL OR sourceItem IN step OR size(step) >= ${MAX_RELATION_PROVENANCE_IDS} THEN step ELSE step + [sourceItem] END))`;
+}
+
+function cypherDropIds(rel: string, doomed: string, property?: "sourceIds"): string {
+  const list = property === "sourceIds" ? `coalesce(${rel}.sourceIds, [])` : cypherEdgeFactIds(rel);
+  return `reduce(kept = [], item IN ${list} | CASE WHEN item IS NULL OR item IN ${doomed} OR item IN kept OR size(kept) >= ${MAX_RELATION_PROVENANCE_IDS} THEN kept ELSE kept + [item] END)`;
+}
+
+function cypherProp(rel: string, prop: string): string {
+  return `CASE WHEN ${rel} IS NULL THEN null ELSE ${rel}.${prop} END`;
+}
+
+function cypherEarlier(left: string, right: string): string {
+  return `CASE WHEN ${left} IS NULL THEN ${right} WHEN ${right} IS NULL THEN ${left} WHEN ${right} < ${left} THEN ${right} ELSE ${left} END`;
+}
+
+function cypherLater(left: string, right: string): string {
+  return `CASE WHEN ${left} IS NULL THEN ${right} WHEN ${right} IS NULL THEN ${left} WHEN ${right} > ${left} THEN ${right} ELSE ${left} END`;
+}
+
+function cypherEdgeSeen(rel: string): string {
+  return cypherEarlier(cypherProp(rel, "firstSeen"), cypherProp(rel, "validFrom"));
+}
+
+function cypherEdgeLast(rel: string): string {
+  return cypherLater(cypherProp(rel, "lastSeen"), cypherProp(rel, "validFrom"));
+}
+
+function cypherValidTo(existing: string, rel: string): string {
+  return `CASE WHEN ${existing} IS NULL THEN ${rel}.validTo WHEN ${existing}.validTo IS NULL OR ${rel}.validTo IS NULL THEN null ELSE ${existing}.validTo END`;
+}
+
+function cypherPreferTime(existing: string, rel: string): string {
+  return `CASE WHEN ${existing} IS NOT NULL AND ${existing}.time IS NOT NULL AND ${existing}.time <> '' THEN ${existing}.time ELSE ${rel}.time END`;
+}
+
+function cypherReduceEarlier(rels: string): string {
+  return `reduce(seen = null, stampEdge IN ${rels} | CASE WHEN coalesce(stampEdge.firstSeen, stampEdge.validFrom) IS NULL THEN seen WHEN seen IS NULL OR coalesce(stampEdge.firstSeen, stampEdge.validFrom) < seen THEN coalesce(stampEdge.firstSeen, stampEdge.validFrom) ELSE seen END)`;
+}
+
+function cypherReduceLater(rels: string): string {
+  return `reduce(seen = null, stampEdge IN ${rels} | CASE WHEN coalesce(stampEdge.lastSeen, stampEdge.validFrom, stampEdge.firstSeen) IS NULL THEN seen WHEN seen IS NULL OR coalesce(stampEdge.lastSeen, stampEdge.validFrom, stampEdge.firstSeen) > seen THEN coalesce(stampEdge.lastSeen, stampEdge.validFrom, stampEdge.firstSeen) ELSE seen END)`;
+}
+
+function cypherReduceTime(rels: string): string {
+  return `reduce(kept = null, timed IN ${rels} | CASE WHEN kept IS NOT NULL THEN kept WHEN timed.time IS NULL OR timed.time = '' THEN null ELSE timed.time END)`;
+}
+
+const LINK_EXISTING_RELATION = `
+MATCH (f:Rkz:Fact {id: $factId, spaceId: $spaceId})
+MATCH (a:Rkz:Entity {id: $fromId, spaceId: $spaceId, ns: $ns})
+MATCH (b:Rkz:Entity {id: $toId, spaceId: $spaceId, ns: $ns})
+OPTIONAL MATCH (f)-[:FROM]->(src:Rkz)
+WHERE src.spaceId = $spaceId
+WITH f, a, b, collect(DISTINCT src.id) AS learnedSourceIds
+WITH f, a, b, [id IN learnedSourceIds WHERE id IS NOT NULL] AS learnedSourceIds
+OPTIONAL MATCH (a)-[r:${NEO4J_ENTITY_RELATIONSHIP}]->(b)
+WHERE ${cypherRelationType("r.type")} = $type
+WITH f, a, b, learnedSourceIds, r
+ORDER BY coalesce(r.createdAt, '9999'), elementId(r)
+WITH f, a, b, learnedSourceIds, collect(r) AS matched
+WITH f, a, b, learnedSourceIds, [rel IN matched WHERE rel IS NOT NULL] AS rels
+WITH f, a, b, learnedSourceIds, rels, head(rels) AS keeper
+WHERE keeper IS NOT NULL
+WITH keeper, rels, learnedSourceIds, coalesce(f.createdAt, f.validFrom, $now) AS learned,
+     ${cypherUnionEdgeFacts("rels")} AS edgeFacts,
+     ${cypherUnionEdgeSources("rels")} AS edgeSources,
+     ${cypherReduceEarlier("rels")} AS priorFirst,
+     ${cypherReduceLater("rels")} AS priorLast,
+     ${cypherReduceTime("rels")} AS priorTime
+WITH keeper, tail(rels) AS extras, learned, priorFirst, priorLast, priorTime,
+     ${cypherUnionIds(`CASE WHEN $factId IN edgeFacts OR size(edgeFacts) >= ${MAX_RELATION_PROVENANCE_IDS} THEN [] ELSE [$factId] END`, "edgeFacts", "withFact", "factItem")} AS factIds,
+     ${cypherUnionIds("[id IN learnedSourceIds WHERE NOT id IN edgeSources]", "edgeSources", "withSource", "sourceItem")} AS sourceIds
+SET keeper.type = $type,
+    keeper.factIds = factIds,
+    keeper.factId = head(factIds),
+    keeper.sourceIds = sourceIds,
+    keeper.mentions = size(factIds),
+    keeper.firstSeen = ${cypherEarlier("priorFirst", "learned")},
+    keeper.validFrom = ${cypherEarlier("priorFirst", "learned")},
+    keeper.lastSeen = ${cypherLater("priorLast", "learned")},
+    keeper.validTo = null,
+    keeper.time = CASE
+      WHEN priorTime IS NOT NULL THEN priorTime
+      WHEN $time IS NULL THEN keeper.time
+      ELSE $time
+    END
+FOREACH (extra IN extras | DELETE extra)
+RETURN keeper.type AS type
+`;
+
+const LINK_NEW_RELATION = `
+MATCH (f:Rkz:Fact {id: $factId, spaceId: $spaceId})
+MATCH (a:Rkz:Entity {id: $fromId, spaceId: $spaceId, ns: $ns})
+MATCH (b:Rkz:Entity {id: $toId, spaceId: $spaceId, ns: $ns})
+OPTIONAL MATCH (f)-[:FROM]->(src:Rkz)
+WHERE src.spaceId = $spaceId
+WITH f, a, b, collect(DISTINCT src.id) AS learnedSourceIds
+WITH a, b, [id IN learnedSourceIds WHERE id IS NOT NULL][0..${MAX_RELATION_PROVENANCE_IDS}] AS sourceIds,
+     coalesce(f.createdAt, f.validFrom, $now) AS learned
+CREATE (a)-[r:${NEO4J_ENTITY_RELATIONSHIP} {type: $type}]->(b)
+SET r.factIds = [$factId],
+    r.factId = $factId,
+    r.sourceIds = sourceIds,
+    r.mentions = 1,
+    r.firstSeen = learned,
+    r.lastSeen = learned,
+    r.validFrom = learned,
+    r.validTo = null,
+    r.createdAt = $now,
+    r.time = $time
+RETURN a.id AS id
+`;
+
+const COLLAPSE_RELATIONS = `
+MATCH (a:Rkz:Entity)-[r:${NEO4J_ENTITY_RELATIONSHIP}]->(b:Rkz:Entity)
+WHERE a.spaceId = $spaceId AND b.spaceId = $spaceId
+  AND a.id <> b.id
+  AND (a.id IN $ids OR b.id IN $ids)
+  AND ($ns = '' OR (a.ns = $ns AND b.ns = $ns))
+WITH a, b, ${cypherRelationType("r.type")} AS relType, r
+WHERE relType <> ''
+ORDER BY coalesce(r.createdAt, '9999'), elementId(r)
+WITH a, b, relType, collect(r) AS rels
+WHERE size(rels) > 1
+   OR any(edge IN rels WHERE coalesce(edge.type, '') <> relType OR edge.factIds IS NULL)
+WITH a, b, relType, rels, head(rels) AS keeper
+WHERE keeper IS NOT NULL
+WITH keeper, rels, relType,
+     ${cypherUnionEdgeFacts("rels")} AS factIds,
+     ${cypherUnionEdgeSources("rels")} AS edgeSources,
+     ${cypherReduceEarlier("rels")} AS firstSeen,
+     ${cypherReduceLater("rels")} AS lastSeen,
+     ${cypherReduceTime("rels")} AS priorTime,
+     any(edge IN rels WHERE edge.validTo IS NULL) AS active
+OPTIONAL MATCH (f:Rkz:Fact)-[:FROM]->(src:Rkz)
+WHERE f.spaceId = $spaceId AND src.spaceId = $spaceId AND f.id IN factIds
+WITH keeper, rels, relType, factIds, edgeSources, firstSeen, lastSeen, priorTime, active,
+     collect(DISTINCT src.id) AS lookedUp
+WITH keeper, rels, relType, factIds, firstSeen, lastSeen, priorTime, active,
+     ${cypherUnionIds("[id IN lookedUp WHERE id IS NOT NULL]", "edgeSources", "joinedSources", "joinedSource")} AS sourceIds
+SET keeper.type = relType,
+    keeper.factIds = factIds,
+    keeper.factId = head(factIds),
+    keeper.sourceIds = sourceIds,
+    keeper.mentions = size(factIds),
+    keeper.firstSeen = coalesce(firstSeen, keeper.firstSeen),
+    keeper.validFrom = coalesce(firstSeen, keeper.validFrom),
+    keeper.lastSeen = coalesce(lastSeen, keeper.lastSeen),
+    keeper.validTo = CASE WHEN active THEN null ELSE keeper.validTo END,
+    keeper.time = CASE
+      WHEN keeper.time IS NULL OR keeper.time = '' THEN priorTime
+      ELSE keeper.time
+    END
+WITH tail(rels) AS extras
+FOREACH (extra IN extras | DELETE extra)
+WITH sum(size(extras)) AS removed
+RETURN removed
+`;
+
+const COLLAPSE_ABOUT = `
+MATCH (a:Rkz)-[r:ABOUT]->(b:Rkz)
+WHERE a.spaceId = $spaceId AND b.spaceId = $spaceId
+  AND (
+    a.id IN $ids OR b.id IN $ids
+    OR EXISTS {
+      MATCH (a)-[:ABOUT]->(mentioned:Rkz)
+      WHERE mentioned.id IN $ids AND mentioned.spaceId = $spaceId
+    }
+  )
+  AND ($ns = '' OR a.ns = $ns OR b.ns = $ns)
+WITH a, b, r
+ORDER BY elementId(r)
+WITH a, b, collect(r) AS rels
+WHERE size(rels) > 1
+WITH tail(rels) AS extras
+FOREACH (extra IN extras | DELETE extra)
+WITH sum(size(extras)) AS removed
+RETURN removed
+`;
+
+const COLLAPSE_FROM = `
+MATCH (a:Rkz)-[r:FROM]->(b:Rkz)
+WHERE a.spaceId = $spaceId AND b.spaceId = $spaceId
+  AND (
+    a.id IN $ids OR b.id IN $ids
+    OR EXISTS {
+      MATCH (a)-[:ABOUT]->(mentioned:Rkz)
+      WHERE mentioned.id IN $ids AND mentioned.spaceId = $spaceId
+    }
+  )
+  AND ($ns = '' OR a.ns = $ns OR b.ns = $ns)
+WITH a, b, r
+ORDER BY elementId(r)
+WITH a, b, collect(r) AS rels
+WHERE size(rels) > 1
+WITH head(rels) AS keeper, rels, tail(rels) AS extras
+SET keeper.provenance = coalesce(
+  keeper.provenance,
+  head([edge IN rels WHERE edge.provenance IS NOT NULL | edge.provenance])
+)
+WITH extras
+FOREACH (extra IN extras | DELETE extra)
+WITH sum(size(extras)) AS removed
+RETURN removed
+`;
 
 function consolidationEntity(record: {
   get(key: string): unknown;
