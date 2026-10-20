@@ -28,6 +28,13 @@ function isMissingOrNotDirectory(error: unknown): boolean {
   return code === "ENOENT" || code === "ELOOP" || code === "ENOTDIR";
 }
 
+function isAccessDenied(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === "EACCES";
+}
+
+/** POSIX sticky bit. Node's fs.constants does not expose S_ISVTX. */
+const STICKY_BIT = 0o1000;
+
 function isPathInside(root: string, candidate: string): boolean {
   const normalizedRoot = path.resolve(root);
   const normalizedCandidate = path.resolve(candidate);
@@ -94,6 +101,33 @@ async function assertWritableEntry(
   }
 }
 
+async function assertInaccessibleChild(
+  statPath: string,
+  displayChild: string,
+  root: string,
+  uid: number,
+  gid: number,
+): Promise<void> {
+  let childStat: Stats;
+  try {
+    childStat = await lstat(statPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    if (isAccessDenied(error)) throw writabilityError(displayChild, root, uid, gid);
+    throw error;
+  }
+  if (childStat.isSymbolicLink()) return;
+  if (!childStat.isDirectory()) {
+    if (!regularFileIsUsable(childStat, uid, gid)) {
+      throw writabilityError(displayChild, root, uid, gid);
+    }
+    return;
+  }
+  const sticky = (childStat.mode & STICKY_BIT) !== 0;
+  if (hasPermissions(childStat, uid, gid, 0b111) && !sticky) return;
+  throw writabilityError(displayChild, root, uid, gid);
+}
+
 async function assertWritableDirectory(
   handle: FileHandle,
   rootPath: string,
@@ -112,10 +146,20 @@ async function assertWritableDirectory(
   const directory = await opendir(descriptorPath);
   for await (const entry of directory) {
     const childPath = path.join(descriptorPath, entry.name);
+    const displayChild = path.join(displayPath, entry.name);
     let childDir: FileHandle | undefined;
     try {
       childDir = await open(childPath, DIRECTORY_OPEN_FLAGS);
     } catch (error) {
+      // open() through /proc/self/fd/N re-checks this process's credentials.
+      // A private directory the computer user can write (mode 0700 ~/.cache
+      // from xdg, Chromium, or uv) is EACCES for any other supervisor uid, and
+      // that Node error would fail POST /computers. This process cannot list
+      // it; a non-sticky writable directory is left unscanned.
+      if (isAccessDenied(error)) {
+        await assertInaccessibleChild(childPath, displayChild, root, uid, gid);
+        continue;
+      }
       if (!isMissingOrNotDirectory(error)) throw error;
     }
     if (childDir) {

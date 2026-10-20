@@ -1,6 +1,8 @@
+import { spawnSync } from "node:child_process";
 import { constants } from "node:fs";
 import {
   chmod,
+  copyFile,
   lstat,
   mkdir,
   mkdtemp,
@@ -12,8 +14,68 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { assertComputerHomeWritable, assertOpenedDirectoryBeneathRoot } from "./home-ownership.js";
+
+const ownershipModule = fileURLToPath(new URL("./home-ownership.ts", import.meta.url));
+
+function otherUserCanRun(): boolean {
+  if (process.platform !== "linux") return false;
+  const probe =
+    process.getuid?.() === 0
+      ? spawnSync(process.execPath, ["-e", "process.exit(0)"], { uid: 65534, gid: 65534 })
+      : spawnSync("sudo", ["-n", "-u", "nobody", process.execPath, "-e", "process.exit(0)"]);
+  return probe.status === 0;
+}
+
+async function checkHomeAsOtherUser(
+  home: string,
+  uid: number,
+  gid: number,
+): Promise<{ status: number; output: string } | undefined> {
+  // The checkout may live under a home directory other users cannot traverse.
+  // The checker only needs this module, which imports node builtins, so copy
+  // it somewhere nobody can read.
+  const scratch = await mkdtemp(path.join(tmpdir(), "rakazo-home-check-"));
+  try {
+    await chmod(scratch, 0o755);
+    const modulePath = path.join(scratch, "home-ownership.ts");
+    await copyFile(ownershipModule, modulePath);
+    await chmod(modulePath, 0o644);
+    const script = `
+      import { assertComputerHomeWritable } from ${JSON.stringify(modulePath)};
+      try {
+        await assertComputerHomeWritable(process.argv[1], Number(process.argv[2]), Number(process.argv[3]));
+        console.log("OK");
+      } catch (error) {
+        console.log(error instanceof Error ? error.message : String(error));
+        process.exitCode = 2;
+      }
+    `;
+    const nodeArgs = [
+      "--experimental-strip-types",
+      "--input-type=module",
+      "-e",
+      script,
+      home,
+      String(uid),
+      String(gid),
+    ];
+    const env = { ...process.env, HOME: "/tmp", XDG_CACHE_HOME: "/tmp" };
+    const result =
+      process.getuid?.() === 0
+        ? spawnSync(process.execPath, nodeArgs, { encoding: "utf8", env, uid: 65534, gid: 65534 })
+        : spawnSync("sudo", ["-n", "-u", "nobody", process.execPath, ...nodeArgs], {
+            encoding: "utf8",
+            env,
+          });
+    if (result.error || result.status === null) return undefined;
+    return { status: result.status, output: `${result.stdout ?? ""}\n${result.stderr ?? ""}` };
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
 
 const roots: string[] = [];
 const DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
@@ -164,6 +226,64 @@ describe("computer home ownership", () => {
     const stat = await lstat(home);
     await expect(assertComputerHomeWritable(home, stat.uid, stat.gid)).resolves.toBeUndefined();
   });
+
+  it.skipIf(process.platform !== "linux")(
+    "names an unreadable directory instead of a /proc/self/fd open error",
+    async () => {
+      const parent = await mkdtemp(path.join(tmpdir(), "rakazo-home-unreadable-dir-"));
+      roots.push(parent);
+      const home = path.join(parent, "home");
+      const cache = path.join(home, ".cache");
+      await mkdir(cache, { recursive: true });
+      await chmod(cache, 0o000);
+
+      const stat = await lstat(home);
+      let message = "";
+      try {
+        await assertComputerHomeWritable(home, stat.uid, stat.gid);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toMatch(/chown -R/);
+      expect(message).toContain(".cache");
+      expect(message).not.toContain("/proc/self/fd");
+    },
+  );
+
+  it.skipIf(process.platform !== "linux" || !otherUserCanRun())(
+    "accepts a private cache the computer user owns when the supervisor cannot enter it",
+    async () => {
+      const parent = await mkdtemp(path.join(tmpdir(), "rakazo-home-private-cache-"));
+      roots.push(parent);
+      const home = path.join(parent, "home");
+      const cache = path.join(home, ".cache");
+      await mkdir(path.join(cache, "uv"), { recursive: true });
+      await writeFile(path.join(cache, "uv", "entry"), "cached");
+      await chmod(parent, 0o755);
+      await chmod(home, 0o777);
+      await chmod(cache, 0o700);
+      await chmod(path.join(cache, "uv"), 0o700);
+
+      const stat = await lstat(cache);
+      const accepted = await checkHomeAsOtherUser(home, stat.uid, stat.gid);
+      expect(accepted?.status, accepted?.output).toBe(0);
+      expect(accepted?.output).toContain("OK");
+
+      const sticky = path.join(home, "sticky");
+      await mkdir(sticky);
+      await chmod(sticky, 0o1700);
+      const rejected = await checkHomeAsOtherUser(home, stat.uid, stat.gid);
+      expect(rejected?.status, rejected?.output).toBe(2);
+      expect(rejected?.output).toMatch(/chown -R/);
+      expect(rejected?.output).not.toContain("/proc/self/fd");
+
+      await rm(sticky, { recursive: true, force: true });
+      const foreign = await checkHomeAsOtherUser(home, stat.uid + 1, stat.gid + 1);
+      expect(foreign?.status, foreign?.output).toBe(2);
+      expect(foreign?.output).toMatch(/chown -R/);
+      expect(foreign?.output).toContain(".cache");
+    },
+  );
 
   it.skipIf(process.platform !== "linux")(
     "rejects an opened directory that was moved outside the home",
