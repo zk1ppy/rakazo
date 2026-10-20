@@ -68,7 +68,10 @@ function store(
     model?: { provider: string; id: string } | null;
     aliases?: readonly string[];
   },
-): MemoryExtractStore & { applyExtraction: ReturnType<typeof vi.fn> } {
+): MemoryExtractStore & {
+  applyExtraction: ReturnType<typeof vi.fn>;
+  markExtracted: ReturnType<typeof vi.fn>;
+} {
   return {
     extractionEnabled: () => options?.enabled ?? true,
     extractionModel: () => options?.model ?? null,
@@ -76,6 +79,9 @@ function store(
     readFactText: vi.fn(async () => text),
     applyExtraction: vi.fn(
       async (_input: Parameters<MemoryExtractStore["applyExtraction"]>[0]) => undefined,
+    ),
+    markExtracted: vi.fn(
+      async (_input: Parameters<MemoryExtractStore["markExtracted"]>[0]) => undefined,
     ),
   };
 }
@@ -539,6 +545,13 @@ describe("extractMemoryGraph", () => {
     expect(run.mock.calls[0]?.[0].model.maxTokens).toBeUndefined();
     expect(memory.applyExtraction).toHaveBeenCalledTimes(2);
     expect(memory.applyExtraction.mock.calls[0]?.[0].entities[0].type).toBe("Person");
+    expect(memory.markExtracted).toHaveBeenCalledTimes(1);
+    expect(memory.markExtracted).toHaveBeenCalledWith({
+      factId: "fact-1",
+      spaceId: "space-1",
+      ns: "shared",
+      extractedAt: expect.any(String),
+    });
   });
 
   it("uses the connection minimum effort and keeps its output cap", async () => {
@@ -627,7 +640,8 @@ describe("extractMemoryGraph", () => {
     });
     const queue = jobs();
     const before = Date.now();
-    await extractMemoryGraph(deps(run, queue), payload({ maxChunkChars: 400 }), store(longText()));
+    const memory = store(longText());
+    await extractMemoryGraph(deps(run, queue), payload({ maxChunkChars: 400 }), memory);
     expect(calls).toBe(2);
     expect(queue.enqueue).toHaveBeenCalledTimes(1);
     const job = queue.enqueue.mock.calls[0]?.[0];
@@ -639,6 +653,7 @@ describe("extractMemoryGraph", () => {
     expect(job.payload).toMatchObject({ chunkIndex: 1, attempt: 1, scheduleGeneration: 1 });
     expect(job.availableAt?.getTime()).toBeGreaterThanOrEqual(before + 14_000);
     expect(JSON.stringify(job.payload)).not.toContain("Lovelace");
+    expect(memory.markExtracted).not.toHaveBeenCalled();
   });
 
   it("reschedules a non-JSON rate-limit reply and fails a permanent model error", async () => {
@@ -655,16 +670,14 @@ describe("extractMemoryGraph", () => {
     expect(limitedJob.payload.chunkIndex).toBe(0);
 
     const permanent = jobs();
+    const failed = store("Ada Lovelace founded the Analytical Society in London.");
     const run = vi.fn<AgentRuntime["run"]>(() => {
       throw new Error("The model hit its output limit before writing a response.");
     });
-    await expect(
-      extractMemoryGraph(
-        deps(run, permanent),
-        payload(),
-        store("Ada Lovelace founded the Analytical Society in London."),
-      ),
-    ).rejects.toThrow("output limit");
+    await expect(extractMemoryGraph(deps(run, permanent), payload(), failed)).rejects.toThrow(
+      "output limit",
+    );
+    expect(failed.markExtracted).not.toHaveBeenCalled();
     expect(permanent.enqueue).not.toHaveBeenCalled();
     expect(run).toHaveBeenCalledTimes(1);
   });
@@ -721,6 +734,7 @@ describe("extractMemoryGraph", () => {
     const memory = store(nicolasFact);
     await extractMemoryGraph(deps(run), payload(), memory);
     expect(memory.applyExtraction).not.toHaveBeenCalled();
+    expect(memory.markExtracted).toHaveBeenCalledTimes(1);
     expect(sink.events).toContainEqual(
       expect.objectContaining({
         level: "warn",
@@ -822,8 +836,10 @@ describe("extractMemoryGraph", () => {
         store("Ada Lovelace founded the Analytical Society in London."),
       ),
     ).resolves.toBe(false);
-    await expect(extractMemoryGraph(deps(run), payload(), store("ok"))).resolves.toBe(false);
+    const trivial = store("ok");
+    await expect(extractMemoryGraph(deps(run), payload(), trivial)).resolves.toBe(false);
     expect(run).not.toHaveBeenCalled();
+    expect(trivial.markExtracted).not.toHaveBeenCalled();
   });
 
   it("uses the pinned extraction model and falls back to the space default", async () => {

@@ -13,6 +13,11 @@ import { createDb } from "@rakazo/db";
 import { loadWorkerConfig } from "../config.js";
 import { createWorkerSecretStore } from "../secret-store.js";
 
+/**
+ * Repair fact times, then enqueue memory.extract for facts that are not
+ * extracted yet. --repair-only skips the queue. --force re-enqueues extracted
+ * facts. See memory-extract-backfill.ts for how an extracted fact is detected.
+ */
 const options = parseBackfillExtractArgs(process.argv.slice(2));
 const config = loadWorkerConfig();
 
@@ -24,14 +29,20 @@ try {
   const counts = await backfillMemoryExtraction(loaded.spaces, jobs, {
     limit: options.limit,
     dryRun: options.dryRun,
+    force: options.force,
+    repairOnly: options.repairOnly,
   });
   const lines = [
     `dry-run ${options.dryRun}`,
+    `repair-only ${options.repairOnly}`,
+    `force ${options.force}`,
     `spaces ${counts.spaces}`,
     `disabled ${counts.disabled}`,
     `failed ${counts.failed + loaded.failed}`,
+    `repaired ${options.dryRun ? "dry-run" : counts.repaired}`,
     `skipped ${counts.skipped}`,
-    `${options.dryRun ? "would-enqueue" : "enqueued"} ${counts.enqueued}`,
+    `enqueued ${counts.enqueued}`,
+    `marked ${options.dryRun ? "dry-run" : counts.marked}`,
     `valid-from ${options.dryRun ? "dry-run" : counts.relations}`,
     `first-seen ${options.dryRun ? "dry-run" : counts.entities}`,
   ];

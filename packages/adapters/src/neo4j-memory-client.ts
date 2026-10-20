@@ -708,23 +708,49 @@ export interface Neo4jUnextractedFact {
   ns: string;
   botId: string;
   text: string;
+  /**
+   * True when `extractedAt` is set or the fact has an outgoing :ABOUT edge.
+   * The node stays :Rkz:Fact. The marker is a property, not a label.
+   */
+  extracted: boolean;
 }
 
-/** Facts in one space that have not been linked to an entity yet. */
+/**
+ * Live facts in one space.
+ *
+ * Already extracted means `extractedAt` is set or the fact has an outgoing
+ * :ABOUT edge. The extraction job writes `extractedAt` after the last chunk,
+ * including a result that stores no entities. Facts extracted before that
+ * property existed are recognized by the :ABOUT edge. `includeExtracted`
+ * returns those facts as well.
+ */
 export async function listUnextractedNeo4jFacts(
   driver: Neo4jMemoryDriver,
   database: string,
-  input: { spaceId: string; limit: number; skip: number },
+  input: { spaceId: string; limit: number; skip: number; includeExtracted?: boolean },
   signal?: AbortSignal,
 ): Promise<Neo4jUnextractedFact[]> {
   const result = await driver.run(
     `MATCH (f:Rkz:Fact {spaceId: $spaceId})
-     WHERE f.expiredAt IS NULL AND NOT (f)-[:ABOUT]->()
-     RETURN f.id AS factId, f.ns AS ns, f.botId AS botId, f.text AS text
+     WHERE f.expiredAt IS NULL
+       AND (
+         $includeExtracted
+         OR (f.extractedAt IS NULL AND NOT (f)-[:ABOUT]->())
+       )
+     RETURN f.id AS factId, f.ns AS ns, f.botId AS botId, f.text AS text,
+            CASE
+              WHEN f.extractedAt IS NOT NULL OR (f)-[:ABOUT]->() THEN true
+              ELSE false
+            END AS extracted
      ORDER BY f.id
      SKIP $skip
      LIMIT $limit`,
-    input,
+    {
+      spaceId: input.spaceId,
+      limit: input.limit,
+      skip: input.skip,
+      includeExtracted: input.includeExtracted === true,
+    },
     { database, access: "read", signal },
   );
   const facts: Neo4jUnextractedFact[] = [];
@@ -734,9 +760,64 @@ export async function listUnextractedNeo4jFacts(
     const botId = asString(record.get("botId"));
     const text = asString(record.get("text"));
     if (!factId || !ns || !botId) continue;
-    facts.push({ factId, ns, botId, text });
+    facts.push({ factId, ns, botId, text, extracted: record.get("extracted") === true });
   }
   return facts;
+}
+
+/** Live facts that already have extractedAt or an outgoing :ABOUT edge. */
+export async function countExtractedNeo4jFacts(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string },
+  signal?: AbortSignal,
+): Promise<number> {
+  const result = await driver.run(
+    `MATCH (f:Rkz:Fact {spaceId: $spaceId})
+     WHERE f.expiredAt IS NULL
+       AND (f.extractedAt IS NOT NULL OR (f)-[:ABOUT]->())
+     RETURN count(f) AS extracted`,
+    input,
+    { database, access: "read", signal },
+  );
+  return asNumber(result.records[0]?.get("extracted"));
+}
+
+/**
+ * Set extractedAt on facts that already have an :ABOUT edge and no marker.
+ * The value is the fact's stored time. No model call. Facts stay :Rkz:Fact.
+ */
+export async function stampNeo4jExtractedFacts(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string; extractedAt: string },
+  signal?: AbortSignal,
+): Promise<number> {
+  const result = await driver.run(
+    `MATCH (f:Rkz:Fact {spaceId: $spaceId})-[:ABOUT]->()
+     WHERE f.expiredAt IS NULL AND f.extractedAt IS NULL
+     SET f.extractedAt = coalesce(f.createdAt, f.validFrom, $extractedAt)
+     RETURN count(f) AS marked`,
+    input,
+    { database, access: "write", signal },
+  );
+  return asNumber(result.records[0]?.get("marked"));
+}
+
+/** Record that extraction finished for this fact. Overwrites an older marker. */
+export async function markNeo4jFactExtracted(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { factId: string; spaceId: string; ns: string; extractedAt: string },
+  signal?: AbortSignal,
+): Promise<void> {
+  await driver.run(
+    `MATCH (f:Rkz:Fact {id: $factId, spaceId: $spaceId, ns: $ns})
+     WHERE f.expiredAt IS NULL
+     SET f.extractedAt = $extractedAt`,
+    input,
+    { database, access: "write", signal },
+  );
 }
 
 export async function readNeo4jFactText(

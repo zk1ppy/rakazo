@@ -46,6 +46,7 @@ import type {
 } from "./neo4j-memory-client.js";
 import {
   collapseNeo4jParallelRelations,
+  countExtractedNeo4jFacts,
   ensureNeo4jMemorySchema,
   escapeLuceneQuery,
   findNeo4jPeopleByNorms,
@@ -54,6 +55,7 @@ import {
   linkNeo4jFactEntity,
   listNeo4jConsolidationEntities,
   listUnextractedNeo4jFacts,
+  markNeo4jFactExtracted,
   mergeExtractedNeo4jEntity,
   mergeNeo4jDuplicateEntity,
   openNeo4jMemoryDriver,
@@ -64,6 +66,7 @@ import {
   recallNeo4jFacts,
   renameNeo4jEntity,
   saveNeo4jFact,
+  stampNeo4jExtractedFacts,
 } from "./neo4j-memory-client.js";
 import type { ResolveHostname } from "./network-address.js";
 import { isCloudMetadataAddress, isPrivateAddress } from "./network-address.js";
@@ -702,15 +705,46 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
 
   async listUnextractedFacts(
     spaceId: string,
-    input: { limit: number; skip: number },
+    input: { limit: number; skip: number; includeExtracted?: boolean },
     signal?: AbortSignal,
   ) {
     return listUnextractedNeo4jFacts(
       await this.ready(signal),
       this.connection.database,
-      { spaceId, limit: input.limit, skip: input.skip },
+      {
+        spaceId,
+        limit: input.limit,
+        skip: input.skip,
+        includeExtracted: input.includeExtracted === true,
+      },
       signal,
     );
+  }
+
+  async countExtractedFacts(spaceId: string, signal?: AbortSignal): Promise<number> {
+    return countExtractedNeo4jFacts(
+      await this.ready(signal),
+      this.connection.database,
+      { spaceId },
+      signal,
+    );
+  }
+
+  /** Copy a stored time onto extractedAt for facts that already have :ABOUT. */
+  async stampExtractedFacts(spaceId: string, signal?: AbortSignal): Promise<number> {
+    return stampNeo4jExtractedFacts(
+      await this.ready(signal),
+      this.connection.database,
+      { spaceId, extractedAt: new Date().toISOString() },
+      signal,
+    );
+  }
+
+  async markExtracted(
+    input: { factId: string; spaceId: string; ns: string; extractedAt: string },
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await markNeo4jFactExtracted(await this.ready(signal), this.connection.database, input, signal);
   }
 
   async listConsolidationPage(
