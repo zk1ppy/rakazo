@@ -102,6 +102,125 @@ export function normalizeEntityName(name: string): string {
     .trim();
 }
 
+/** Generic words that mean the space member when the setting is blank. */
+export const DEFAULT_OWNER_ALIASES = [
+  "me",
+  "myself",
+  "je",
+  "moi",
+  "user",
+  "the user",
+  "utilisateur",
+  "l'utilisateur",
+  "runner",
+  "the runner",
+  "coureur",
+  "le coureur",
+  "coureuse",
+  "la coureuse",
+  "athlete",
+  "the athlete",
+  "athlète",
+  "l'athlète",
+] as const;
+
+const MAX_OWNER_ALIAS_SETTING = 400;
+const MAX_OWNER_ALIASES = 32;
+
+/**
+ * Role words that denote the space member. A blank setting uses
+ * {@link DEFAULT_OWNER_ALIASES}. A stored list replaces that default.
+ */
+export function readOwnerAliases(settings: Record<string, string>): string[] {
+  const raw = settings.ownerAliases;
+  if (raw === undefined || raw.trim() === "") return [...DEFAULT_OWNER_ALIASES];
+  const parsed = parseOwnerAliasList(raw);
+  return parsed.length > 0 ? parsed : [...DEFAULT_OWNER_ALIASES];
+}
+
+/** Connect path. Blank clears the setting. A present list must contain one usable name. */
+export function assertOwnerAliases(value: string | undefined): string | undefined {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return undefined;
+  if (trimmed.length > MAX_OWNER_ALIAS_SETTING) throw new Error("Owner aliases are too long.");
+  const parsed = parseOwnerAliasList(trimmed);
+  if (parsed.length === 0) throw new Error("Owner aliases need at least one name.");
+  return parsed.join(", ");
+}
+
+export function ownerResolution(
+  subjectName: string | null | undefined,
+  aliases: readonly string[],
+): { subjectNorm: string; aliases: ReadonlySet<string> } | null {
+  const subject = subjectEntityName(subjectName);
+  if (!subject) return null;
+  const set = ownerAliasSet(aliases);
+  set.delete(subject.normName);
+  if (set.size === 0) return null;
+  return { subjectNorm: subject.normName, aliases: set };
+}
+
+/** Placeholders, option letters, and numbered plan steps. Dated names are kept. */
+export function isNonReferentName(name: string): boolean {
+  const cleaned = name
+    .trim()
+    .replace(/[.。:：)\]]+$/u, "")
+    .trim();
+  if (/^(?:option|choix|alternative|alt)\s+[a-z0-9]{1,3}$/i.test(cleaned)) return true;
+  if (/^plan\s+[a-z]$/i.test(cleaned)) return true;
+  if (/^(?:step|étape|etape|phase)\s+\d{1,3}$/i.test(cleaned)) return true;
+  const norm = normalizeEntityName(cleaned);
+  return (
+    norm === "tbd" ||
+    norm === "n a" ||
+    norm === "na" ||
+    norm === "todo" ||
+    norm === "placeholder" ||
+    norm === "lorem" ||
+    norm === "xxx" ||
+    norm === "unnamed" ||
+    norm === "unknown" ||
+    norm === "inconnu" ||
+    norm === "a definir" ||
+    norm === "à définir"
+  );
+}
+
+function parseOwnerAliasList(value: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const part of value.split(/[\n,;]+/)) {
+    const name = part.trim().replace(/^['"]+|['"]+$/g, "");
+    if (name.length < 2 || name.length > 40) continue;
+    if (!/^[\p{L}\p{N}][\p{L}\p{N}'’\-\s]*$/u.test(name)) continue;
+    const norm = normalizeEntityName(name);
+    if (norm.length < 2 || seen.has(norm)) continue;
+    seen.add(norm);
+    out.push(name);
+    if (out.length >= MAX_OWNER_ALIASES) break;
+  }
+  return out;
+}
+
+function ownerAliasSet(aliases: readonly string[]): Set<string> {
+  const set = new Set<string>();
+  for (const alias of aliases) {
+    const norm = normalizeEntityName(alias);
+    if (norm.length >= 2) set.add(norm);
+  }
+  return set;
+}
+
+function subjectEntityName(
+  subjectName: string | null | undefined,
+): { name: string; normName: string } | null {
+  const name = memorySubjectName(subjectName);
+  if (!name) return null;
+  const normName = normalizeEntityName(name);
+  if (normName.length < 2) return null;
+  return { name, normName };
+}
+
 export function extractedEntityId(
   spaceId: string,
   ns: string,
@@ -178,7 +297,8 @@ export const MEMORY_EXTRACT_INSTRUCTIONS = [
   '{"entities":[{"type":"Person|Object|Location|Event|Organization","name":"canonical name","aliases":["other names"],"attributes":{"key":"short value"}}],"relations":[{"source":"entity name","target":"entity name","type":"snake_case","time":"optional"}]}.',
   "Use only those five types. A person is a human. An organization is a company, team, or institution. A software agent, bot, or assistant is an Object, not an Organization or a Person.",
   "One canonical proper name per real thing. Aliases are only other proper names, spellings, nicknames, or unique handles for that same thing. Put roles, jobs, titles, and generic nouns in attributes, never in aliases, and never as the entity name.",
-  "Do not create an entity whose name is only a role, title, or generic reference. When that reference denotes a person named in the memory, attach relations to that person. When a subject is present and the reference denotes the space member, use the subject's name. When the person is not identified, omit the entity.",
+  "Do not create an entity whose name is only a role, title, or generic reference. When that reference denotes a person named in the memory, attach relations to that person. Names in the owner-aliases block denote the subject: use the subject's name and do not create a person for them. When the person is not identified, omit the entity.",
+  "Do not extract placeholders, option labels such as Option A, or numbered plan steps. Keep real events, including dated sessions.",
   "Attributes are a few stable identity facts, such as a title or handle, not sentences. Dated measurements, scores, ratios, and statuses stay in the memory and must not be attributes.",
   "Relation source and target must name entities in this same object.",
   'Omit anything uncertain. If nothing is worth storing, return {"entities":[],"relations":[]}.',
@@ -193,10 +313,19 @@ export function memorySubjectName(name: string | null | undefined): string | nul
   return trimmed;
 }
 
-export function memoryExtractPrompt(chunk: string, subjectName?: string | null): string {
+export function memoryExtractPrompt(
+  chunk: string,
+  subjectName?: string | null,
+  ownerAliases?: readonly string[],
+): string {
   const subject = memorySubjectName(subjectName);
   const subjectBlock = subject ? `<subject>\n${escapePromptData(subject)}\n</subject>\n` : "";
-  return `${subjectBlock}<memory>\n${escapePromptData(chunk)}\n</memory>`;
+  const aliases = (ownerAliases ?? []).map((alias) => alias.trim()).filter(Boolean);
+  const aliasBlock =
+    subject && aliases.length > 0
+      ? `<owner-aliases>\n${escapePromptData(aliases.join(", "))}\n</owner-aliases>\n`
+      : "";
+  return `${subjectBlock}${aliasBlock}<memory>\n${escapePromptData(chunk)}\n</memory>`;
 }
 
 export interface ExtractedEntityWrite {
@@ -220,6 +349,8 @@ export interface MemoryExtractStore {
   extractionEnabled(): boolean;
   /** Null uses the Space default model, not the bot's model. */
   extractionModel(): Neo4jExtractionModel | null;
+  /** Role words that mean the space member. Blank config uses the built-in list. */
+  ownerAliases(): readonly string[];
   readFactText(
     input: { factId: string; spaceId: string; ns: string },
     signal?: AbortSignal,
@@ -298,18 +429,25 @@ export async function extractMemoryGraph(
     return false;
   }
   const subjectName = await resolveSubjectName(deps, payload.userId);
+  const ownerAliases = store.ownerAliases();
 
   let attempt = payload.attempt;
   let wrote = false;
   for (let index = payload.chunkIndex; index < chunks.length; index += 1) {
     const chunk = chunks[index];
     if (!chunk) continue;
-    const call = await callExtractor(deps, payload, model, chunk, index, subjectName);
+    const call = await callExtractor(deps, payload, model, chunk, index, subjectName, ownerAliases);
     if (call.kind === "rate_limit") {
       await rescheduleExtract(deps, payload, index, attempt);
       return wrote;
     }
-    const extracted = parseMemoryExtraction(call.text, payload.spaceId, payload.ns, subjectName);
+    const extracted = parseMemoryExtraction(
+      call.text,
+      payload.spaceId,
+      payload.ns,
+      subjectName,
+      ownerAliases,
+    );
     const counts = {
       "memory.fact_id": payload.factId,
       "memory.chunk": index,
@@ -345,6 +483,7 @@ export function parseMemoryExtraction(
   spaceId: string,
   ns: string,
   subjectName?: string | null,
+  ownerAliases?: readonly string[],
 ): {
   parsedEntities: number;
   entities: ExtractedEntityWrite[];
@@ -375,7 +514,13 @@ export function parseMemoryExtraction(
     existing.metricOnly = existing.metricOnly && entity.metricOnly;
     if (!existing.summary && entity.summary) existing.summary = entity.summary;
   }
-  const { entities, redirect } = settleRoleEntities(parsedEntities, spaceId, ns, subjectName);
+  const { entities, redirect } = settleRoleEntities(
+    parsedEntities,
+    spaceId,
+    ns,
+    subjectName,
+    ownerAliases ?? readOwnerAliases({}),
+  );
 
   const names = new Map<string, string>();
   for (const entity of entities) {
@@ -440,6 +585,7 @@ async function callExtractor(
   chunk: string,
   chunkIndex: number,
   subjectName: string | null,
+  ownerAliases: readonly string[],
 ): Promise<{
   kind: ExtractCall;
   text: string;
@@ -462,7 +608,7 @@ async function callExtractor(
         runId: operationId,
         usageOperationKind: "retrieval",
         onUsage: (event) => recordExtractUsage(deps, payload, event, operationId),
-        prompt: memoryExtractPrompt(chunk, subjectName),
+        prompt: memoryExtractPrompt(chunk, subjectName, ownerAliases),
         instructions: MEMORY_EXTRACT_INSTRUCTIONS,
         history: [],
         tools: [],
@@ -612,7 +758,7 @@ function parseEntity(raw: unknown, spaceId: string, ns: string): ParsedEntity | 
   if (!parsed.success) return null;
   const name = parsed.data.name.trim();
   const normName = normalizeEntityName(name);
-  if (normName.length < 2) return null;
+  if (normName.length < 2 || isNonReferentName(name)) return null;
   const attributes = parsed.data.attributes;
   const { stable, metricOnly } = partitionAttributes(attributes);
   const aliases = acceptedAliases(parsed.data.aliases ?? [], name, attributes);
@@ -713,13 +859,16 @@ function acceptedAliases(
  * A role-named person is not stored beside a concrete person: relations move
  * onto that person. A person that exists only to hold measurements is dropped.
  * When the memory names nobody and the space member is known, that member is
- * the person the measurements were about. Role aliases are not copied over.
+ * the person the measurements were about. A person whose name is an owner
+ * alias is the space member instead, even without measurements. Role aliases
+ * are not copied over.
  */
 function settleRoleEntities(
   entities: ParsedEntity[],
   spaceId: string,
   ns: string,
   subjectName?: string | null,
+  ownerAliases: readonly string[] = [],
 ): { entities: ExtractedEntityWrite[]; redirect: Map<string, string> } {
   const drop = new Set<string>();
   const people = entities.filter((entity) => entity.type === "Person");
@@ -748,6 +897,26 @@ function settleRoleEntities(
     for (const role of rolePeople) {
       if (drop.has(role.id) && role.normName !== targetNorm)
         redirect.set(role.normName, targetNorm);
+    }
+  }
+  const subject = subjectEntity(subjectName, spaceId, ns);
+  const aliasSet = ownerAliasSet(ownerAliases);
+  if (subject && aliasSet.size > 0) {
+    let mentionedOwner = false;
+    for (const person of people) {
+      if (person.normName === subject.normName || !aliasSet.has(person.normName)) continue;
+      drop.add(person.id);
+      redirect.set(person.normName, subject.normName);
+      for (const alias of person.aliasNorms) {
+        if (aliasSet.has(alias)) redirect.set(alias, subject.normName);
+      }
+      mentionedOwner = true;
+    }
+    if (
+      mentionedOwner &&
+      !entities.some((entity) => entity.type === "Person" && entity.normName === subject.normName)
+    ) {
+      entities.push(subject);
     }
   }
   return {

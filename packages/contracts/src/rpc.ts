@@ -511,6 +511,7 @@ export const appContract = {
           consolidateThinkingLevel: z.string().max(16).optional(),
           consolidateMaxOutputTokens: z.string().max(8).optional(),
           consolidateTimeoutMs: z.string().max(8).optional(),
+          ownerAliases: z.string().max(400).optional(),
           dream: z.boolean().optional(),
         }),
       )

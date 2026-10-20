@@ -3474,6 +3474,10 @@ msgstr "Other model…"
 msgid "Owner"
 msgstr "Owner"
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Owner aliases"
+msgstr "Owner aliases"
+
 #: src/pages/RoutineEditor.tsx
 msgid "PagerDuty incident"
 msgstr "PagerDuty incident"

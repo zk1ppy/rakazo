@@ -11,7 +11,12 @@ import { recordUsage } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import { resolveDeploymentModel } from "./deployment-model.js";
 import type { Neo4jExtractionModel } from "./memory-extract.js";
-import { isRoleLikeName, normalizeEntityName, stableEntitySummary } from "./memory-extract.js";
+import {
+  isRoleLikeName,
+  normalizeEntityName,
+  ownerResolution,
+  stableEntitySummary,
+} from "./memory-extract.js";
 import type {
   Neo4jConsolidationEntity,
   Neo4jDuplicateMerge,
@@ -294,6 +299,13 @@ export interface MemoryConsolidateStore {
     input: { spaceId: string; ids: string[]; ns?: string },
     signal?: AbortSignal,
   ): Promise<ParallelRelationCollapse>;
+  /** Role words that mean the space member. */
+  ownerAliases(): readonly string[];
+  /** People whose name or alias is one of these normalized forms. */
+  findPeopleByNorms(
+    input: { spaceId: string; ns?: string; norms: string[] },
+    signal?: AbortSignal,
+  ): Promise<Neo4jConsolidationEntity[]>;
 }
 
 export interface MemoryConsolidateDeps {
@@ -312,6 +324,8 @@ export interface MemoryConsolidateDeps {
   ) => Promise<AgentRunRequest["model"]>;
   deploymentModelKey?: string;
   deploymentModelConfigured?: boolean;
+  /** Space member display name. Absent, or a failed lookup, skips owner-alias confirms. */
+  resolveSubjectName?: (userId: string) => Promise<string | null>;
 }
 
 /**
@@ -358,6 +372,7 @@ export function consolidationPairKey(leftId: string, rightId: string): string {
 export function classifyConsolidationPair(
   left: Neo4jConsolidationEntity,
   right: Neo4jConsolidationEntity,
+  owner?: { subjectNorm: string; aliases: ReadonlySet<string> } | null,
 ): ConsolidationClass {
   if (left.id === right.id) return { action: "skip", reason: "self" };
   if (left.ns !== right.ns) return { action: "skip", reason: "namespace" };
@@ -377,6 +392,9 @@ export function classifyConsolidationPair(
   if (prefix && hasContent(prefix.shorter)) return { action: "confirm", reason: "prefix" };
   const subset = tokenSubset(leftTokens, rightTokens);
   if (subset && hasContent(subset.shorter)) return { action: "confirm", reason: "subset" };
+  if (owner && ownerAliasAttachment(left, right, owner)) {
+    return { action: "confirm", reason: "role" };
+  }
   if (roleAttachment(left, right)) return { action: "confirm", reason: "role" };
   if (tokenSimilarity(leftTokens, rightTokens)) return { action: "confirm", reason: "token" };
   return { action: "skip", reason: "weak" };
@@ -599,8 +617,13 @@ export async function consolidateMemoryGraph(
 
   const relationIds = relationPageIds(page);
   const collapsedBefore = await collapseParallel(store, payload, relationIds);
+  const owner = ownerResolution(
+    await resolveSubjectName(deps, payload.userId),
+    store.ownerAliases(),
+  );
+  const entities = await withOwnerPeople(store, payload, page.entities, owner);
   const rejected = new Set(payload.rejected ?? []);
-  const pairs = selectCandidates(page.entities, rejected);
+  const pairs = selectCandidates(entities, rejected, owner);
   const needsModel = pairs.some((pair) => pair.action === "confirm");
   const model = needsModel ? await resolveConsolidateModel(deps, payload, store) : null;
   const usable = Boolean(
@@ -610,7 +633,7 @@ export async function consolidateMemoryGraph(
     getLogger().info("memory.consolidate left ambiguous pairs: no usable model");
   }
 
-  const live = new Map(page.entities.map((entity) => [entity.id, entity]));
+  const live = new Map(entities.map((entity) => [entity.id, entity]));
   let merges = 0;
   let llmCalls = 0;
   let declined = 0;
@@ -629,7 +652,7 @@ export async function consolidateMemoryGraph(
     if (!left || !right || left.id === right.id) continue;
     const key = consolidationPairKey(left.id, right.id);
     if (rejected.has(key)) continue;
-    const decision = classifyConsolidationPair(left, right);
+    const decision = classifyConsolidationPair(left, right, owner);
     if (decision.action === "skip") continue;
     let chosenType: Neo4jEntityType | undefined;
     if (decision.action === "confirm") {
@@ -781,6 +804,44 @@ function relationPageIds(page: ConsolidationPage): string[] {
   return ids;
 }
 
+async function resolveSubjectName(
+  deps: MemoryConsolidateDeps,
+  userId: string,
+): Promise<string | null> {
+  if (!deps.resolveSubjectName) return null;
+  try {
+    return await deps.resolveSubjectName(userId);
+  } catch (error) {
+    getLogger().warn("memory.consolidate subject lookup failed", {
+      message: error instanceof Error ? error.message : "lookup failed",
+    });
+    return null;
+  }
+}
+
+async function withOwnerPeople(
+  store: MemoryConsolidateStore,
+  payload: BackgroundJobPayloads["memory.consolidate"],
+  entities: readonly Neo4jConsolidationEntity[],
+  owner: { subjectNorm: string; aliases: ReadonlySet<string> } | null,
+): Promise<Neo4jConsolidationEntity[]> {
+  if (!owner) return [...entities];
+  const norms = [owner.subjectNorm, ...owner.aliases];
+  const found = await store.findPeopleByNorms({
+    spaceId: payload.spaceId,
+    ...(payload.ns ? { ns: payload.ns } : {}),
+    norms,
+  });
+  const seen = new Set(entities.map((entity) => entity.id));
+  const merged = [...entities];
+  for (const entity of found) {
+    if (seen.has(entity.id)) continue;
+    seen.add(entity.id);
+    merged.push(entity);
+  }
+  return merged;
+}
+
 function collapseParallel(
   store: MemoryConsolidateStore,
   payload: BackgroundJobPayloads["memory.consolidate"],
@@ -796,6 +857,7 @@ function collapseParallel(
 function selectCandidates(
   entities: readonly Neo4jConsolidationEntity[],
   rejected: ReadonlySet<string>,
+  owner?: { subjectNorm: string; aliases: ReadonlySet<string> } | null,
 ): ConsolidationCandidate[] {
   const pairs: ConsolidationCandidate[] = [];
   for (let index = 0; index < entities.length; index += 1) {
@@ -805,7 +867,7 @@ function selectCandidates(
       const right = entities[next];
       if (!right) continue;
       if (rejected.has(consolidationPairKey(left.id, right.id))) continue;
-      const decision = classifyConsolidationPair(left, right);
+      const decision = classifyConsolidationPair(left, right, owner);
       if (decision.action === "skip") continue;
       pairs.push({
         left,
@@ -1235,6 +1297,23 @@ function isRoleNamed(entity: Neo4jConsolidationEntity): boolean {
 function isRoleAgainst(entity: Neo4jConsolidationEntity, other: Neo4jConsolidationEntity): boolean {
   if (!isRoleNamed(entity)) return false;
   return !rawTokens(other.normName).includes(entity.normName);
+}
+
+/**
+ * An owner-alias person and the space member's person. Shared evidence is not
+ * required. The model still has to agree before either node is deleted.
+ */
+function ownerAliasAttachment(
+  left: Neo4jConsolidationEntity,
+  right: Neo4jConsolidationEntity,
+  owner: { subjectNorm: string; aliases: ReadonlySet<string> },
+): boolean {
+  if (left.type !== "Person" || right.type !== "Person") return false;
+  const leftAlias = owner.aliases.has(left.normName);
+  const rightAlias = owner.aliases.has(right.normName);
+  if (leftAlias === rightAlias) return false;
+  const other = leftAlias ? right : left;
+  return other.normName === owner.subjectNorm || other.aliasNorms.includes(owner.subjectNorm);
 }
 
 /** A role label shares a fact or neighbor with one proper name. The model still has to agree. */

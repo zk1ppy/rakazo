@@ -625,6 +625,45 @@ describe("updateNeo4jExtraction", () => {
     ).rejects.toThrow(/consolidateTimeoutMs/);
   });
 
+  it("stores owner aliases and clears them when the field is blank", async () => {
+    const stored = {
+      uri: "bolt://localhost:7687",
+      username: "neo4j",
+      extract: "true",
+    };
+    const { deps, update, findUnique } = makeDeps({
+      existing: { id: "cfg-1", secretId: "secret-existing" },
+    });
+    findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: stored,
+    });
+    await updateNeo4jExtraction(deps, actor, {
+      extract: true,
+      ownerAliases: " pilote, le coureur ",
+    });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "cfg-1" },
+      data: { settings: { ...stored, ownerAliases: "pilote, le coureur" } },
+    });
+    findUnique.mockResolvedValue({
+      id: "cfg-1",
+      secretId: "secret-existing",
+      provider: "neo4j",
+      settings: { ...stored, ownerAliases: "pilote, le coureur" },
+    });
+    await updateNeo4jExtraction(deps, actor, { extract: true, ownerAliases: " " });
+    expect(update).toHaveBeenLastCalledWith({
+      where: { id: "cfg-1" },
+      data: { settings: { ...stored } },
+    });
+    await expect(
+      updateNeo4jExtraction(deps, actor, { extract: true, ownerAliases: "!!!" }),
+    ).rejects.toThrow(/Owner aliases/);
+  });
+
   it("stores dream mode without dropping extraction settings, and leaves it when omitted", async () => {
     const stored = {
       uri: "bolt://localhost:7687",
