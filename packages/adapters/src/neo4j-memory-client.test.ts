@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Neo4jMemoryDriver, Neo4jMemoryRows, Neo4jRunOptions } from "./neo4j-memory-client.js";
 import {
   clearNeo4jExtractedAt,
@@ -28,6 +28,7 @@ import {
   NEO4J_MEMORY_SCHEMA_STATEMENTS,
   noteNeo4jPairTimeout,
   purgeNeo4jChatSources,
+  readNeo4jEndpointDegrees,
   readNeo4jFactLearnedAt,
   readNeo4jFactText,
   realignNeo4jFactTimes,
@@ -322,6 +323,79 @@ describe("Neo4j memory client", () => {
       now: "2026-01-01T00:00:00.000Z",
     });
     expect(driver.calls).toHaveLength(3);
+  });
+
+  it("skips a new edge when the event or tool is already at its degree cap", async () => {
+    const driver = new FakeDriver();
+    driver.rows.push({ records: [] });
+    const created = vi.fn();
+    await expect(
+      linkNeo4jEntities(
+        driver,
+        "neo4j",
+        {
+          fromId: "hiit",
+          toId: "ada",
+          spaceId: "space-1",
+          ns: "shared",
+          type: "attended",
+          factId: "fact-1",
+          now: "2026-01-01T00:00:00.000Z",
+        },
+        undefined,
+        {
+          allow: () => "event",
+          created,
+        },
+      ),
+    ).resolves.toBe("event");
+    expect(driver.calls).toHaveLength(1);
+    expect(driver.calls[0]?.cypher).not.toContain("CREATE (a)-[r:RKZ_REL");
+    expect(created).not.toHaveBeenCalled();
+
+    driver.rows.push({ records: [] }, { records: [row({ id: "ada" })] });
+    await expect(
+      linkNeo4jEntities(
+        driver,
+        "neo4j",
+        {
+          fromId: "mcp",
+          toId: "ada",
+          spaceId: "space-1",
+          ns: "shared",
+          type: "uses",
+          factId: "fact-2",
+          now: "2026-01-01T00:00:00.000Z",
+        },
+        undefined,
+        {
+          allow: () => null,
+          created,
+        },
+      ),
+    ).resolves.toBe("created");
+    expect(created).toHaveBeenCalledWith("mcp", "ada");
+    expect(driver.calls.at(-1)?.cypher).toContain("CREATE (a)-[r:RKZ_REL {type: $type}]->(b)");
+  });
+
+  it("counts only RKZ_REL edges on Rkz nodes in the space", async () => {
+    const driver = new FakeDriver();
+    await expect(
+      readNeo4jEndpointDegrees(driver, "neo4j", { spaceId: "space-1", ids: [] }),
+    ).resolves.toEqual([]);
+    expect(driver.calls).toHaveLength(0);
+    driver.rows.push({
+      records: [row({ id: "hiit", name: "Test HIIT", entityType: "Event", degree: 51 })],
+    });
+    await expect(
+      readNeo4jEndpointDegrees(driver, "neo4j", { spaceId: "space-1", ids: ["hiit"] }),
+    ).resolves.toEqual([{ id: "hiit", name: "Test HIIT", type: "Event", degree: 51 }]);
+    const cypher = driver.calls[0]?.cypher ?? "";
+    expect(cypher).toContain("MATCH (e:Rkz {id: id, spaceId: $spaceId})");
+    expect(cypher).toContain("-[r:RKZ_REL]-");
+    expect(cypher).toContain("other.spaceId = $spaceId");
+    expect(cypher).not.toContain("RKZ_DECLINED");
+    expect(driver.calls[0]?.options.access).toBe("read");
   });
 
   it("creates one relation when the pair has none, and normalizes the type", async () => {

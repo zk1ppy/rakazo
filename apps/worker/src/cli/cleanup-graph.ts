@@ -11,8 +11,9 @@ import { createWorkerSecretStore } from "../secret-store.js";
 import { runCleanupGraph } from "./run-cleanup-graph.js";
 
 /**
- * List entities the extractor would now drop, and refusals whose fingerprint
- * no longer matches. Dry-run is the default. `--apply` deletes them.
+ * List entities the extractor would now drop, event hubs, object hubs, and
+ * refusals whose fingerprint no longer matches. Dry-run is the default.
+ * `--apply` deletes the dropped entities and the stale refusals. Hubs stay.
  *
  *   pnpm --filter @rakazo/worker memory:cleanup-graph -- --space SPACE_ID
  *   pnpm --filter @rakazo/worker memory:cleanup-graph -- --space SPACE_ID --apply

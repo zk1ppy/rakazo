@@ -14,8 +14,11 @@ import {
   assertOwnerAliases,
   capExtractedRelations,
   extractMemoryGraph,
+  isDroppedEntityName,
   isFilesystemPathName,
   isNonReferentName,
+  isOperationalNoiseName,
+  isToolHubName,
   isTrivialMemoryText,
   MEMORY_EXTRACT_INSTRUCTIONS,
   memoryExtractPrompt,
@@ -23,15 +26,19 @@ import {
   normalizeRelationType,
   parseMemoryExtraction,
   planExtractionChunks,
+  readDropOperational,
   readDroppedRelationTypes,
   readDropSnakeCaseIds,
   readExtractChatRelations,
+  readExtractMaxEventDegree,
   readExtractMaxRelations,
   readExtractMaxRelationsPerEntity,
+  readExtractMaxToolDegree,
   readExtractMaxTruncatedAttempts,
   readExtractTimeoutMs,
   readNeo4jExtractionModel,
   readOwnerAliases,
+  relationCreateCap,
   resolveExtractThinkingLevel,
 } from "./memory-extract.js";
 
@@ -546,6 +553,9 @@ describe("extraction role and measurement guards", () => {
       true,
     );
     expect(MEMORY_EXTRACT_INSTRUCTIONS).toContain("relative path");
+    expect(MEMORY_EXTRACT_INSTRUCTIONS).toContain("traces of work");
+    expect(MEMORY_EXTRACT_INSTRUCTIONS).toContain("real occasion");
+    expect(MEMORY_EXTRACT_INSTRUCTIONS).toContain("MCP server");
     expect(MEMORY_EXTRACT_INSTRUCTIONS).toContain("explicitly states");
     expect(MEMORY_EXTRACT_INSTRUCTIONS).toContain("mentioned_in");
     expect(readExtractMaxRelations({})).toBe(32);
@@ -558,6 +568,102 @@ describe("extraction role and measurement guards", () => {
     expect(readDropSnakeCaseIds({ MEMORY_EXTRACT_DROP_SNAKE_CASE_IDS: "off" })).toBe(false);
     expect(readDroppedRelationTypes({})).toEqual(new Set(["mentioned_in", "discussed_in"]));
     expect(readDroppedRelationTypes({ MEMORY_EXTRACT_DROP_RELATION_TYPES: "-" }).size).toBe(0);
+  });
+
+  it("drops file names, briefs, and outages, and caps event and tool degree", () => {
+    expect(isFilesystemPathName("grafana-homelab-alertes.md")).toBe(true);
+    expect(isFilesystemPathName("Vigierisc/ATRISC")).toBe(false);
+    expect(isFilesystemPathName("zk1ppy/servers-config")).toBe(false);
+    expect(isOperationalNoiseName("Brief 9h 2026-10-23")).toBe(true);
+    expect(isOperationalNoiseName("routine horaire v2")).toBe(true);
+    expect(isOperationalNoiseName("Outage MCP Garmin")).toBe(true);
+    expect(isOperationalNoiseName("Panne MCP Garmin")).toBe(true);
+    expect(isOperationalNoiseName("Garmin sync 2026-10-23")).toBe(true);
+    expect(isOperationalNoiseName("Garmin MCP server")).toBe(false);
+    expect(isOperationalNoiseName("Test HIIT du 27/10/2026")).toBe(false);
+    expect(isOperationalNoiseName("Unix")).toBe(false);
+    expect(isToolHubName("Garmin MCP server")).toBe(true);
+    expect(isToolHubName("hugin-sandbox")).toBe(true);
+    expect(isToolHubName("Týr")).toBe(false);
+    expect(isToolHubName("Unix")).toBe(false);
+    expect(isToolHubName("Gmail")).toBe(false);
+    expect(isDroppedEntityName("grafana-homelab-alertes.md")).toBe(true);
+    expect(isDroppedEntityName("Brief du 23/10 9h")).toBe(true);
+    expect(
+      isDroppedEntityName("Brief du 23/10 9h", {
+        dropSnakeCaseIds: true,
+        patterns: [],
+        dropOperational: false,
+      }),
+    ).toBe(false);
+    expect(readDropOperational({})).toBe(true);
+    expect(readDropOperational({ MEMORY_EXTRACT_DROP_OPERATIONAL: "off" })).toBe(false);
+    expect(readExtractMaxEventDegree({})).toBe(8);
+    expect(readExtractMaxEventDegree({ MEMORY_EXTRACT_MAX_EVENT_DEGREE: "0" })).toBe(0);
+    expect(readExtractMaxEventDegree({ MEMORY_EXTRACT_MAX_EVENT_DEGREE: "51" })).toBe(51);
+    expect(readExtractMaxEventDegree({ MEMORY_EXTRACT_MAX_EVENT_DEGREE: "nope" })).toBe(8);
+    expect(readExtractMaxToolDegree({})).toBe(4);
+    expect(readExtractMaxToolDegree({ MEMORY_EXTRACT_MAX_TOOL_DEGREE: "0" })).toBe(0);
+    expect(
+      relationCreateCap([{ type: "Event", name: "Test HIIT", degree: 51 }], { event: 8, tool: 4 }),
+    ).toBe("event");
+    expect(
+      relationCreateCap([{ type: "Event", name: "Test HIIT", degree: 7 }], { event: 8, tool: 4 }),
+    ).toBeNull();
+    expect(
+      relationCreateCap([{ type: "Event", name: "Test HIIT", degree: 51 }], { event: 0, tool: 4 }),
+    ).toBeNull();
+    expect(
+      relationCreateCap([{ type: "Object", name: "Garmin MCP server", degree: 43 }], {
+        event: 8,
+        tool: 4,
+      }),
+    ).toBe("tool");
+    expect(
+      relationCreateCap([{ type: "Object", name: "hugin-sandbox", degree: 3 }], {
+        event: 8,
+        tool: 4,
+      }),
+    ).toBeNull();
+    expect(
+      relationCreateCap([{ type: "Object", name: "Unix", degree: 21 }], { event: 8, tool: 4 }),
+    ).toBeNull();
+    expect(
+      relationCreateCap([{ type: "Person", name: "Nicolas Tremblier", degree: 289 }], {
+        event: 8,
+        tool: 4,
+      }),
+    ).toBeNull();
+    const extracted = parseMemoryExtraction(
+      JSON.stringify({
+        entities: [
+          { type: "Person", name: "Nicolas" },
+          { type: "Object", name: "grafana-homelab-alertes.md" },
+          { type: "Event", name: "Brief 9h 2026-10-23" },
+          { type: "Object", name: "routine horaire v2" },
+          { type: "Object", name: "Outage MCP Garmin" },
+          { type: "Object", name: "Garmin MCP server" },
+          { type: "Object", name: "Unix" },
+          { type: "Event", name: "Test HIIT" },
+        ],
+        relations: [
+          { source: "Test HIIT", target: "Nicolas", type: "attended" },
+          { source: "Nicolas", target: "Unix", type: "owns" },
+          { source: "Nicolas", target: "Garmin MCP server", type: "uses" },
+        ],
+      }),
+      "space-1",
+      "shared",
+    );
+    expect(extracted.entities.map((entity) => entity.name).sort()).toEqual([
+      "Garmin MCP server",
+      "Nicolas",
+      "Test HIIT",
+      "Unix",
+    ]);
+    expect(extracted.namesDropped).toBe(4);
+    expect(extracted.operationalDropped).toBe(3);
+    expect(extracted.relations).toHaveLength(3);
   });
 
   it("keeps six relations on one entity and drops mention edges", () => {
@@ -812,6 +918,32 @@ describe("extractMemoryGraph", () => {
     expect(run).toHaveBeenCalledTimes(1);
   });
 
+  it("logs operational names and degree caps on the graph write", async () => {
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "rakazo", sinks: [sink] }));
+    const reply = JSON.stringify({
+      entities: [
+        { type: "Person", name: "Nicolas" },
+        { type: "Event", name: "Brief 9h 2026-10-23" },
+        { type: "Object", name: "grafana-homelab-alertes.md" },
+      ],
+      relations: [],
+    });
+    const memory = store("Nicolas wrote the morning brief and a notes file.");
+    memory.applyExtraction.mockResolvedValueOnce({ eventDegreeCapped: 2, toolDegreeCapped: 1 });
+    await extractMemoryGraph(deps(done(reply)), payload(), memory);
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({
+        message: "memory.extract wrote a graph",
+        "memory.names_dropped": 2,
+        "memory.operational_dropped": 1,
+        "memory.event_degree_capped": 2,
+        "memory.tool_degree_capped": 1,
+        "memory.edges_written": 1,
+      }),
+    );
+  });
+
   it("keeps the fenced answer when a GLM reply leads with reasoning", async () => {
     const sink = createTestSink();
     installLogger(createLogger({ service: "rakazo", sinks: [sink] }));
@@ -837,6 +969,10 @@ describe("extractMemoryGraph", () => {
         "memory.entities_parsed": 2,
         "memory.entities_kept": 2,
         "memory.edges_written": 3,
+        "memory.names_dropped": 0,
+        "memory.operational_dropped": 0,
+        "memory.event_degree_capped": 0,
+        "memory.tool_degree_capped": 0,
       }),
     );
     expect(sink.events.some((event) => event.level === "warn")).toBe(false);
