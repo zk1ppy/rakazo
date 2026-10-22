@@ -9,6 +9,8 @@ export interface ExtractBackfillCliOptions {
   dryRun: boolean;
   force: boolean;
   repairOnly: boolean;
+  retryEmpty: boolean;
+  since?: string;
 }
 
 /**
@@ -28,11 +30,15 @@ export async function runExtractBackfill(deps: {
       dryRun: deps.options.dryRun,
       force: deps.options.force,
       repairOnly: deps.options.repairOnly,
+      retryEmpty: deps.options.retryEmpty,
+      ...(deps.options.since ? { since: deps.options.since } : {}),
     });
     const lines = [
       `dry-run ${deps.options.dryRun}`,
       `repair-only ${deps.options.repairOnly}`,
       `force ${deps.options.force}`,
+      `retry-empty ${deps.options.retryEmpty}`,
+      `since ${deps.options.since ?? "-"}`,
       `spaces ${counts.spaces}`,
       `disabled ${counts.disabled}`,
       ...loaded.failures.map((failure) => `space ${failure.spaceId} failed ${failure.reason}`),
@@ -40,6 +46,8 @@ export async function runExtractBackfill(deps: {
       `repaired ${deps.options.dryRun ? "dry-run" : counts.repaired}`,
       `skipped ${counts.skipped}`,
       `enqueued ${counts.enqueued}`,
+      `cleared ${deps.options.dryRun ? "dry-run" : counts.cleared}`,
+      `sample ${counts.sample.join(" ") || "-"}`,
       `marked ${deps.options.dryRun ? "dry-run" : counts.marked}`,
       `valid-from ${deps.options.dryRun ? "dry-run" : counts.relations}`,
       `first-seen ${deps.options.dryRun ? "dry-run" : counts.entities}`,

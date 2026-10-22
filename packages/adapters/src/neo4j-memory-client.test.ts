@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { Neo4jMemoryDriver, Neo4jMemoryRows, Neo4jRunOptions } from "./neo4j-memory-client.js";
 import {
+  clearNeo4jExtractedAt,
   collapseNeo4jParallelRelations,
   countExtractedNeo4jFacts,
   deleteNeo4jEntities,
@@ -13,6 +14,7 @@ import {
   forgetNeo4jDeclinedPair,
   linkNeo4jEntities,
   linkNeo4jFactEntity,
+  listEmptyExtractedNeo4jFacts,
   listNeo4jConsolidationEntities,
   listNeo4jDeclinedPairs,
   listNeo4jDeferredPairs,
@@ -536,6 +538,69 @@ describe("Neo4j memory client", () => {
     expect(marked).not.toContain("SET f:");
     expect(driver.calls[2]?.options.access).toBe("write");
     expect(driver.calls[2]?.params).toMatchObject({ extractedAt: "2026-10-20T01:00:00.000Z" });
+  });
+
+  it("lists and clears extracted facts that have no ABOUT edge", async () => {
+    const driver = new FakeDriver();
+    driver.rows.push({
+      records: [
+        row({
+          factId: "fact-empty",
+          ns: "shared",
+          botId: "bot-1",
+          text: "Ada founded the lab.",
+        }),
+      ],
+    });
+    await expect(
+      listEmptyExtractedNeo4jFacts(driver, "neo4j", {
+        spaceId: "space-1",
+        limit: 20,
+        skip: 0,
+        since: "2026-10-22T16:00:00.000Z",
+      }),
+    ).resolves.toEqual([
+      {
+        factId: "fact-empty",
+        ns: "shared",
+        botId: "bot-1",
+        text: "Ada founded the lab.",
+        extracted: true,
+      },
+    ]);
+    const listed = driver.calls[0]?.cypher ?? "";
+    expect(listed).toContain("f.extractedAt IS NOT NULL");
+    expect(listed).toContain("NOT (f)-[:ABOUT]->()");
+    expect(listed).toContain("coalesce(f.createdAt, f.validFrom)");
+    expect(listed).toContain("$since IS NULL");
+    expect(listed).toContain("ORDER BY f.id");
+    expect(driver.calls[0]?.params).toMatchObject({
+      since: "2026-10-22T16:00:00.000Z",
+      limit: 20,
+      skip: 0,
+    });
+    expect(driver.calls[0]?.options.access).toBe("read");
+
+    await expect(
+      clearNeo4jExtractedAt(driver, "neo4j", { spaceId: "space-1", factIds: [] }),
+    ).resolves.toEqual([]);
+    expect(driver.calls).toHaveLength(1);
+
+    driver.rows.push({ records: [row({ factId: "fact-empty" })] });
+    await expect(
+      clearNeo4jExtractedAt(driver, "neo4j", {
+        spaceId: "space-1",
+        factIds: ["fact-empty"],
+      }),
+    ).resolves.toEqual(["fact-empty"]);
+    const cleared = driver.calls[1]?.cypher ?? "";
+    expect(cleared).toContain("f.id IN $factIds");
+    expect(cleared).toContain("f.extractedAt IS NOT NULL");
+    expect(cleared).toContain("NOT (f)-[:ABOUT]->()");
+    expect(cleared).toContain("REMOVE f.extractedAt");
+    expect(cleared).not.toContain("REMOVE f:");
+    expect(driver.calls[1]?.options.access).toBe("write");
+    expect(driver.calls[1]?.params).toMatchObject({ factIds: ["fact-empty"] });
   });
 
   it("lists consolidation entities in id order without interpolating names", async () => {

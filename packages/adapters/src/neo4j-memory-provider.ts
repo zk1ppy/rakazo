@@ -51,6 +51,7 @@ import type {
   Neo4jMemoryDriverFactory,
 } from "./neo4j-memory-client.js";
 import {
+  clearNeo4jExtractedAt,
   collapseNeo4jParallelRelations,
   countExtractedNeo4jFacts,
   deleteNeo4jEntities,
@@ -62,6 +63,7 @@ import {
   forgetNeo4jFact,
   linkNeo4jEntities,
   linkNeo4jFactEntity,
+  listEmptyExtractedNeo4jFacts,
   listNeo4jCleanupDeclined,
   listNeo4jCleanupEntities,
   listNeo4jConsolidationEntities,
@@ -741,6 +743,37 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
       await this.ready(signal),
       this.connection.database,
       { spaceId },
+      signal,
+    );
+  }
+
+  async listEmptyExtractedFacts(
+    spaceId: string,
+    input: { limit: number; skip: number; since?: string },
+    signal?: AbortSignal,
+  ) {
+    return listEmptyExtractedNeo4jFacts(
+      await this.ready(signal),
+      this.connection.database,
+      {
+        spaceId,
+        limit: input.limit,
+        skip: input.skip,
+        since: input.since ?? null,
+      },
+      signal,
+    );
+  }
+
+  async clearExtractedAt(
+    spaceId: string,
+    factIds: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<string[]> {
+    return clearNeo4jExtractedAt(
+      await this.ready(signal),
+      this.connection.database,
+      { spaceId, factIds },
       signal,
     );
   }

@@ -49,7 +49,14 @@ function jobs(): JobPublisher & {
 }
 
 function options(overrides: Partial<BackfillExtractOptions> = {}): BackfillExtractOptions {
-  return { limit: 100, dryRun: false, force: false, repairOnly: false, ...overrides };
+  return {
+    limit: 100,
+    dryRun: false,
+    force: false,
+    repairOnly: false,
+    retryEmpty: false,
+    ...overrides,
+  };
 }
 
 describe("parseBackfillExtractArgs", () => {
@@ -59,10 +66,18 @@ describe("parseBackfillExtractArgs", () => {
       dryRun: false,
       force: false,
       repairOnly: false,
+      retryEmpty: false,
     });
     expect(
       parseBackfillExtractArgs(["--dry-run", "--space", " space-9 ", "--limit", "25"]),
-    ).toEqual({ spaceId: "space-9", limit: 25, dryRun: true, force: false, repairOnly: false });
+    ).toEqual({
+      spaceId: "space-9",
+      limit: 25,
+      dryRun: true,
+      force: false,
+      repairOnly: false,
+      retryEmpty: false,
+    });
   });
 
   it("skips a pnpm -- separator", () => {
@@ -75,6 +90,7 @@ describe("parseBackfillExtractArgs", () => {
       dryRun: true,
       force: false,
       repairOnly: false,
+      retryEmpty: false,
     });
     expect(parseBackfillExtractArgs(["--", "--space", "X", "--limit", "10"])).toEqual({
       spaceId: "X",
@@ -82,6 +98,7 @@ describe("parseBackfillExtractArgs", () => {
       dryRun: false,
       force: false,
       repairOnly: false,
+      retryEmpty: false,
     });
   });
 
@@ -93,6 +110,54 @@ describe("parseBackfillExtractArgs", () => {
     });
     expect(() => parseBackfillExtractArgs(["--force", "--repair-only"])).toThrow(
       /cannot be used together/,
+    );
+  });
+
+  it("accepts retry-empty with since, including a leading separator", () => {
+    expect(
+      parseBackfillExtractArgs([
+        "--",
+        "--retry-empty",
+        "--since",
+        "2026-10-22T16:00:00Z",
+        "--space",
+        "space-1",
+        "--limit",
+        "14",
+        "--dry-run",
+      ]),
+    ).toEqual({
+      spaceId: "space-1",
+      limit: 14,
+      dryRun: true,
+      force: false,
+      repairOnly: false,
+      retryEmpty: true,
+      since: "2026-10-22T16:00:00.000Z",
+    });
+    expect(parseBackfillExtractArgs(["--retry-empty"])).toMatchObject({
+      retryEmpty: true,
+      dryRun: false,
+    });
+    expect(parseBackfillExtractArgs(["--retry-empty"])).not.toHaveProperty("since");
+  });
+
+  it("rejects since without retry-empty, combined modes, and a bad date", () => {
+    expect(() => parseBackfillExtractArgs(["--since", "2026-10-22T16:00:00Z"])).toThrow(
+      /--since requires --retry-empty/,
+    );
+    expect(() => parseBackfillExtractArgs(["--retry-empty", "--force"])).toThrow(
+      /cannot be used together/,
+    );
+    expect(() => parseBackfillExtractArgs(["--retry-empty", "--repair-only"])).toThrow(
+      /cannot be used together/,
+    );
+    expect(() => parseBackfillExtractArgs(["--retry-empty", "--since"])).toThrow(/ISO date/);
+    expect(() => parseBackfillExtractArgs(["--retry-empty", "--since", "yesterday"])).toThrow(
+      /ISO date/,
+    );
+    expect(() => parseBackfillExtractArgs(["--retry-empty", "--since", "2026-13-40"])).toThrow(
+      /ISO date/,
     );
   });
 
@@ -302,6 +367,67 @@ describe("backfillMemoryExtraction", () => {
       skipped: 5,
       enqueued: 0,
       repairOnly: true,
+    });
+  });
+
+  it("re-enqueues empty extractions and clears the marker only outside a dry run", async () => {
+    const listed = vi.fn(async (input: { limit: number; skip: number; since?: string }) => {
+      expect(input.since).toBe("2026-10-22T16:00:00.000Z");
+      if (input.skip > 0) return [];
+      return [
+        fact({ factId: "empty-1", text: "ok" }),
+        fact({ factId: "empty-2" }),
+        fact({ factId: "empty-3" }),
+        fact({ factId: "kept-edge" }),
+      ];
+    });
+    const listFacts = vi.fn(async () => [fact({ factId: "unextracted" })]);
+    const clearExtractedAt = vi.fn(async (ids: readonly string[]) =>
+      ids.filter((id) => id !== "kept-edge"),
+    );
+    const queue = jobs();
+    const counts = await backfillMemoryExtraction(
+      [space(listFacts, { listEmptyExtractedFacts: listed, clearExtractedAt })],
+      queue,
+      options({
+        retryEmpty: true,
+        since: "2026-10-22T16:00:00.000Z",
+        limit: 10,
+      }),
+    );
+    expect(listFacts).not.toHaveBeenCalled();
+    expect(clearExtractedAt).toHaveBeenCalledWith(["empty-2", "empty-3", "kept-edge"]);
+    expect(queue.enqueue).toHaveBeenCalledTimes(2);
+    const ids = queue.enqueue.mock.calls.map((call) => {
+      const job = call[0];
+      if (job?.name !== "memory.extract") throw new Error("expected memory.extract");
+      return job.payload.factId;
+    });
+    expect(ids).toEqual(["empty-2", "empty-3"]);
+    expect(counts).toMatchObject({
+      enqueued: 2,
+      cleared: 2,
+      skipped: 1,
+      sample: ["empty-2", "empty-3"],
+      retryEmpty: true,
+      dryRun: false,
+    });
+
+    const dryQueue = jobs();
+    const dryClear = vi.fn(async (ids: readonly string[]) => ids);
+    const dryCounts = await backfillMemoryExtraction(
+      [space(async () => [], { listEmptyExtractedFacts: listed, clearExtractedAt: dryClear })],
+      dryQueue,
+      options({ retryEmpty: true, since: "2026-10-22T16:00:00.000Z", dryRun: true, limit: 10 }),
+    );
+    expect(dryClear).not.toHaveBeenCalled();
+    expect(dryQueue.enqueue).not.toHaveBeenCalled();
+    expect(dryCounts).toMatchObject({
+      enqueued: 3,
+      cleared: 0,
+      skipped: 1,
+      sample: ["empty-2", "empty-3", "kept-edge"],
+      dryRun: true,
     });
   });
 

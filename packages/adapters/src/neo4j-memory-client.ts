@@ -847,9 +847,9 @@ export interface Neo4jUnextractedFact {
  *
  * Already extracted means `extractedAt` is set or the fact has an outgoing
  * :ABOUT edge. The extraction job writes `extractedAt` after the last chunk,
- * including a result that stores no entities. Facts extracted before that
- * property existed are recognized by the :ABOUT edge. `includeExtracted`
- * returns those facts as well.
+ * including a complete result that stores no entities. A truncated reply does
+ * not. Facts extracted before the property existed are recognized by the
+ * :ABOUT edge. `includeExtracted` returns those facts as well.
  */
 export async function listUnextractedNeo4jFacts(
   driver: Neo4jMemoryDriver,
@@ -929,6 +929,82 @@ export async function stampNeo4jExtractedFacts(
     { database, access: "write", signal },
   );
   return asNumber(result.records[0]?.get("marked"));
+}
+
+/**
+ * Live facts whose extraction stored nothing: `extractedAt` is set and the
+ * fact has no outgoing :ABOUT edge. `since` keeps a fact when that marker, or
+ * the fact's stored time, is at or after an ISO timestamp. Null `since` keeps
+ * every empty extraction.
+ */
+export async function listEmptyExtractedNeo4jFacts(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string; limit: number; skip: number; since?: string | null },
+  signal?: AbortSignal,
+): Promise<Neo4jUnextractedFact[]> {
+  const result = await driver.run(
+    `MATCH (f:Rkz:Fact {spaceId: $spaceId})
+     WHERE f.expiredAt IS NULL
+       AND f.extractedAt IS NOT NULL
+       AND NOT (f)-[:ABOUT]->()
+       AND (
+         $since IS NULL
+         OR f.extractedAt >= $since
+         OR coalesce(f.createdAt, f.validFrom) >= $since
+       )
+     RETURN f.id AS factId, f.ns AS ns, f.botId AS botId, f.text AS text
+     ORDER BY f.id
+     SKIP $skip
+     LIMIT $limit`,
+    {
+      spaceId: input.spaceId,
+      limit: input.limit,
+      skip: input.skip,
+      since: input.since ?? null,
+    },
+    { database, access: "read", signal },
+  );
+  const facts: Neo4jUnextractedFact[] = [];
+  for (const record of result.records) {
+    const factId = asString(record.get("factId"));
+    const ns = asString(record.get("ns"));
+    const botId = asString(record.get("botId"));
+    const text = asString(record.get("text"));
+    if (!factId || !ns || !botId) continue;
+    facts.push({ factId, ns, botId, text, extracted: true });
+  }
+  return facts;
+}
+
+/**
+ * Drop `extractedAt` on facts that still have no outgoing :ABOUT edge.
+ * Returns the ids that were cleared. An empty id list does not touch the graph.
+ */
+export async function clearNeo4jExtractedAt(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string; factIds: readonly string[] },
+  signal?: AbortSignal,
+): Promise<string[]> {
+  if (input.factIds.length === 0) return [];
+  const result = await driver.run(
+    `MATCH (f:Rkz:Fact {spaceId: $spaceId})
+     WHERE f.expiredAt IS NULL
+       AND f.id IN $factIds
+       AND f.extractedAt IS NOT NULL
+       AND NOT (f)-[:ABOUT]->()
+     REMOVE f.extractedAt
+     RETURN f.id AS factId`,
+    { spaceId: input.spaceId, factIds: [...input.factIds] },
+    { database, access: "write", signal },
+  );
+  const cleared: string[] = [];
+  for (const record of result.records) {
+    const factId = asString(record.get("factId"));
+    if (factId) cleared.push(factId);
+  }
+  return cleared;
 }
 
 /** Record that extraction finished for this fact. Overwrites an older marker. */
