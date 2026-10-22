@@ -71,6 +71,7 @@ x-app-environment: &app-environment
   MAX_TOOL_CALLS_PER_TURN:
   MODEL_STREAM_MAX_RETRIES:
   MEMORY_CONSOLIDATE_TIMEOUT_MS:
+  MEMORY_CONSOLIDATE_JOB_BUDGET_MS:
   MEMORY_CONSOLIDATE_THINKING_LEVEL:
   MEMORY_CONSOLIDATE_MAX_OUTPUT_TOKENS:
   MEMORY_EXTRACT_TIMEOUT_MS:
@@ -388,12 +389,16 @@ services:
     # Directly, not through pnpm, so a stop reaches it (see the api command).
     working_dir: /app/apps/worker
     command: ["node", "--enable-source-maps", "dist/index.js"]
+    # Covers WORKER_SHUTDOWN_GRACE_MS (default 10s) plus the abort settle.
+    stop_grace_period: 45s
     environment:
       <<: *app-environment
       GRAPHILE_WORKER_CONCURRENCY:
       WORKER_SCHEMA_READY_TIMEOUT_MS:
       WORKER_SCHEMA_READY_DELAY_MS:
       WORKER_SCHEMA_READY_MAX_DELAY_MS:
+      WORKER_SHUTDOWN_GRACE_MS:
+      WORKER_UNLOCK_STALE_LOCKS_AFTER_MS:
     volumes:
       - ../../data:/data
     depends_on:

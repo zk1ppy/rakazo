@@ -16,6 +16,7 @@ import { recordUsage } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import { z } from "zod";
 import { resolveDeploymentModel } from "./deployment-model.js";
+import { combineJobAbort, JobAbortedError, throwIfJobAborted } from "./job-abort.js";
 import type { Neo4jEntityType } from "./neo4j-memory-client.js";
 import { NEO4J_ENTITY_TYPES } from "./neo4j-memory-client.js";
 import { EXTRACT_ANSWER_TOKENS, extractionThinkingLevel } from "./pi-runtime-limits.js";
@@ -951,6 +952,7 @@ async function callExtractor(
   stopReason?: string;
   usage?: Extract<AgentRuntimeEvent, { type: "usage" }>;
 }> {
+  throwIfJobAborted();
   const timeoutMs = readExtractTimeoutMs();
   const thinkingLevel = resolveExtractThinkingLevel(model);
   const outputCap = readExtractMaxOutputTokens();
@@ -996,7 +998,7 @@ async function callExtractor(
         spaceId: payload.spaceId,
         userId: payload.userId,
         botId: payload.botId,
-        signal: controller.signal,
+        signal: combineJobAbort(controller.signal),
       },
     )) {
       if (event.type === "usage") {
@@ -1010,6 +1012,8 @@ async function callExtractor(
       }
     }
   } catch (error) {
+    if (error instanceof JobAbortedError) throw error;
+    throwIfJobAborted();
     if (isRateLimitFailure(error)) return { kind: "rate_limit", text: "" };
     const reason = error instanceof Error ? error.message : "model call failed";
     if (isMemoryModelTimeout(error, controller.signal)) {
@@ -1027,6 +1031,7 @@ async function callExtractor(
   } finally {
     clearTimeout(timer);
   }
+  throwIfJobAborted();
   if (controller.signal.aborted) {
     logExtractTimeout(payload, chunkIndex, timeoutMs, "Request was aborted", reportedUsage);
     return { kind: "timeout", text: "" };

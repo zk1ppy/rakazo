@@ -290,6 +290,7 @@ import {
   selectCompactedHistory,
   shouldEnqueueCompaction,
 } from "./history-compaction.js";
+import { currentJobAbortSignal } from "./job-abort.js";
 import {
   assertConnectorToolArgs,
   CATALOG_EXECUTE,
@@ -3801,9 +3802,16 @@ export function createRunExecutor(deps: ExecutorDeps) {
         runAbortController = new AbortController();
         if (!leaseValid) runAbortController.abort();
         if (deps.shutdownSignal?.aborted) runAbortController.abort(deps.shutdownSignal.reason);
+        const jobAbort = currentJobAbortSignal();
+        if (jobAbort?.aborted) runAbortController.abort(jobAbort.reason);
         const onShutdown = () => runAbortController?.abort(deps.shutdownSignal?.reason);
+        const onJobAbort = () => runAbortController?.abort(jobAbort?.reason);
         deps.shutdownSignal?.addEventListener("abort", onShutdown);
-        detachShutdown = () => deps.shutdownSignal?.removeEventListener("abort", onShutdown);
+        jobAbort?.addEventListener("abort", onJobAbort);
+        detachShutdown = () => {
+          deps.shutdownSignal?.removeEventListener("abort", onShutdown);
+          jobAbort?.removeEventListener("abort", onJobAbort);
+        };
         const composioRows = storedConnections.filter(
           (connection) => connection.connectorId === "composio",
         );

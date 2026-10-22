@@ -19,6 +19,7 @@ import {
   classifyConsolidationPair,
   consolidateMemoryGraph,
   consolidationEntityFingerprint,
+  DEFAULT_CONSOLIDATE_JOB_BUDGET_MS,
   DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
   DEFAULT_CONSOLIDATE_THINKING_LEVEL,
   DEFAULT_CONSOLIDATE_TIMEOUT_MS,
@@ -32,6 +33,7 @@ import {
   planCanonicalRename,
   previewMemoryConsolidation,
   readConsolidateCollapseRelationTypes,
+  readConsolidateJobBudgetMs,
   readConsolidateMaxPairTimeouts,
   readConsolidateModelSettings,
   readConsolidateSkipTypes,
@@ -993,6 +995,77 @@ describe("consolidateMemoryGraph", () => {
         normName: "nicolas tremblier",
       }),
     ]);
+  });
+
+  it("keeps a 20 minute consolidate job budget unless a bounded value is set", () => {
+    expect(DEFAULT_CONSOLIDATE_JOB_BUDGET_MS).toBe(1_200_000);
+    expect(readConsolidateJobBudgetMs({})).toBe(DEFAULT_CONSOLIDATE_JOB_BUDGET_MS);
+    expect(readConsolidateJobBudgetMs({ MEMORY_CONSOLIDATE_JOB_BUDGET_MS: "" })).toBe(
+      DEFAULT_CONSOLIDATE_JOB_BUDGET_MS,
+    );
+    expect(readConsolidateJobBudgetMs({ MEMORY_CONSOLIDATE_JOB_BUDGET_MS: "nope" })).toBe(
+      DEFAULT_CONSOLIDATE_JOB_BUDGET_MS,
+    );
+    expect(readConsolidateJobBudgetMs({ MEMORY_CONSOLIDATE_JOB_BUDGET_MS: "1000" })).toBe(
+      DEFAULT_CONSOLIDATE_JOB_BUDGET_MS,
+    );
+    expect(readConsolidateJobBudgetMs({ MEMORY_CONSOLIDATE_JOB_BUDGET_MS: "3600000" })).toBe(
+      DEFAULT_CONSOLIDATE_JOB_BUDGET_MS,
+    );
+    expect(readConsolidateJobBudgetMs({ MEMORY_CONSOLIDATE_JOB_BUDGET_MS: "60000" })).toBe(60_000);
+  });
+
+  it("stops the page at the consolidate time budget and continues the same page", async () => {
+    const previousBudget = process.env.MEMORY_CONSOLIDATE_JOB_BUDGET_MS;
+    process.env.MEMORY_CONSOLIDATE_JOB_BUDGET_MS = "60000";
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    let calls = 0;
+    const run: AgentRuntime["run"] = async function* () {
+      calls += 1;
+      now += 60_000;
+      yield { type: "done" as const, text: '{"same":true}' };
+    };
+    const store = pageStore([
+      entity({ id: "short" }),
+      entity({ id: "full", name: "Nicolas Tremblier", normName: "nicolas tremblier" }),
+      entity({ id: "ada", name: "Ada", normName: "ada" }),
+      entity({ id: "ada-full", name: "Ada Lovelace", normName: "ada lovelace" }),
+    ]);
+    const queue = jobs();
+    const sink = createTestSink();
+    const previousLogger = getLogger();
+    installLogger(createLogger({ service: "test", sinks: [sink] }));
+    try {
+      await consolidateMemoryGraph(deps(run, queue), payload, store);
+    } finally {
+      nowSpy.mockRestore();
+      installLogger(previousLogger);
+      if (previousBudget === undefined) delete process.env.MEMORY_CONSOLIDATE_JOB_BUDGET_MS;
+      else process.env.MEMORY_CONSOLIDATE_JOB_BUDGET_MS = previousBudget;
+    }
+    expect(calls).toBe(1);
+    expect(store.merges).toHaveLength(1);
+    const job = queue.enqueue.mock.calls[0]?.[0];
+    expect(job?.name).toBe("memory.consolidate");
+    if (job?.name !== "memory.consolidate") throw new Error("expected memory.consolidate");
+    expect(job.payload.attempt).toBe(0);
+    expect(job.payload.scheduleGeneration).toBe(1);
+    expect(job.payload.afterId).toBeUndefined();
+    expect(sink.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          message: "memory.consolidate finished a page",
+          "memory.follow_up": true,
+          "memory.llm_calls": 1,
+        }),
+        expect.objectContaining({
+          message: "memory.consolidate stopped at the time budget",
+          "memory.budget_ms": 60_000,
+          "memory.follow_up": true,
+        }),
+      ]),
+    );
   });
 
   it("reads consolidate model settings and falls back when they are blank or invalid", () => {

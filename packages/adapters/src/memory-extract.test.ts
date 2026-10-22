@@ -8,6 +8,7 @@ import type {
 import { TransientModelError } from "@rakazo/adapter-kit";
 import { createLogger, createTestSink, getLogger, installLogger } from "@rakazo/logging";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { JobAbortedError, runWithJobAbort } from "./job-abort.js";
 import type { MemoryExtractDeps, MemoryExtractStore } from "./memory-extract.js";
 import {
   assertOwnerAliases,
@@ -1019,6 +1020,32 @@ describe("extractMemoryGraph", () => {
     expect(unusedPin).not.toHaveBeenCalled();
     expect(unsetDefault).toHaveBeenCalledWith({ userId: "user-1", spaceId: "space-1" });
     expect(unsetDefault.mock.calls[0]?.[0]).not.toHaveProperty("botId");
+  });
+
+  it("leaves the extraction job when the worker shuts down mid-call", async () => {
+    const queue = jobs();
+    const memory = store("Ada Lovelace founded the Analytical Society in London.");
+    const run = vi.fn<AgentRuntime["run"]>(async function* (_request, context) {
+      const signal = context?.signal;
+      await new Promise<never>((_resolve, reject) => {
+        if (!signal || signal.aborted) {
+          reject(new Error("Request was aborted"));
+          return;
+        }
+        signal.addEventListener("abort", () => reject(new Error("Request was aborted")), {
+          once: true,
+        });
+      });
+    });
+    const shutdown = new AbortController();
+    const pending = runWithJobAbort(shutdown.signal, () =>
+      extractMemoryGraph(deps(run, queue), payload(), memory),
+    );
+    await vi.waitFor(() => expect(run).toHaveBeenCalled());
+    shutdown.abort();
+    await expect(pending).rejects.toBeInstanceOf(JobAbortedError);
+    expect(queue.enqueue).not.toHaveBeenCalled();
+    expect(memory.markExtracted).not.toHaveBeenCalled();
   });
 
   it("retries an aborted extraction instead of failing it permanently", async () => {
