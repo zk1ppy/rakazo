@@ -7,6 +7,7 @@ import { recordUsage } from "@rakazo/db";
 import { getLogger, unwrapJobPayload } from "@rakazo/logging";
 import { formatCurrentTimeInstruction } from "./current-time.js";
 import { resolveDeploymentModel } from "./deployment-model.js";
+import { combineJobAbort, throwIfJobAborted } from "./job-abort.js";
 import type {
   ConfiguredMemoryProvider,
   MemoryProviderResolver,
@@ -388,7 +389,7 @@ export async function compactHistory(deps: CompactHistoryDeps, threadId: string)
       traceId: `compact:${threadId}`,
       spaceId: thread.spaceId,
       userId: thread.userId,
-      signal: AbortSignal.timeout(summarizeTimeoutMs(prompt.length)),
+      signal: combineJobAbort(AbortSignal.timeout(summarizeTimeoutMs(prompt.length))),
     },
   )) {
     if (event.type === "usage" && !event.accounted) {
@@ -409,6 +410,7 @@ export async function compactHistory(deps: CompactHistoryDeps, threadId: string)
       else summary = text;
     }
   }
+  throwIfJobAborted();
   if (runtimeReportedFailure) {
     throw new Error(`history.compact summarizer failed for thread ${threadId}`);
   }

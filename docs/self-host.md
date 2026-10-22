@@ -529,6 +529,8 @@ SIGNUP_ALLOWLIST=you@example.com,@company.com
 SANDBOX_PROVIDER=docker   # or none, e2b, daytona, createos, boat. Keep fake only for pnpm test.
 AGENT_RUNTIME=pi          # Keep scripted only for pnpm test.
 WAKEUP_DRIVER=graphile
+# WORKER_SHUTDOWN_GRACE_MS=10000
+# WORKER_UNLOCK_STALE_LOCKS_AFTER_MS=
 SANDBOX_IDLE_MS=600000    # pause or stop after 10 minutes idle; 0 disables idle sleep
 # Set 0 when self-hosting with Docker, where an idle computer costs nothing, to keep long-running apps and sessions up.
 # E2B, CreateOS and Boat still apply their own timeouts.
@@ -539,6 +541,10 @@ MAX_TOOL_CALLS_PER_TURN=  # optional Pi turn tool-call fuse; unset/0 = unlimited
 # and extraction 90000 ms with the connection cap. A saved Neo4j consolidate
 # setting wins. MEMORY_EXTRACT_THINKING_LEVEL does not override a connection minimum.
 # MEMORY_CONSOLIDATE_TIMEOUT_MS=180000
+# One consolidation job, milliseconds, 60000-2700000. Default 1200000 (20 minutes).
+# The page stops there and the rest is enqueued. One confirmation already running
+# can finish after that.
+# MEMORY_CONSOLIDATE_JOB_BUDGET_MS=1200000
 # MEMORY_EXTRACT_TIMEOUT_MS=90000
 # MEMORY_CONSOLIDATE_THINKING_LEVEL=low
 # MEMORY_EXTRACT_THINKING_LEVEL=
@@ -1332,7 +1338,9 @@ GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env -f infra/compose/do
 are running. The API container runs the migration step (`db:deploy`) before it starts serving, so migration
 failure keeps health red. If the worker process starts while that step is still applying tables or
 runtime grants, it waits and retries (`WORKER_SCHEMA_READY_TIMEOUT_MS`, default 120000 ms) instead of
-exiting on a missing relation or a missing `graphile_worker` grant. A failed CLI recreate does not auto-roll back; recover with the previous
+exiting on a missing relation or a missing `graphile_worker` grant. A redeploy that kills the worker
+mid-job needs a stop grace long enough for that job to abort and drop its queue lock; see
+[Worker stop](#worker-stop). A failed CLI recreate does not auto-roll back; recover with the previous
 `RAKAZO_IMAGE_TAG` (or rebuild `local`) and `up -d --wait --pull never`.
 
 The updater sidecar has its own image and tag so an update never recreates the process performing
@@ -1567,6 +1575,31 @@ Enabling the `updater` profile requires `RAKAZO_UPDATER_TOKEN` to be a dedicated
 least 32 characters in production). It must differ from `BETTER_AUTH_SECRET`,
 `SANDBOX_SUPERVISOR_TOKEN`, and `SCREEN_PROXY_SECRET`. Leave the profile disabled if you would
 rather not grant the capability.
+
+## Worker stop
+
+On SIGTERM or SIGINT the worker stops taking jobs through graphile-worker's `runner.stop`
+(`gracefulShutdown`). `WORKER_SHUTDOWN_GRACE_MS` (default 10000) is how long a running job may
+finish before its abort signal fires. Model calls see that signal and stop. The worker then calls
+`graphile_worker.force_unlock_workers` for its own pool id and gives back the attempt the lock had
+already counted, so the same job can run again. The process stop grace has to cover that wait plus
+about 10 seconds for the model call to notice the abort and for the unlock to commit.
+
+On Kubernetes set `terminationGracePeriodSeconds` to at least 45 with the default, and to 60 when
+`WORKER_SHUTDOWN_GRACE_MS` is 20000. Compose sets the worker `stop_grace_period` to 45s. A shorter
+grace kills the process while the queue is still locked; graphile only clears that lock after 4
+hours.
+
+`WORKER_UNLOCK_STALE_LOCKS_AFTER_MS` is off when unset or 0. When set, startup releases job and
+queue locks older than that and held by another worker id, and logs each one with the job id, queue,
+and previous worker id. The lock is held for the whole job, not for one model call, so the threshold
+has to be longer than the longest job. A rolling update starts the new pod while the old one is
+still running, and a short threshold unlocks that live job so both run it. Leave the variable unset
+whenever more than one worker uses the database. A single replica can set 3600000 (60 minutes).
+That is safe with a Recreate strategy, which stops the old pod before the new one starts, or when
+no job can run longer than the threshold. `MEMORY_CONSOLIDATE_JOB_BUDGET_MS` (default 1200000,
+20 minutes) stops a consolidation page once that budget is spent and enqueues the rest, so that
+job stays inside the 60 minute window aside from the confirmation already in flight.
 
 ## Other deployment layouts
 
