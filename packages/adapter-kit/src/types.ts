@@ -705,6 +705,11 @@ export interface BackgroundJobPayloads {
     maxChunkChars: number;
     chunkIndex: number;
     attempt: number;
+    /**
+     * Truncations and timeouts already spent on this fact. Unset means none.
+     * The next stall at the cap marks the fact failed instead of rescheduling.
+     */
+    truncatedAttempts?: number;
     scheduleGeneration: number;
   };
   /**

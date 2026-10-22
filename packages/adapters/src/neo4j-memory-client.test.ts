@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { Neo4jMemoryDriver, Neo4jMemoryRows, Neo4jRunOptions } from "./neo4j-memory-client.js";
 import {
+  clearNeo4jExtractedAt,
   collapseNeo4jParallelRelations,
   countExtractedNeo4jFacts,
   deleteNeo4jEntities,
@@ -13,11 +14,13 @@ import {
   forgetNeo4jDeclinedPair,
   linkNeo4jEntities,
   linkNeo4jFactEntity,
+  listEmptyExtractedNeo4jFacts,
   listNeo4jConsolidationEntities,
   listNeo4jDeclinedPairs,
   listNeo4jDeferredPairs,
   listUnextractedNeo4jFacts,
   markNeo4jFactExtracted,
+  markNeo4jFactExtractFailed,
   mergeExtractedNeo4jEntity,
   mergeNeo4jDuplicateEntity,
   NEO4J_ENTITY_FULLTEXT_INDEX,
@@ -458,6 +461,7 @@ describe("Neo4j memory client", () => {
     ]);
     const cypher = driver.calls[0]?.cypher ?? "";
     expect(cypher).toContain("expiredAt IS NULL");
+    expect(cypher).toContain("f.extractFailedAt IS NULL");
     expect(cypher).toContain("f.extractedAt IS NULL");
     expect(cypher).toContain("NOT (f)-[:ABOUT]->()");
     expect(cypher).toContain("$includeExtracted");
@@ -494,6 +498,7 @@ describe("Neo4j memory client", () => {
       },
     ]);
     expect(driver.calls[1]?.params).toMatchObject({ includeExtracted: true });
+    expect(driver.calls[1]?.cypher).toContain("f.extractFailedAt IS NULL");
     expect(driver.calls[1]?.cypher).toContain("f.extractedAt IS NOT NULL OR (f)-[:ABOUT]->()");
   });
 
@@ -518,6 +523,7 @@ describe("Neo4j memory client", () => {
     const stamped = driver.calls[1]?.cypher ?? "";
     expect(stamped).toContain("(f:Rkz:Fact {spaceId: $spaceId})-[:ABOUT]->()");
     expect(stamped).toContain("f.extractedAt IS NULL");
+    expect(stamped).toContain("f.extractFailedAt IS NULL");
     expect(stamped).toContain(
       "SET f.extractedAt = coalesce(f.createdAt, f.validFrom, $extractedAt)",
     );
@@ -533,9 +539,100 @@ describe("Neo4j memory client", () => {
     const marked = driver.calls[2]?.cypher ?? "";
     expect(marked).toContain("MATCH (f:Rkz:Fact {id: $factId, spaceId: $spaceId, ns: $ns})");
     expect(marked).toContain("SET f.extractedAt = $extractedAt");
+    expect(marked).toContain("REMOVE f.extractFailedAt, f.extractFailedReason");
     expect(marked).not.toContain("SET f:");
+    expect(marked).not.toContain("REMOVE f:");
     expect(driver.calls[2]?.options.access).toBe("write");
     expect(driver.calls[2]?.params).toMatchObject({ extractedAt: "2026-10-20T01:00:00.000Z" });
+  });
+
+  it("records a durable stall without setting extractedAt", async () => {
+    const driver = new FakeDriver();
+    await markNeo4jFactExtractFailed(driver, "neo4j", {
+      factId: "fact-1",
+      spaceId: "space-1",
+      ns: "shared",
+      extractFailedAt: "2026-10-22T18:00:00.000Z",
+      reason: "timeout",
+    });
+    const failed = driver.calls[0]?.cypher ?? "";
+    expect(failed).toContain("SET f.extractFailedAt = $extractFailedAt");
+    expect(failed).toContain("f.extractFailedReason = $reason");
+    expect(failed).not.toContain("extractedAt");
+    expect(failed).not.toContain("SET f:");
+    expect(driver.calls[0]?.options.access).toBe("write");
+    expect(driver.calls[0]?.params).toMatchObject({
+      extractFailedAt: "2026-10-22T18:00:00.000Z",
+      reason: "timeout",
+    });
+  });
+
+  it("lists and clears extracted facts that have no ABOUT edge", async () => {
+    const driver = new FakeDriver();
+    driver.rows.push({
+      records: [
+        row({
+          factId: "fact-empty",
+          ns: "shared",
+          botId: "bot-1",
+          text: "Ada founded the lab.",
+        }),
+      ],
+    });
+    await expect(
+      listEmptyExtractedNeo4jFacts(driver, "neo4j", {
+        spaceId: "space-1",
+        limit: 20,
+        skip: 0,
+        since: "2026-10-22T16:00:00.000Z",
+      }),
+    ).resolves.toEqual([
+      {
+        factId: "fact-empty",
+        ns: "shared",
+        botId: "bot-1",
+        text: "Ada founded the lab.",
+        extracted: true,
+      },
+    ]);
+    const listed = driver.calls[0]?.cypher ?? "";
+    expect(listed).toContain("f.extractedAt IS NOT NULL");
+    expect(listed).toContain("f.extractFailedAt IS NULL");
+    expect(listed).toContain("$includeFailed AND f.extractFailedAt IS NOT NULL");
+    expect(listed).toContain("f.extractFailedAt >= $since");
+    expect(listed).toContain("NOT (f)-[:ABOUT]->()");
+    expect(listed).toContain("coalesce(f.createdAt, f.validFrom)");
+    expect(listed).toContain("$since IS NULL");
+    expect(listed).toContain("ORDER BY f.id");
+    expect(driver.calls[0]?.params).toMatchObject({
+      since: "2026-10-22T16:00:00.000Z",
+      includeFailed: false,
+      limit: 20,
+      skip: 0,
+    });
+    expect(driver.calls[0]?.options.access).toBe("read");
+
+    await expect(
+      clearNeo4jExtractedAt(driver, "neo4j", { spaceId: "space-1", factIds: [] }),
+    ).resolves.toEqual([]);
+    expect(driver.calls).toHaveLength(1);
+
+    driver.rows.push({ records: [row({ factId: "fact-empty" })] });
+    await expect(
+      clearNeo4jExtractedAt(driver, "neo4j", {
+        spaceId: "space-1",
+        factIds: ["fact-empty"],
+      }),
+    ).resolves.toEqual(["fact-empty"]);
+    const cleared = driver.calls[1]?.cypher ?? "";
+    expect(cleared).toContain("f.id IN $factIds");
+    expect(cleared).toContain("f.extractedAt IS NOT NULL");
+    expect(cleared).toContain("f.extractFailedAt IS NOT NULL");
+    expect(cleared).toContain("NOT (f)-[:ABOUT]->()");
+    expect(cleared).toContain("REMOVE f.extractedAt, f.extractFailedAt, f.extractFailedReason");
+    expect(cleared).not.toContain("REMOVE f:");
+    expect(driver.calls[1]?.options.access).toBe("write");
+    expect(driver.calls[1]?.params).toMatchObject({ factIds: ["fact-empty"] });
   });
 
   it("lists consolidation entities in id order without interpolating names", async () => {

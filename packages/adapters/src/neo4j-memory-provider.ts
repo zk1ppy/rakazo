@@ -51,6 +51,7 @@ import type {
   Neo4jMemoryDriverFactory,
 } from "./neo4j-memory-client.js";
 import {
+  clearNeo4jExtractedAt,
   collapseNeo4jParallelRelations,
   countExtractedNeo4jFacts,
   deleteNeo4jEntities,
@@ -62,6 +63,7 @@ import {
   forgetNeo4jFact,
   linkNeo4jEntities,
   linkNeo4jFactEntity,
+  listEmptyExtractedNeo4jFacts,
   listNeo4jCleanupDeclined,
   listNeo4jCleanupEntities,
   listNeo4jConsolidationEntities,
@@ -69,6 +71,7 @@ import {
   listNeo4jDeferredPairs,
   listUnextractedNeo4jFacts,
   markNeo4jFactExtracted,
+  markNeo4jFactExtractFailed,
   mergeExtractedNeo4jEntity,
   mergeNeo4jDuplicateEntity,
   noteNeo4jPairTimeout,
@@ -745,6 +748,38 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
     );
   }
 
+  async listEmptyExtractedFacts(
+    spaceId: string,
+    input: { limit: number; skip: number; since?: string; includeFailed?: boolean },
+    signal?: AbortSignal,
+  ) {
+    return listEmptyExtractedNeo4jFacts(
+      await this.ready(signal),
+      this.connection.database,
+      {
+        spaceId,
+        limit: input.limit,
+        skip: input.skip,
+        since: input.since ?? null,
+        includeFailed: input.includeFailed === true,
+      },
+      signal,
+    );
+  }
+
+  async clearExtractedAt(
+    spaceId: string,
+    factIds: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<string[]> {
+    return clearNeo4jExtractedAt(
+      await this.ready(signal),
+      this.connection.database,
+      { spaceId, factIds },
+      signal,
+    );
+  }
+
   async listUnextractedFacts(
     spaceId: string,
     input: { limit: number; skip: number; includeExtracted?: boolean },
@@ -787,6 +822,24 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
     signal?: AbortSignal,
   ): Promise<void> {
     await markNeo4jFactExtracted(await this.ready(signal), this.connection.database, input, signal);
+  }
+
+  async markExtractFailed(
+    input: {
+      factId: string;
+      spaceId: string;
+      ns: string;
+      extractFailedAt: string;
+      reason: "truncated" | "timeout";
+    },
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await markNeo4jFactExtractFailed(
+      await this.ready(signal),
+      this.connection.database,
+      input,
+      signal,
+    );
   }
 
   async listConsolidationPage(

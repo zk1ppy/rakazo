@@ -37,6 +37,21 @@ export interface BackfillSpace {
    * exists and the marker does not. No model call.
    */
   stampExtractedFacts?(): Promise<number>;
+  /**
+   * Facts with extractedAt and no outgoing :ABOUT edge. `since` keeps a fact
+   * when the marker or the fact's stored time is at or after that ISO instant.
+   */
+  listEmptyExtractedFacts?(input: {
+    limit: number;
+    skip: number;
+    since?: string;
+    includeFailed?: boolean;
+  }): Promise<BackfillFact[]>;
+  /**
+   * Remove extractedAt from facts that still have no outgoing :ABOUT edge.
+   * Returns the ids that were cleared.
+   */
+  clearExtractedAt?(factIds: readonly string[]): Promise<readonly string[]>;
 }
 
 export interface BackfillExtractOptions {
@@ -46,6 +61,18 @@ export interface BackfillExtractOptions {
   force: boolean;
   /** Repair stamps and enqueue nothing. */
   repairOnly: boolean;
+  /**
+   * Re-enqueue facts that have extractedAt and no outgoing :ABOUT edge.
+   * Clears that marker only when this is not a dry run.
+   */
+  retryEmpty: boolean;
+  /**
+   * With --retry-empty, also re-enqueue facts marked extractFailedAt.
+   * Those facts stay out of the queue otherwise.
+   */
+  includeFailed: boolean;
+  /** ISO instant. With --retry-empty, keeps facts at or after this time. */
+  since?: string;
 }
 
 export interface BackfillExtractCounts {
@@ -59,15 +86,23 @@ export interface BackfillExtractCounts {
   enqueued: number;
   /** Facts that gained extractedAt from an existing :ABOUT edge. */
   marked: number;
+  /** Facts whose extractedAt was removed. A dry run leaves this at 0. */
+  cleared: number;
+  /** Fact ids that were, or would be, re-enqueued. Capped. */
+  sample: string[];
   relations: number;
   entities: number;
   dryRun: boolean;
   force: boolean;
   repairOnly: boolean;
+  retryEmpty: boolean;
+  includeFailed: boolean;
 }
 
+const EMPTY_EXTRACT_SAMPLE = 20;
+
 const USAGE =
-  "Usage: memory:backfill-extract [--] [--dry-run] [--repair-only] [--force] [--space SPACE_ID] [--limit N]";
+  "Usage: memory:backfill-extract [--] [--dry-run] [--repair-only] [--force] [--retry-empty] [--include-failed] [--since ISO_DATE] [--space SPACE_ID] [--limit N]";
 
 export function parseBackfillExtractArgs(argv: readonly string[]): {
   spaceId?: string;
@@ -75,12 +110,18 @@ export function parseBackfillExtractArgs(argv: readonly string[]): {
   dryRun: boolean;
   force: boolean;
   repairOnly: boolean;
+  retryEmpty: boolean;
+  includeFailed: boolean;
+  since?: string;
 } {
   let spaceId: string | undefined;
   let limit = DEFAULT_LIMIT;
   let dryRun = false;
   let force = false;
   let repairOnly = false;
+  let retryEmpty = false;
+  let includeFailed = false;
+  let since: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     // pnpm run forwards the `--` separator, so `-- --dry-run` arrives as ["--", "--dry-run"].
@@ -95,6 +136,19 @@ export function parseBackfillExtractArgs(argv: readonly string[]): {
     }
     if (arg === "--repair-only") {
       repairOnly = true;
+      continue;
+    }
+    if (arg === "--retry-empty") {
+      retryEmpty = true;
+      continue;
+    }
+    if (arg === "--include-failed") {
+      includeFailed = true;
+      continue;
+    }
+    if (arg === "--since") {
+      since = parseSince(argv[index + 1]);
+      index += 1;
       continue;
     }
     if (arg === "--limit") {
@@ -119,7 +173,38 @@ export function parseBackfillExtractArgs(argv: readonly string[]): {
   if (force && repairOnly) {
     throw new Error("--force and --repair-only cannot be used together");
   }
-  return { ...(spaceId ? { spaceId } : {}), limit, dryRun, force, repairOnly };
+  if (retryEmpty && force) {
+    throw new Error("--retry-empty and --force cannot be used together");
+  }
+  if (retryEmpty && repairOnly) {
+    throw new Error("--retry-empty and --repair-only cannot be used together");
+  }
+  if (since && !retryEmpty) throw new Error("--since requires --retry-empty");
+  if (includeFailed && !retryEmpty) throw new Error("--include-failed requires --retry-empty");
+  return {
+    ...(spaceId ? { spaceId } : {}),
+    limit,
+    dryRun,
+    force,
+    repairOnly,
+    retryEmpty,
+    includeFailed,
+    ...(since ? { since } : {}),
+  };
+}
+
+function parseSince(value: string | undefined): string {
+  const trimmed = value?.trim() ?? "";
+  if (
+    !/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/.test(
+      trimmed,
+    )
+  ) {
+    throw new Error("--since needs an ISO date");
+  }
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) throw new Error("--since needs an ISO date");
+  return parsed.toISOString();
 }
 
 /**
@@ -129,12 +214,17 @@ export function parseBackfillExtractArgs(argv: readonly string[]): {
  *
  * A fact is already extracted when it has `extractedAt` or an outgoing :ABOUT
  * edge. The extraction job sets `extractedAt` after every chunk finishes,
- * including a result with no entities. Facts written before that property
- * existed have no marker; an :ABOUT edge is the record that extraction stored
- * a graph. This pass copies the fact's stored time onto `extractedAt` for
- * those facts. A finished extraction that stored nothing and predates the
- * property has neither signal, so the next default run enqueues it once.
- * `--force` ignores both signals. `--repair-only` enqueues nothing.
+ * including a complete result with no entities. A truncated reply does not
+ * set the marker. Facts written before that property existed have no marker;
+ * an :ABOUT edge is the record that extraction stored a graph. This pass
+ * copies the fact's stored time onto `extractedAt` for those facts. A finished
+ * extraction that stored nothing and predates the property has neither signal,
+ * so the next default run enqueues it once. `--force` ignores both signals.
+ * `--repair-only` enqueues nothing. `--retry-empty` enqueues only facts that
+ * have the marker and no outgoing :ABOUT edge, and clears the marker when it
+ * is not a dry run. A fact with `extractFailedAt` is left alone unless
+ * `--include-failed` is set. `--since` limits that pass to a fact whose stored
+ * time, `extractedAt`, or `extractFailedAt` is at or after the given instant.
  */
 export async function backfillMemoryExtraction(
   spaces: readonly BackfillSpace[],
@@ -149,11 +239,15 @@ export async function backfillMemoryExtraction(
     skipped: 0,
     enqueued: 0,
     marked: 0,
+    cleared: 0,
+    sample: [],
     relations: 0,
     entities: 0,
     dryRun: options.dryRun,
     force: options.force,
     repairOnly: options.repairOnly,
+    retryEmpty: options.retryEmpty,
+    includeFailed: options.includeFailed,
   };
   let remaining = options.limit;
   for (const space of spaces) {
@@ -198,7 +292,12 @@ export async function backfillMemoryExtraction(
         });
       }
     }
-    if (!options.force && space.countExtractedFacts && (options.repairOnly || remaining > 0)) {
+    if (
+      !options.force &&
+      !options.retryEmpty &&
+      space.countExtractedFacts &&
+      (options.repairOnly || remaining > 0)
+    ) {
       try {
         counts.skipped += await space.countExtractedFacts();
       } catch (error) {
@@ -207,6 +306,12 @@ export async function backfillMemoryExtraction(
           "memory.space_id": space.spaceId,
         });
       }
+    }
+    if (options.retryEmpty) {
+      if (remaining > 0) {
+        remaining = await enqueueEmptyExtractions(space, jobs, options, counts, remaining);
+      }
+      continue;
     }
     if (options.repairOnly || remaining <= 0) continue;
     let skip = 0;
@@ -224,22 +329,7 @@ export async function backfillMemoryExtraction(
           counts.skipped += 1;
           continue;
         }
-        if (!options.dryRun) {
-          const planned = planExtractionChunks(fact.text, space.maxChunkChars);
-          await jobs.enqueue(
-            memoryExtractJob({
-              spaceId: space.spaceId,
-              userId: space.userId,
-              botId: fact.botId,
-              factId: fact.factId,
-              ns: fact.ns,
-              maxChunkChars: planned.maxChunkChars,
-              chunkIndex: 0,
-              attempt: 0,
-              scheduleGeneration: 0,
-            }),
-          );
-        }
+        if (!options.dryRun) await enqueueExtractJob(space, jobs, fact);
         counts.enqueued += 1;
         remaining -= 1;
       }
@@ -248,6 +338,116 @@ export async function backfillMemoryExtraction(
     }
   }
   return counts;
+}
+
+/**
+ * Re-queue facts that were marked extracted and stored no :ABOUT edge.
+ * The list is not mutated until every selected page is known, so a dry run
+ * and a real run page the same way. The marker is cleared before enqueue, and
+ * only for ids that still have no outgoing :ABOUT edge. A fact that gained an
+ * edge between the read and the clear stays marked and is not enqueued.
+ */
+async function enqueueEmptyExtractions(
+  space: BackfillSpace,
+  jobs: JobPublisher,
+  options: BackfillExtractOptions,
+  counts: BackfillExtractCounts,
+  remaining: number,
+): Promise<number> {
+  if (!space.listEmptyExtractedFacts) {
+    counts.failed += 1;
+    getLogger().error("memory backfill cannot list empty extractions", {
+      "memory.space_id": space.spaceId,
+    });
+    return remaining;
+  }
+  const selected: BackfillFact[] = [];
+  let skip = 0;
+  while (remaining > 0) {
+    const requested = remaining;
+    let facts: BackfillFact[];
+    try {
+      facts = await space.listEmptyExtractedFacts({
+        limit: requested,
+        skip,
+        ...(options.since ? { since: options.since } : {}),
+        includeFailed: options.includeFailed,
+      });
+    } catch (error) {
+      counts.failed += 1;
+      getLogger().error("memory backfill could not list empty extractions", error, {
+        "memory.space_id": space.spaceId,
+      });
+      break;
+    }
+    if (facts.length === 0) break;
+    for (const fact of facts) {
+      if (remaining <= 0) break;
+      if (!retryableEmptyFact(fact)) {
+        counts.skipped += 1;
+        continue;
+      }
+      selected.push(fact);
+      remaining -= 1;
+    }
+    skip += facts.length;
+    if (facts.length < requested) break;
+  }
+  if (selected.length === 0) return remaining;
+  let queued = selected;
+  if (!options.dryRun) {
+    if (!space.clearExtractedAt) {
+      counts.failed += 1;
+      getLogger().error("memory backfill cannot clear extractedAt", {
+        "memory.space_id": space.spaceId,
+      });
+      return remaining + selected.length;
+    }
+    try {
+      const cleared = new Set(await space.clearExtractedAt(selected.map((fact) => fact.factId)));
+      counts.cleared += cleared.size;
+      queued = selected.filter((fact) => cleared.has(fact.factId));
+    } catch (error) {
+      counts.failed += 1;
+      getLogger().error("memory backfill could not clear extractedAt", error, {
+        "memory.space_id": space.spaceId,
+      });
+      return remaining + selected.length;
+    }
+  }
+  for (const fact of queued) {
+    if (!options.dryRun) await enqueueExtractJob(space, jobs, fact);
+    counts.enqueued += 1;
+    if (counts.sample.length < EMPTY_EXTRACT_SAMPLE) counts.sample.push(fact.factId);
+  }
+  return remaining + (selected.length - queued.length);
+}
+
+async function enqueueExtractJob(
+  space: BackfillSpace,
+  jobs: JobPublisher,
+  fact: BackfillFact,
+): Promise<void> {
+  const planned = planExtractionChunks(fact.text, space.maxChunkChars);
+  await jobs.enqueue(
+    memoryExtractJob({
+      spaceId: space.spaceId,
+      userId: space.userId,
+      botId: fact.botId,
+      factId: fact.factId,
+      ns: fact.ns,
+      maxChunkChars: planned.maxChunkChars,
+      chunkIndex: 0,
+      attempt: 0,
+      scheduleGeneration: 0,
+    }),
+  );
+}
+
+function retryableEmptyFact(fact: BackfillFact): boolean {
+  return Boolean(
+    fact.factId.trim() && fact.ns.trim() && fact.botId.trim() && !isTrivialMemoryText(fact.text),
+  );
 }
 
 function enqueueableFact(fact: BackfillFact, force: boolean): boolean {
@@ -294,6 +494,8 @@ export async function loadNeo4jBackfillSpaces(
         realignTimes: () => provider.realignExtractionTimes(config.spaceId),
         countExtractedFacts: () => provider.countExtractedFacts(config.spaceId),
         stampExtractedFacts: () => provider.stampExtractedFacts(config.spaceId),
+        listEmptyExtractedFacts: (input) => provider.listEmptyExtractedFacts(config.spaceId, input),
+        clearExtractedAt: (factIds) => provider.clearExtractedAt(config.spaceId, factIds),
       });
     } catch (error) {
       const reason = failureReason(error, "connection failed");
