@@ -270,7 +270,9 @@ async function main() {
   const shutdownGraceMs = readWorkerShutdownGraceMs(process.env.WORKER_SHUTDOWN_GRACE_MS);
   const staleLockAfterMs = readStaleLockAfterMs(process.env.WORKER_UNLOCK_STALE_LOCKS_AFTER_MS);
   // Before the runner locks anything. Off unless WORKER_UNLOCK_STALE_LOCKS_AFTER_MS
-  // is set: with more than one replica a short threshold can unlock a live job.
+  // is set. The lock lasts for the whole job. A rolling update starts this
+  // process while the previous one is still running, so a short threshold
+  // unlocks a live job.
   if (!inMemoryJobs && staleLockAfterMs) {
     try {
       await unlockStaleWorkerLocks(pool, staleLockAfterMs);

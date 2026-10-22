@@ -541,6 +541,10 @@ MAX_TOOL_CALLS_PER_TURN=  # optional Pi turn tool-call fuse; unset/0 = unlimited
 # and extraction 90000 ms with the connection cap. A saved Neo4j consolidate
 # setting wins. MEMORY_EXTRACT_THINKING_LEVEL does not override a connection minimum.
 # MEMORY_CONSOLIDATE_TIMEOUT_MS=180000
+# One consolidation job, milliseconds, 60000-2700000. Default 1200000 (20 minutes).
+# The page stops there and the rest is enqueued. One confirmation already running
+# can finish after that.
+# MEMORY_CONSOLIDATE_JOB_BUDGET_MS=1200000
 # MEMORY_EXTRACT_TIMEOUT_MS=90000
 # MEMORY_CONSOLIDATE_THINKING_LEVEL=low
 # MEMORY_EXTRACT_THINKING_LEVEL=
@@ -1588,9 +1592,14 @@ hours.
 
 `WORKER_UNLOCK_STALE_LOCKS_AFTER_MS` is off when unset or 0. When set, startup releases job and
 queue locks older than that and held by another worker id, and logs each one with the job id, queue,
-and previous worker id. Two replicas can run the same job if the threshold is shorter than a real
-run, so leave it unset whenever more than one worker uses the database. A single replica can set
-900000 (15 minutes), which is past the longest memory-model timeout.
+and previous worker id. The lock is held for the whole job, not for one model call, so the threshold
+has to be longer than the longest job. A rolling update starts the new pod while the old one is
+still running, and a short threshold unlocks that live job so both run it. Leave the variable unset
+whenever more than one worker uses the database. A single replica can set 3600000 (60 minutes).
+That is safe with a Recreate strategy, which stops the old pod before the new one starts, or when
+no job can run longer than the threshold. `MEMORY_CONSOLIDATE_JOB_BUDGET_MS` (default 1200000,
+20 minutes) stops a consolidation page once that budget is spent and enqueues the rest, so that
+job stays inside the 60 minute window aside from the confirmation already in flight.
 
 ## Other deployment layouts
 

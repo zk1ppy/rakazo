@@ -28,6 +28,7 @@ describe("worker lock settings", () => {
     expect(readStaleLockAfterMs("-1")).toBeUndefined();
     expect(readStaleLockAfterMs("15min")).toBeUndefined();
     expect(readStaleLockAfterMs("900000")).toBe(900_000);
+    expect(readStaleLockAfterMs("3600000")).toBe(3_600_000);
   });
 });
 

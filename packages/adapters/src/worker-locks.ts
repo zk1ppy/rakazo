@@ -33,10 +33,12 @@ export function readWorkerShutdownGraceMs(value: string | undefined): number {
 /**
  * Unset, blank, `0`, or not a whole number disables the startup unlock.
  * A positive value is how old another worker's lock must be before this
- * process releases it. Do not enable this with more than one worker replica:
- * a live replica's job is unlocked if it runs longer than the threshold, and
- * a second worker can run it at the same time. A single replica can use
- * 900000 (15 minutes), which is past the longest memory-model timeout.
+ * process releases it. The lock is held for the whole job, not one model call.
+ * Do not enable this with more than one worker replica: a rolling update
+ * starts the new process while the old one still holds the lock, and a short
+ * threshold lets both run the job. A single replica can use 3600000 (60
+ * minutes). That is safe with a Recreate strategy, which stops the old pod
+ * before the new one starts, or when no job can run longer than the threshold.
  */
 export function readStaleLockAfterMs(value: string | undefined): number | undefined {
   const trimmed = value?.trim() ?? "";

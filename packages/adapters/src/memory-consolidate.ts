@@ -41,7 +41,11 @@ import { REASONING_MODEL_MAX_TOKENS } from "./pi-runtime-limits.js";
  *
  * Model calls share the `memory-extract` queue and run one at a time inside the
  * job. Each run asks at most {@link MAX_CONSOLIDATE_LLM_CALLS} times, then
- * reschedules itself if ambiguous pairs remain. A confirmation that is aborted
+ * reschedules itself if ambiguous pairs remain. `MEMORY_CONSOLIDATE_JOB_BUDGET_MS`
+ * (default 20 minutes) stops the page before the next confirmation once that
+ * time has passed and reschedules the same page, so the graphile lock is not
+ * held for an unbounded chain of calls. The confirmation already running
+ * finishes first. A confirmation that is aborted
  * or times out does not hold the page: that pair is skipped for the rest of
  * this chain (a bounded list, retried on a later run) and the cursor still
  * advances. A model refusal is stored on the two nodes and is not asked again
@@ -190,6 +194,14 @@ export const DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS = REASONING_MODEL_MAX_TOKENS;
  * model is not aborted while it is still producing the yes/no.
  */
 export const DEFAULT_CONSOLIDATE_TIMEOUT_MS = 180_000;
+/**
+ * Wall clock for one consolidation job. The graphile lock is held until the
+ * job returns, so this stays well under the 60 minute stale-lock window even
+ * after one confirmation already in flight (at most 10 minutes).
+ */
+export const DEFAULT_CONSOLIDATE_JOB_BUDGET_MS = 20 * 60 * 1000;
+const MIN_CONSOLIDATE_JOB_BUDGET_MS = 60_000;
+const MAX_CONSOLIDATE_JOB_BUDGET_MS = 45 * 60 * 1000;
 const MIN_CONSOLIDATE_MAX_OUTPUT_TOKENS = 64;
 const MAX_CONSOLIDATE_MAX_OUTPUT_TOKENS = 131_072;
 const MIN_CONSOLIDATE_TIMEOUT_MS = 15_000;
@@ -264,6 +276,25 @@ export function assertConsolidateTimeoutMs(value: string | undefined): string | 
     );
   }
   return String(parsed);
+}
+
+/**
+ * Blank, invalid, or outside 1–45 minutes keeps the 20 minute default.
+ * A value above that, plus one in-flight confirmation, can outlast the
+ * 60 minute stale-lock recommendation.
+ */
+export function readConsolidateJobBudgetMs(env: NodeJS.ProcessEnv = process.env): number {
+  const trimmed = env.MEMORY_CONSOLIDATE_JOB_BUDGET_MS?.trim() ?? "";
+  if (!/^\d+$/.test(trimmed)) return DEFAULT_CONSOLIDATE_JOB_BUDGET_MS;
+  const parsed = Number(trimmed);
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < MIN_CONSOLIDATE_JOB_BUDGET_MS ||
+    parsed > MAX_CONSOLIDATE_JOB_BUDGET_MS
+  ) {
+    return DEFAULT_CONSOLIDATE_JOB_BUDGET_MS;
+  }
+  return parsed;
 }
 
 function parseConsolidateThinkingLevel(value: string | undefined): ConsolidateThinkingLevel | null {
@@ -765,6 +796,8 @@ export async function consolidateMemoryGraph(
     await logConsolidationDryRun(payload, store);
     return;
   }
+  const startedAt = Date.now();
+  const budgetMs = readConsolidateJobBudgetMs();
   const page = await store.listConsolidationPage({
     spaceId: payload.spaceId,
     ...(payload.ns ? { ns: payload.ns } : {}),
@@ -803,11 +836,18 @@ export async function consolidateMemoryGraph(
   const rejectionReasons = new Map<string, number>();
   let deferredMerge = false;
   let deferredConfirm = false;
+  let budgetSpent = false;
   let rateLimited = false;
   const timedOutKeys: string[] = [];
 
   for (const candidate of pairs) {
     throwIfJobAborted();
+    // The pair already started is allowed to finish. Stopping before the next
+    // one keeps the page's merges and declines, then the same cursor continues.
+    if ((llmCalls > 0 || merges > 0) && Date.now() - startedAt >= budgetMs) {
+      budgetSpent = true;
+      break;
+    }
     if (merges >= MAX_CONSOLIDATE_MERGES) {
       deferredMerge = true;
       break;
@@ -946,7 +986,7 @@ export async function consolidateMemoryGraph(
     [...rejected].filter((key) => !skipped.has(key)),
     MAX_CONSOLIDATE_REJECTED,
   );
-  const followUp = rateLimited || deferredMerge || deferredConfirm || page.pageFull;
+  const followUp = rateLimited || deferredMerge || deferredConfirm || budgetSpent || page.pageFull;
   getLogger().info("memory.consolidate finished a page", {
     "memory.space_id": payload.spaceId,
     "memory.merged": merges,
@@ -972,7 +1012,14 @@ export async function consolidateMemoryGraph(
     await rescheduleRateLimit(deps, payload, rejectedList, skippedList);
     return;
   }
-  if (deferredMerge || deferredConfirm) {
+  if (budgetSpent) {
+    getLogger().info("memory.consolidate stopped at the time budget", {
+      "memory.space_id": payload.spaceId,
+      "memory.budget_ms": budgetMs,
+      "memory.follow_up": true,
+    });
+  }
+  if (deferredMerge || deferredConfirm || budgetSpent) {
     await enqueueContinuation(deps, payload, {
       ...(payload.afterId ? { afterId: payload.afterId } : {}),
       ...(payload.carryIds?.length ? { carryIds: payload.carryIds } : {}),
