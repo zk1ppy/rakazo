@@ -12,6 +12,7 @@ import type { MemoryExtractDeps, MemoryExtractStore } from "./memory-extract.js"
 import {
   assertOwnerAliases,
   extractMemoryGraph,
+  isFilesystemPathName,
   isNonReferentName,
   isTrivialMemoryText,
   MEMORY_EXTRACT_INSTRUCTIONS,
@@ -498,6 +499,26 @@ describe("extraction role and measurement guards", () => {
     expect(isNonReferentName("Séance du dimanche 18 octobre 2026")).toBe(false);
     expect(isNonReferentName("Sunday session 18 October 2026")).toBe(false);
     expect(isNonReferentName("Option B training")).toBe(false);
+    expect(isFilesystemPathName("/workspace")).toBe(true);
+    expect(isFilesystemPathName("/workspace/nicolas-notes")).toBe(true);
+    expect(isFilesystemPathName("~/notes")).toBe(true);
+    expect(isFilesystemPathName("C:\\temp\\notes")).toBe(true);
+    expect(isFilesystemPathName("Vigierisc /ATRISC")).toBe(false);
+    expect(isFilesystemPathName("Gitea.com")).toBe(false);
+    expect(MEMORY_EXTRACT_INSTRUCTIONS).toContain("filesystem path");
+    const paths = parseMemoryExtraction(
+      JSON.stringify({
+        entities: [
+          { type: "Object", name: "/workspace" },
+          { type: "Object", name: "/workspace/nicolas-notes" },
+          { type: "Organization", name: "Vigierisc /ATRISC" },
+        ],
+        relations: [],
+      }),
+      "space-1",
+      "shared",
+    );
+    expect(paths.entities.map((entity) => entity.name)).toEqual(["Vigierisc /ATRISC"]);
     expect(isNonReferentName("Step 1: warmup")).toBe(false);
   });
 });

@@ -60,9 +60,13 @@ import { REASONING_MODEL_MAX_TOKENS } from "./pi-runtime-limits.js";
  * promotes an alias that unambiguously extends the current name, which repairs
  * a node already merged under the short name.
  *
- * Same-name entities of different types are not merged until one confirmation
- * picks a POLE+O type. The survivor is relabeled. A person and a company that
- * only share a name stay split when the model says so. A lone node is not
+ * Entities of different types are candidates when a normalized name, alias, or
+ * slash-separated segment matches. Comparison folds case, accents, and
+ * punctuation. "Vigierisc / ATRISC" and "VigieRisc" are one candidate even
+ * when one is an Object and the other an Organization. The model confirms
+ * they are the same thing. The surviving type is the side with more facts,
+ * then the more specific name, then the model's hint. A person and a company
+ * that only share a name stay split when the model says so. A lone node is not
  * relabeled: there is no twin to confirm, and a later extract looks up by type
  * label, so it will not update the old node. When a software agent was stored
  * as an Organization, relabel it in place and keep the id:
@@ -91,16 +95,20 @@ import { REASONING_MODEL_MAX_TOKENS } from "./pi-runtime-limits.js";
  * Then rewire RKZ_REL and FROM the same way mergeNeo4jDuplicateEntity does,
  * and DELETE role. Do not copy role.summary onto person.
  *
- * Parallel edges of the same type between the same pair collapse in this job,
- * before and after entity merges. Case, spaces, and hyphens do not make a
- * second type. Fact and source ids are unioned onto the surviving edge.
- * Different types stay, and so does the reverse direction. ABOUT and FROM
- * duplicates between one pair collapse too. None of that calls a model.
+ * Parallel edges of the same business type between the same directed pair
+ * collapse in this job, before and after entity merges, including a pass over
+ * the whole space. The match is :Rkz, so a type label without :Entity still
+ * collapses. Case, spaces, and hyphens do not make a second type. Fact and
+ * source ids are unioned. firstSeen is the earlier stamp, lastSeen the later
+ * one, and mentions is the number of facts (or the sum of counters when no
+ * fact id was stored). Different business types stay, and so does the reverse
+ * direction. An empty type is its own bucket. ABOUT and FROM duplicates
+ * between one pair collapse too. None of that calls a model.
  *
- * Enqueue one space from a running worker:
- * `pnpm --filter @rakazo/worker memory:backfill-consolidate -- --space SPACE_ID`
- * Add `--dry-run` to count spaces, omit `--space` to enqueue every Neo4j space,
- * or add `--ns shared` to scan one namespace.
+ * `--dry-run` prints the pairs and relation counts and writes nothing.
+ * A job payload with `dryRun: true` does the same inside the worker.
+ * Omit `--space` to enqueue every Neo4j space, or add `--ns shared` to scan
+ * one namespace.
  */
 
 export const CONSOLIDATE_PAGE_SIZE = 400;
@@ -294,9 +302,15 @@ export interface MemoryConsolidateStore {
   ): Promise<Neo4jDuplicateMergeResult>;
   /** Set the canonical name on one node. The id does not change. */
   renameEntity(input: Neo4jEntityRename, signal?: AbortSignal): Promise<boolean>;
-  /** Collapse same-type parallel edges that touch this page. No model call. */
+  /** Collapse same-type parallel edges. `dryRun` only counts. No model call. */
   collapseParallelRelations(
-    input: { spaceId: string; ids: string[]; ns?: string },
+    input: {
+      spaceId: string;
+      ids: string[];
+      ns?: string;
+      scope?: "page" | "space";
+      dryRun?: boolean;
+    },
     signal?: AbortSignal,
   ): Promise<ParallelRelationCollapse>;
   /** Role words that mean the space member. */
@@ -369,6 +383,69 @@ export function consolidationPairKey(leftId: string, rightId: string): string {
   return leftId < rightId ? `${leftId}\n${rightId}` : `${rightId}\n${leftId}`;
 }
 
+/** Case, accents, and punctuation fold. Slash segments stay whole keys, not tokens. */
+function foldMatchKey(value: string): string {
+  const stripped = value.normalize("NFD").replace(/\p{M}+/gu, "");
+  return normalizeEntityName(stripped);
+}
+
+function slashSegments(raw: string): string[] {
+  const trimmed = raw.trim();
+  if (/^https?:\/\//i.test(trimmed)) return [];
+  const parts = trimmed
+    .split(/\s*\/\s*/u)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  return parts.length > 1 ? parts : [];
+}
+
+function addMatchKey(keys: Set<string>, value: string): void {
+  const folded = foldMatchKey(value);
+  if (folded.length < 2) return;
+  const tokens = rawTokens(folded);
+  if (tokens.length === 0 || tokens.every((token) => STOPWORDS.has(token))) return;
+  keys.add(folded);
+}
+
+/** Whole names, aliases, and slash-separated segments. Not the tokens inside a longer name. */
+function wholeKeys(entity: Neo4jConsolidationEntity): string[] {
+  const keys = new Set<string>();
+  addMatchKey(keys, entity.normName);
+  addMatchKey(keys, entity.name);
+  for (const alias of entity.aliasNorms) addMatchKey(keys, alias);
+  for (const alias of entity.aliases) addMatchKey(keys, alias);
+  for (const raw of [entity.name, ...entity.aliases]) {
+    for (const segment of slashSegments(raw)) addMatchKey(keys, segment);
+  }
+  return [...keys];
+}
+
+function crossTypeNameMatch(
+  left: Neo4jConsolidationEntity,
+  right: Neo4jConsolidationEntity,
+): boolean {
+  const rightKeys = new Set(wholeKeys(right));
+  return wholeKeys(left).some((key) => rightKeys.has(key));
+}
+
+/**
+ * Type to keep after the model says two records are one thing.
+ * More facts win, then the more specific name, then the model's hint.
+ */
+export function chooseWinningType(
+  left: Neo4jConsolidationEntity,
+  right: Neo4jConsolidationEntity,
+  hinted: Neo4jEntityType | null,
+): Neo4jEntityType | null {
+  if (left.factIds.length !== right.factIds.length) {
+    return left.factIds.length > right.factIds.length ? left.type : right.type;
+  }
+  const leftSpec = specificity(left);
+  const rightSpec = specificity(right);
+  if (leftSpec !== rightSpec) return leftSpec > rightSpec ? left.type : right.type;
+  return hinted;
+}
+
 export function classifyConsolidationPair(
   left: Neo4jConsolidationEntity,
   right: Neo4jConsolidationEntity,
@@ -377,9 +454,7 @@ export function classifyConsolidationPair(
   if (left.id === right.id) return { action: "skip", reason: "self" };
   if (left.ns !== right.ns) return { action: "skip", reason: "namespace" };
   if (left.type !== right.type) {
-    if (left.normName === right.normName && left.normName.length >= 2) {
-      return { action: "confirm", reason: "type-conflict" };
-    }
+    if (crossTypeNameMatch(left, right)) return { action: "confirm", reason: "type-conflict" };
     return { action: "skip", reason: "type" };
   }
   if (keysOverlap(left, right)) return { action: "merge", reason: "alias" };
@@ -606,6 +681,10 @@ export async function consolidateMemoryGraph(
   payload: BackgroundJobPayloads["memory.consolidate"],
   store: MemoryConsolidateStore,
 ): Promise<void> {
+  if (payload.dryRun) {
+    await logConsolidationDryRun(payload, store);
+    return;
+  }
   const page = await store.listConsolidationPage({
     spaceId: payload.spaceId,
     ...(payload.ns ? { ns: payload.ns } : {}),
@@ -616,7 +695,7 @@ export async function consolidateMemoryGraph(
   if (page.pageIds.length === 0) return;
 
   const relationIds = relationPageIds(page);
-  const collapsedBefore = await collapseParallel(store, payload, relationIds);
+  const collapsedBefore = await collapseParallel(store, payload, relationIds, "space");
   const owner = ownerResolution(
     await resolveSubjectName(deps, payload.userId),
     store.ownerAliases(),
@@ -636,7 +715,10 @@ export async function consolidateMemoryGraph(
   const live = new Map(entities.map((entity) => [entity.id, entity]));
   let merges = 0;
   let llmCalls = 0;
+  let accepted = 0;
   let declined = 0;
+  let rejectedPairs = 0;
+  const rejectionReasons = new Map<string, number>();
   let deferredMerge = false;
   let deferredConfirm = false;
   let rateLimited = false;
@@ -661,7 +743,7 @@ export async function consolidateMemoryGraph(
         deferredConfirm = true;
         continue;
       }
-      let answer: boolean | Neo4jEntityType | "rate_limit" | "timeout";
+      let answer: boolean | Neo4jEntityType | "omit-type" | "rate_limit" | "timeout";
       try {
         answer = await confirmDuplicate(
           deps,
@@ -677,7 +759,9 @@ export async function consolidateMemoryGraph(
       } catch (error) {
         if (!(error instanceof MemoryConsolidatePermanentError)) throw error;
         llmCalls += 1;
+        rejectedPairs += 1;
         rejected.add(key);
+        noteRejection(rejectionReasons, payload, left, right, "permanent");
         continue;
       }
       if (answer === "rate_limit") {
@@ -690,11 +774,28 @@ export async function consolidateMemoryGraph(
         continue;
       }
       llmCalls += 1;
-      if (typeof answer === "string") chosenType = answer;
-      if (answer === false || (decision.reason === "type-conflict" && !chosenType)) {
+      if (answer === false) {
         declined += 1;
+        rejectedPairs += 1;
         rejected.add(key);
+        noteRejection(rejectionReasons, payload, left, right, "declined");
         continue;
+      }
+      accepted += 1;
+      if (decision.reason === "type-conflict") {
+        const hinted =
+          typeof answer === "string" && (NEO4J_ENTITY_TYPES as readonly string[]).includes(answer)
+            ? (answer as Neo4jEntityType)
+            : null;
+        const winner = chooseWinningType(left, right, hinted);
+        if (!winner) {
+          declined += 1;
+          rejectedPairs += 1;
+          rejected.add(key);
+          noteRejection(rejectionReasons, payload, left, right, "no-type");
+          continue;
+        }
+        chosenType = winner;
       }
     }
     const plan = planCanonicalEntity(left, right, chosenType);
@@ -713,12 +814,9 @@ export async function consolidateMemoryGraph(
     });
     if (!result.merged) {
       rejected.add(key);
-      getLogger().info("memory.consolidate skipped a pair", {
-        "memory.space_id": payload.spaceId,
-        "memory.keep_id": plan.keep.id,
-        "memory.drop_id": plan.drop.id,
-        "memory.reason": result.reason ?? "guard",
-      });
+      rejectedPairs += 1;
+      const reason = result.reason ?? "guard";
+      noteRejection(rejectionReasons, payload, left, right, reason);
       continue;
     }
     live.delete(plan.drop.id);
@@ -734,8 +832,8 @@ export async function consolidateMemoryGraph(
 
   if (!rateLimited) await promoteCanonicalNames(store, payload.spaceId, live, rejected);
 
-  const collapsedAfter = await collapseParallel(store, payload, relationIds);
-  getLogger().info("memory.consolidate collapsed parallel relations", {
+  const collapsedAfter = await collapseParallel(store, payload, relationIds, "page");
+  getLogger().info("memory.consolidate deduplicated relations", {
     "memory.space_id": payload.spaceId,
     "memory.relations": collapsedBefore.relations + collapsedAfter.relations,
     "memory.about": collapsedBefore.about + collapsedAfter.about,
@@ -751,8 +849,12 @@ export async function consolidateMemoryGraph(
   getLogger().info("memory.consolidate finished a page", {
     "memory.space_id": payload.spaceId,
     "memory.merged": merges,
-    "memory.confirmed": llmCalls,
+    "memory.llm_calls": llmCalls,
+    "memory.confirmed": accepted,
     "memory.declined": declined,
+    "memory.rejected": rejectedPairs,
+    "memory.rejected_reasons": formatRejectionReasons(rejectionReasons),
+    "memory.relations_deduped": collapsedBefore.relations + collapsedAfter.relations,
     "memory.timed_out": timedOutKeys.length,
     "memory.page": page.pageIds.length,
     "memory.follow_up": followUp,
@@ -842,14 +944,175 @@ async function withOwnerPeople(
   return merged;
 }
 
+function noteRejection(
+  counts: Map<string, number>,
+  payload: BackgroundJobPayloads["memory.consolidate"],
+  left: Neo4jConsolidationEntity,
+  right: Neo4jConsolidationEntity,
+  reason: string,
+): void {
+  counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  getLogger().info("memory.consolidate rejected a pair", {
+    "memory.space_id": payload.spaceId,
+    "memory.left_id": left.id,
+    "memory.right_id": right.id,
+    "memory.left_type": left.type,
+    "memory.right_type": right.type,
+    "memory.reason": reason,
+  });
+}
+
+function formatRejectionReasons(counts: ReadonlyMap<string, number>): string {
+  return [...counts.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([reason, count]) => `${reason}=${count}`)
+    .join(",");
+}
+
+export interface ConsolidationPreviewPair {
+  action: "merge" | "confirm";
+  reason: ConsolidationCandidate["reason"];
+  leftId: string;
+  rightId: string;
+  leftName: string;
+  rightName: string;
+  leftType: Neo4jEntityType;
+  rightType: Neo4jEntityType;
+  /** Type that would win if the pair is the same thing. Confirms still need the model. */
+  type: Neo4jEntityType;
+}
+
+export interface ConsolidationPreview {
+  merges: ConsolidationPreviewPair[];
+  confirms: ConsolidationPreviewPair[];
+  relations: number;
+  about: number;
+  from: number;
+  pages: number;
+  truncated: boolean;
+}
+
+const PREVIEW_MAX_PAGES = 20;
+const PREVIEW_MAX_PAIRS = 80;
+
+/**
+ * Read-only plan. No model calls and no writes. Relation counts are the edges
+ * a real run would delete. `type` on a confirm pair is the type the facts and
+ * the name would keep if the model later says they are the same thing.
+ */
+export async function previewMemoryConsolidation(
+  store: MemoryConsolidateStore,
+  input: { spaceId: string; ns?: string; maxPages?: number },
+): Promise<ConsolidationPreview> {
+  const maxPages = input.maxPages ?? PREVIEW_MAX_PAGES;
+  const merges: ConsolidationPreviewPair[] = [];
+  const confirms: ConsolidationPreviewPair[] = [];
+  let relations = 0;
+  let about = 0;
+  let from = 0;
+  let pages = 0;
+  let afterId: string | undefined;
+  let truncated = false;
+  let lastFull = false;
+  while (pages < maxPages && merges.length + confirms.length < PREVIEW_MAX_PAIRS) {
+    const page = await store.listConsolidationPage({
+      spaceId: input.spaceId,
+      ...(input.ns ? { ns: input.ns } : {}),
+      limit: CONSOLIDATE_PAGE_SIZE,
+      ...(afterId ? { afterId } : {}),
+    });
+    if (page.pageIds.length === 0) break;
+    pages += 1;
+    lastFull = page.pageFull;
+    if (pages === 1) {
+      const collapsed = await store.collapseParallelRelations({
+        spaceId: input.spaceId,
+        ids: page.pageIds,
+        scope: "space",
+        dryRun: true,
+        ...(input.ns ? { ns: input.ns } : {}),
+      });
+      relations = collapsed.relations;
+      about = collapsed.about;
+      from = collapsed.from;
+    }
+    for (const candidate of selectCandidates(page.entities, new Set())) {
+      const pair: ConsolidationPreviewPair = {
+        action: candidate.action,
+        reason: candidate.reason,
+        leftId: candidate.left.id,
+        rightId: candidate.right.id,
+        leftName: candidate.left.name,
+        rightName: candidate.right.name,
+        leftType: candidate.left.type,
+        rightType: candidate.right.type,
+        type: chooseWinningType(candidate.left, candidate.right, null) ?? candidate.left.type,
+      };
+      if (candidate.action === "merge") merges.push(pair);
+      else confirms.push(pair);
+      if (merges.length + confirms.length >= PREVIEW_MAX_PAIRS) {
+        truncated = true;
+        break;
+      }
+    }
+    if (truncated || !page.pageFull) break;
+    const next = page.pageIds[page.pageIds.length - 1];
+    if (!next) break;
+    afterId = next;
+  }
+  return {
+    merges,
+    confirms,
+    relations,
+    about,
+    from,
+    pages,
+    truncated: truncated || (pages >= maxPages && lastFull),
+  };
+}
+
+async function logConsolidationDryRun(
+  payload: BackgroundJobPayloads["memory.consolidate"],
+  store: MemoryConsolidateStore,
+): Promise<void> {
+  const preview = await previewMemoryConsolidation(store, {
+    spaceId: payload.spaceId,
+    ...(payload.ns ? { ns: payload.ns } : {}),
+  });
+  getLogger().info("memory.consolidate dry-run", {
+    "memory.space_id": payload.spaceId,
+    "memory.would_merge": preview.merges.length,
+    "memory.would_confirm": preview.confirms.length,
+    "memory.relations_deduped": preview.relations,
+    "memory.about": preview.about,
+    "memory.from": preview.from,
+    "memory.page": preview.pages,
+    "memory.truncated": preview.truncated,
+  });
+  for (const pair of [...preview.merges, ...preview.confirms]) {
+    getLogger().info("memory.consolidate dry-run pair", {
+      "memory.space_id": payload.spaceId,
+      "memory.action": pair.action,
+      "memory.reason": pair.reason,
+      "memory.left_id": pair.leftId,
+      "memory.right_id": pair.rightId,
+      "memory.left_type": pair.leftType,
+      "memory.right_type": pair.rightType,
+      "memory.type": pair.type,
+    });
+  }
+}
+
 function collapseParallel(
   store: MemoryConsolidateStore,
   payload: BackgroundJobPayloads["memory.consolidate"],
   ids: string[],
+  scope: "page" | "space",
 ): Promise<ParallelRelationCollapse> {
   return store.collapseParallelRelations({
     spaceId: payload.spaceId,
     ids,
+    scope,
     ...(payload.ns ? { ns: payload.ns } : {}),
   });
 }
@@ -932,7 +1195,7 @@ async function confirmDuplicate(
   byId: ReadonlyMap<string, Neo4jConsolidationEntity>,
   callIndex: number,
   mode: "same" | "type",
-): Promise<boolean | Neo4jEntityType | "rate_limit" | "timeout"> {
+): Promise<boolean | Neo4jEntityType | "omit-type" | "rate_limit" | "timeout"> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), settings.timeoutMs);
   timer.unref?.();
@@ -1005,7 +1268,8 @@ async function confirmDuplicate(
       logUnreadableDecision(payload.spaceId, text);
       return false;
     }
-    if (!typed.same || !typed.type) return false;
+    if (!typed.same) return false;
+    if (!typed.type) return "omit-type";
     return typed.type;
   }
   const decision = parseConsolidationDecision(text);
@@ -1132,6 +1396,7 @@ async function enqueueContinuation(
         attempt: next.attempt,
         scheduleGeneration,
         ...(payload.automatic ? { automatic: true } : {}),
+        ...(payload.dryRun ? { dryRun: true } : {}),
       },
       availableAt,
     ),
@@ -1276,13 +1541,24 @@ function strongMergeKey(
 ): boolean {
   if (rawTokens(key).length >= 2) return true;
   if (/\p{N}/u.test(key)) return true;
+  if (key.length < 3) return false;
   // A single alphabetic token is a short proper name only when it is one
-  // entity's own name and a token of the other ("ada" of "ada lovelace").
+  // entity's own name, or a slash segment of it, and a token of the other
+  // ("ada" of "ada lovelace", "vigierisc" of "Vigierisc / ATRISC").
   // A role alias that merely overlaps ("candidat", "runner") is not.
-  const owner = key === left.normName ? left : key === right.normName ? right : null;
+  const leftNorm = foldMatchKey(left.normName);
+  const rightNorm = foldMatchKey(right.normName);
+  const owner = key === leftNorm ? left : key === rightNorm ? right : null;
   if (!owner) return false;
   const other = owner === left ? right : left;
-  return rawTokens(other.normName).includes(key);
+  const otherTokens = new Set([
+    ...rawTokens(foldMatchKey(other.normName)),
+    ...slashSegments(other.name).map((segment) => foldMatchKey(segment)),
+    ...other.aliases.flatMap((alias) =>
+      slashSegments(alias).map((segment) => foldMatchKey(segment)),
+    ),
+  ]);
+  return otherTokens.has(key);
 }
 
 function isRoleNamed(entity: Neo4jConsolidationEntity): boolean {
@@ -1326,7 +1602,7 @@ function roleAttachment(left: Neo4jConsolidationEntity, right: Neo4jConsolidatio
 }
 
 function entityKeys(entity: Neo4jConsolidationEntity): string[] {
-  return uniqueStrings([entity.normName, ...entity.aliasNorms]).filter((key) => key.length >= 2);
+  return wholeKeys(entity);
 }
 
 function sharesEvidence(left: Neo4jConsolidationEntity, right: Neo4jConsolidationEntity): boolean {

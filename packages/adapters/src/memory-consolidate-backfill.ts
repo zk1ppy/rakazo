@@ -2,6 +2,8 @@ import type { JobPublisher, SecretStore } from "@rakazo/adapter-kit";
 import { memoryConsolidateJob } from "@rakazo/adapter-kit";
 import type { PrismaClient } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
+import type { ConsolidationPreview } from "./memory-consolidate.js";
+import { previewMemoryConsolidation } from "./memory-consolidate.js";
 import { neo4jDreamEnabled } from "./memory-dream.js";
 import { toStringRecord } from "./memory-provider-factory.js";
 import { createNeo4jProvider, Neo4jMemoryProvider } from "./neo4j-memory-provider.js";
@@ -16,14 +18,20 @@ const MAX_LIMIT = 5_000;
  * be running to execute them.
  *
  *   pnpm --filter @rakazo/worker memory:backfill-consolidate -- --space SPACE_ID
- *   pnpm --filter @rakazo/worker memory:backfill-consolidate -- --dry-run
+ *   pnpm --filter @rakazo/worker memory:backfill-consolidate -- --space SPACE_ID --dry-run
  *   pnpm --filter @rakazo/worker memory:backfill-consolidate -- --space SPACE_ID --ns shared
+ *
+ * `--dry-run` reads the graph and prints pairs that would merge, pairs that
+ * would be sent to the model, and how many parallel relations would collapse.
+ * It does not enqueue a job and does not write.
  */
 export interface ConsolidateSpace {
   spaceId: string;
   userId: string;
   /** Set by the loader. Manual backfill ignores it and still enqueues. */
   dreamEnabled?: boolean;
+  /** Read-only plan. Present when the loader opened a Neo4j provider. */
+  preview?: (ns?: string) => Promise<ConsolidationPreview>;
 }
 
 export interface BackfillConsolidateOptions {
@@ -146,6 +154,11 @@ export async function loadNeo4jConsolidationSpaces(
         spaceId: config.spaceId,
         userId: config.userId,
         dreamEnabled: neo4jDreamEnabled(settings),
+        preview: (ns) =>
+          previewMemoryConsolidation(provider, {
+            spaceId: config.spaceId,
+            ...(ns ? { ns } : {}),
+          }),
       });
     } catch (error) {
       failed += 1;

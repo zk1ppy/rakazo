@@ -33,6 +33,7 @@ import {
 import {
   mergeRelationProvenance,
   normalizeRelationType,
+  relationCollapseKey,
   unionRelationIds,
 } from "./relation-type.js";
 
@@ -660,9 +661,32 @@ describe("Neo4j memory client", () => {
       }),
     ).resolves.toEqual({ merged: false, reason: "guard" });
     expect(driver.calls).toHaveLength(1);
-    expect(driver.calls[0]?.cypher).toContain("$type IN labels(keep)");
-    expect(driver.calls[0]?.cypher).toContain("$type IN labels(drop)");
+    expect(driver.calls[0]?.cypher).toContain("$type IN labels(keep) OR keep.entityType = $type");
+    expect(driver.calls[0]?.cypher).toContain("$type IN labels(drop) OR drop.entityType = $type");
     expect(driver.calls[0]?.options.access).toBe("read");
+  });
+
+  it("does not write when the duplicate is already gone", async () => {
+    const driver = new FakeDriver();
+    driver.rows.push({ records: [] });
+    await expect(
+      mergeNeo4jDuplicateEntity(driver, "neo4j", {
+        spaceId: "space-1",
+        keepId: "keep",
+        dropId: "drop",
+        type: "Organization",
+        sourceTypes: ["Organization", "Object"],
+        name: "VigieRisc",
+        normName: "vigierisc",
+        aliases: ["Vigierisc /ATRISC"],
+        aliasNorms: ["vigierisc atrisc"],
+        summary: "",
+        now: "2026-01-01T00:00:00.000Z",
+      }),
+    ).resolves.toEqual({ merged: false, reason: "guard" });
+    expect(driver.calls).toHaveLength(1);
+    expect(driver.calls[0]?.options.access).toBe("read");
+    expect(driver.calls[0]?.cypher).not.toContain("DELETE drop");
   });
 
   it("leaves the duplicate in place when an edge type is not safe to copy", async () => {
@@ -714,6 +738,8 @@ describe("Neo4j memory client", () => {
       empty,
       empty,
       empty,
+      empty,
+      empty,
       { records: [row({ id: "keep" })] },
     );
     await expect(
@@ -741,24 +767,26 @@ describe("Neo4j memory client", () => {
     expect(cypher[1]).toContain("moved.mentions = size(factIds)");
     expect(cypher[1]).toContain("moved.validFrom = firstSeen");
     expect(cypher[1]).not.toContain("factId: coalesce(rel.factId, '')");
-    expect(cypher[2]).toContain("-[rel:RKZ_REL]->(drop:Rkz:Entity");
+    expect(cypher[2]).toContain("-[rel:RKZ_REL]->(drop:Rkz {id: $dropId");
     expect(cypher[2]).toContain("MERGE (other)-[moved:RKZ_REL {type: relType}]->(keep)");
-    expect(cypher[3]).toContain("-[rel:FROM]->(other)");
-    expect(cypher[3]).toContain("MERGE (keep)-[moved:FROM]->(other)");
-    expect(cypher[4]).toContain("-[rel:FROM]->(drop:Rkz:Entity");
-    expect(cypher[4]).toContain("MERGE (other)-[moved:FROM]->(keep)");
-    expect(cypher[5]).toContain("-[rel:MENTIONS]->(other)");
-    expect(cypher[5]).toContain("MERGE (keep)-[moved:MENTIONS]->(other)");
-    expect(cypher[6]).toContain("-[rel:MENTIONS]->(drop:Rkz:Entity");
-    expect(cypher[7]).toContain("DELETE rel");
-    expect(cypher[8]).toContain("-[rel]-(drop)");
-    const commit = cypher[9] ?? "";
-    expect(commit).toContain("SET keep:Person");
+    expect(cypher[3]).toContain("CREATE (keep)-[moved:RKZ_REL]->(other)");
+    expect(cypher[3]).toContain("rel.type");
+    expect(cypher[4]).toContain("CREATE (other)-[moved:RKZ_REL]->(keep)");
+    expect(cypher[5]).toContain("-[rel:FROM]->(other)");
+    expect(cypher[5]).toContain("MERGE (keep)-[moved:FROM]->(other)");
+    expect(cypher[6]).toContain("-[rel:FROM]->(drop:Rkz {id: $dropId");
+    expect(cypher[7]).toContain("-[rel:MENTIONS]->(other)");
+    expect(cypher[7]).toContain("MERGE (keep)-[moved:MENTIONS]->(other)");
+    expect(cypher[8]).toContain("-[rel:MENTIONS]->(drop:Rkz {id: $dropId");
+    expect(cypher[9]).toContain("DELETE rel");
+    expect(cypher[10]).toContain("-[rel]-(drop)");
+    const commit = cypher[11] ?? "";
+    expect(commit).toContain("keep:Person");
     expect(commit).toContain("REMOVE keep:Object, keep:Location, keep:Event, keep:Organization");
     expect(commit).toContain("DELETE drop");
     expect(commit).toContain("NOT (drop)--()");
     expect(commit).not.toContain("DETACH DELETE");
-    expect(writes[9]?.params).toMatchObject({
+    expect(writes[11]?.params).toMatchObject({
       keepId: "keep",
       dropId: "drop",
       spaceId: "space-1",
@@ -769,7 +797,10 @@ describe("Neo4j memory client", () => {
       aliasNorms: ["nicolas"],
     });
     expect(writes.every((call) => call.params.spaceId === "space-1")).toBe(true);
-    expect(writes).toHaveLength(10);
+    expect(writes).toHaveLength(12);
+    expect(commit).toContain("SET keep:Entity");
+    expect(commit).not.toContain("REMOVE keep:Rkz");
+    expect(commit).not.toContain("REMOVE keep:Entity");
   });
 
   it("relabels the survivor when the duplicate has a different type", async () => {
@@ -779,6 +810,8 @@ describe("Neo4j memory client", () => {
       { records: [row({ id: "keep" })] },
       { records: [row({ foreign: 0 })] },
       { records: [] },
+      empty,
+      empty,
       empty,
       empty,
       empty,
@@ -811,7 +844,7 @@ describe("Neo4j memory client", () => {
     });
     const commit =
       driver.calls.filter((call) => call.options.access === "write").at(-1)?.cypher ?? "";
-    expect(commit).toContain("SET keep:Object");
+    expect(commit).toContain("keep:Object");
     expect(commit).toContain("REMOVE keep:Person, keep:Location, keep:Event, keep:Organization");
     expect(commit).not.toContain("REMOVE keep:Object");
   });
@@ -858,14 +891,21 @@ describe("Neo4j memory client", () => {
     ).resolves.toEqual({ relations: 5, about: 0, from: 1 });
     expect(driver.calls).toHaveLength(3);
     const relations = driver.calls[0]?.cypher ?? "";
-    expect(relations).toContain("MATCH (a:Rkz:Entity)-[r:RKZ_REL]->(b:Rkz:Entity)");
+    expect(relations).toContain("MATCH (a:Rkz)-[r:RKZ_REL]->(b:Rkz)");
+    expect(relations).not.toContain("MATCH (a:Rkz)-[r:RKZ_REL]-(b:Rkz)");
+    expect(relations).not.toContain("relType <> ''");
     expect(relations).toContain("a.id IN $ids OR b.id IN $ids");
+    expect(relations).toContain("$scope = 'space'");
     expect(relations).toContain("a.spaceId = $spaceId");
     expect(relations).toContain("size(rels) > 1");
     expect(relations).toContain("coalesce(edge.type, '') <> relType");
     expect(relations).toContain("toLower(trim(");
     expect(relations).toContain("keeper.factIds = factIds");
-    expect(relations).toContain("keeper.mentions = size(factIds)");
+    expect(relations).toContain("keeper.firstSeen = coalesce(firstSeen, keeper.firstSeen)");
+    expect(relations).toContain("keeper.lastSeen = coalesce(lastSeen, keeper.lastSeen)");
+    expect(relations).toContain(
+      "keeper.mentions = CASE WHEN size(factIds) > 0 THEN size(factIds) ELSE weight END",
+    );
     expect(relations).toContain("FOREACH (extra IN extras | DELETE extra)");
     expect(relations).not.toContain("MERGE (a)-[r:RKZ_REL");
     expect(driver.calls[0]?.params).toMatchObject({
@@ -885,6 +925,25 @@ describe("Neo4j memory client", () => {
       collapseNeo4jParallelRelations(quiet, "neo4j", { spaceId: "space-1", ids: [] }),
     ).resolves.toEqual({ relations: 0, about: 0, from: 0 });
     expect(quiet.calls).toHaveLength(0);
+
+    const preview = new FakeDriver();
+    preview.rows.push(
+      { records: [row({ removed: 2 })] },
+      { records: [row({ removed: 0 })] },
+      { records: [row({ removed: 0 })] },
+    );
+    await expect(
+      collapseNeo4jParallelRelations(preview, "neo4j", {
+        spaceId: "space-1",
+        ids: [],
+        scope: "space",
+        dryRun: true,
+      }),
+    ).resolves.toEqual({ relations: 2, about: 0, from: 0 });
+    expect(preview.calls.every((call) => call.options.access === "read")).toBe(true);
+    expect(preview.calls[0]?.cypher).toContain("size(rels) > 1");
+    expect(preview.calls[0]?.cypher).not.toContain("DELETE");
+    expect(preview.calls[0]?.params).toMatchObject({ scope: "space" });
   });
 
   it("unions relation provenance without counting a repeated fact twice", () => {
@@ -926,6 +985,12 @@ describe("Neo4j memory client", () => {
     expect(merged.validTo).toBeNull();
     expect(merged.time).toBe("1843");
     expect(merged.createdAt).toBe("2026-01-15T00:00:00.000Z");
+    const livesIn = relationCollapseKey("fabriq", "vigie", "Lives In");
+    expect(livesIn).toBe(relationCollapseKey("fabriq", "vigie", "lives_in"));
+    expect(livesIn).not.toBe(relationCollapseKey("fabriq", "vigie", "works_at"));
+    expect(livesIn).not.toBe(relationCollapseKey("vigie", "fabriq", "lives_in"));
+    expect(relationCollapseKey("fabriq", "vigie", "")).toBeNull();
+    expect(relationCollapseKey("fabriq", "fabriq", "lives_in")).toBeNull();
     expect(
       unionRelationIds(
         ["fact-a"],

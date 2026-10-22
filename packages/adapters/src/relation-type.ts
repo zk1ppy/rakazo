@@ -19,6 +19,17 @@ export function normalizeRelationType(value: string): string | null {
   return normalized;
 }
 
+/**
+ * Directed identity of one business relation.
+ * "lives in" and "LIVES_IN" share a key. The reverse direction does not.
+ * An empty type has no key: callers keep those edges out of a typed collapse.
+ */
+export function relationCollapseKey(fromId: string, toId: string, type: string): string | null {
+  const normalized = normalizeRelationType(type);
+  if (!normalized || !fromId.trim() || !toId.trim() || fromId === toId) return null;
+  return `${fromId}\n${normalized}\n${toId}`;
+}
+
 /** Order-preserving unique union, capped so one edge cannot grow without bound. */
 export function unionRelationIds(
   existing: readonly string[],

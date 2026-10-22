@@ -704,6 +704,8 @@ export interface BackgroundJobPayloads {
     attempt: number;
     scheduleGeneration: number;
     automatic?: boolean;
+    /** Read the plan and relation counts. Do not merge, relabel, or delete. */
+    dryRun?: boolean;
   };
 }
 
