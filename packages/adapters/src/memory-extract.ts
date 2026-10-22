@@ -19,7 +19,11 @@ import { resolveDeploymentModel } from "./deployment-model.js";
 import { combineJobAbort, JobAbortedError, throwIfJobAborted } from "./job-abort.js";
 import type { Neo4jEntityType } from "./neo4j-memory-client.js";
 import { NEO4J_ENTITY_TYPES } from "./neo4j-memory-client.js";
-import { EXTRACT_ANSWER_TOKENS, extractionThinkingLevel } from "./pi-runtime-limits.js";
+import {
+  EXTRACT_ANSWER_TOKENS,
+  extractionCompletionTokens,
+  extractionThinkingLevel,
+} from "./pi-runtime-limits.js";
 import { normalizeRelationType } from "./relation-type.js";
 
 export { normalizeRelationType } from "./relation-type.js";
@@ -506,7 +510,7 @@ export interface MemoryExtractDeps {
   deploymentModelConfigured?: boolean;
 }
 
-type ExtractCall = "ok" | "rate_limit" | "timeout";
+type ExtractCall = "ok" | "rate_limit" | "timeout" | "truncated";
 
 /** Blank or invalid values fall back so a bad environment cannot wedge the job. */
 export function readExtractTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
@@ -684,8 +688,12 @@ export class MemoryExtractPermanentError extends Error {
 }
 
 /**
- * One model call per remaining chunk, awaited in order. A 429 enqueues the rest
- * of this fact onto the global memory-extract queue and returns successfully.
+ * One model call per remaining chunk, awaited in order. A 429, a timeout, or a
+ * truncated reply enqueues the rest of this fact onto the global memory-extract
+ * queue and returns successfully. A truncated reply is `stop_reason` length or
+ * JSON that never closes. It is not applied and does not set `extractedAt`.
+ * Chunks that already returned a complete reply stay written; the retry starts
+ * at the truncated chunk and stops after the existing attempt budget.
  */
 export async function extractMemoryGraph(
   deps: MemoryExtractDeps,
@@ -719,7 +727,8 @@ export async function extractMemoryGraph(
     const chunk = chunks[index];
     if (!chunk) continue;
     const call = await callExtractor(deps, payload, model, chunk, index, subjectName, ownerAliases);
-    if (call.kind === "rate_limit" || call.kind === "timeout") {
+    if (call.kind === "rate_limit" || call.kind === "timeout" || call.kind === "truncated") {
+      if (call.kind === "truncated") logExtractTruncated(payload, index, attempt, call);
       await rescheduleExtract(deps, payload, index, attempt, call.kind);
       return wrote;
     }
@@ -898,33 +907,31 @@ async function rescheduleExtract(
   payload: BackgroundJobPayloads["memory.extract"],
   chunkIndex: number,
   attempt: number,
-  reason: "rate_limit" | "timeout",
+  reason: "rate_limit" | "timeout" | "truncated",
 ): Promise<void> {
   if (attempt + 1 >= MAX_EXTRACT_ATTEMPTS) {
-    getLogger().error(
-      reason === "timeout"
-        ? "memory.extract gave up after timeouts"
-        : "memory.extract gave up after rate limits",
-      {
-        "memory.fact_id": payload.factId,
-        "memory.chunk": chunkIndex,
-      },
-    );
+    getLogger().error(gaveUpMessage(reason), {
+      "memory.fact_id": payload.factId,
+      "memory.chunk": chunkIndex,
+    });
     return;
   }
   const delay = memoryExtractRateLimitDelayMs(attempt);
-  getLogger().info(
-    reason === "timeout"
-      ? "memory.extract will retry after a timeout"
-      : "memory.extract rate limited",
-    {
-      "memory.fact_id": payload.factId,
-      "memory.chunk": chunkIndex,
-      "memory.retry_in_ms": delay,
-      "job.queue": MEMORY_EXTRACT_QUEUE_NAME,
-      ...(reason === "timeout" ? { "job.outcome": "transient" as const } : {}),
-    },
-  );
+  // The truncated reply already logged memory.extract truncated, with the cap.
+  if (reason !== "truncated") {
+    getLogger().info(
+      reason === "timeout"
+        ? "memory.extract will retry after a timeout"
+        : "memory.extract rate limited",
+      {
+        "memory.fact_id": payload.factId,
+        "memory.chunk": chunkIndex,
+        "memory.retry_in_ms": delay,
+        "job.queue": MEMORY_EXTRACT_QUEUE_NAME,
+        ...(reason === "timeout" ? { "job.outcome": "transient" as const } : {}),
+      },
+    );
+  }
   await deps.jobs.enqueue(
     memoryExtractJob(
       {
@@ -951,6 +958,7 @@ async function callExtractor(
   text: string;
   stopReason?: string;
   usage?: Extract<AgentRuntimeEvent, { type: "usage" }>;
+  maxOutput?: number;
 }> {
   throwIfJobAborted();
   const timeoutMs = readExtractTimeoutMs();
@@ -962,6 +970,7 @@ async function callExtractor(
       typeof model.maxTokens === "number" && model.maxTokens >= 1 ? model.maxTokens : outputCap;
     callModel.maxTokens = Math.min(ceiling, outputCap);
   }
+  const maxOutput = extractionCompletionTokens(callModel, thinkingLevel, EXTRACT_ANSWER_TOKENS);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   timer.unref?.();
@@ -1038,7 +1047,83 @@ async function callExtractor(
   }
   const text = (finalText || streamed).trim();
   if (!parseJsonObject(text) && isRateLimitMessage(text)) return { kind: "rate_limit", text: "" };
+  if (stopReason === "length" || isIncompleteExtractionJson(text)) {
+    return {
+      kind: "truncated",
+      text,
+      ...(stopReason ? { stopReason } : {}),
+      usage: reportedUsage,
+      maxOutput,
+    };
+  }
   return { kind: "ok", text, stopReason, usage: reportedUsage };
+}
+
+function gaveUpMessage(reason: "rate_limit" | "timeout" | "truncated"): string {
+  if (reason === "timeout") return "memory.extract gave up after timeouts";
+  if (reason === "truncated") return "memory.extract gave up after truncated replies";
+  return "memory.extract gave up after rate limits";
+}
+
+function logExtractTruncated(
+  payload: BackgroundJobPayloads["memory.extract"],
+  chunkIndex: number,
+  attempt: number,
+  call: {
+    text: string;
+    stopReason?: string;
+    usage?: Extract<AgentRuntimeEvent, { type: "usage" }>;
+    maxOutput?: number;
+  },
+): void {
+  const retrying = attempt + 1 < MAX_EXTRACT_ATTEMPTS;
+  getLogger().warn("memory.extract truncated", {
+    "memory.fact_id": payload.factId,
+    "memory.chunk": chunkIndex,
+    ...(retrying ? { "job.outcome": "transient" as const } : {}),
+    ...(call.stopReason ? { "model.stop_reason": call.stopReason } : {}),
+    ...extractionUsageLog(call.usage),
+    ...(typeof call.maxOutput === "number" ? { max_output: call.maxOutput } : {}),
+    "memory.content_length": call.text.length,
+    "memory.json_found": parseJsonObject(call.text) !== null,
+  });
+}
+
+/**
+ * A reply that opened JSON and never closed it. A balanced object, including
+ * `{"entities":[],"relations":[]}`, is complete. Reasoning fences are ignored
+ * so a thought that mentions a brace is not a truncated answer.
+ */
+function isIncompleteExtractionJson(text: string): boolean {
+  if (parseJsonObject(text) !== null) return false;
+  const visible = text.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "");
+  return jsonCutOff(visible);
+}
+
+function jsonCutOff(text: string): boolean {
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  let opened = false;
+  for (const char of text) {
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"') {
+      quoted = true;
+      continue;
+    }
+    if (char === "{" || char === "[") {
+      opened = true;
+      depth += 1;
+      continue;
+    }
+    if ((char === "}" || char === "]") && depth > 0) depth -= 1;
+  }
+  return opened && (depth > 0 || quoted);
 }
 
 function logExtractTimeout(

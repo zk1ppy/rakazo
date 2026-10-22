@@ -880,6 +880,141 @@ describe("extractMemoryGraph", () => {
     expect(JSON.stringify(sink.events)).not.toContain("nicolas");
   });
 
+  it("retries a length-capped reply instead of marking the fact extracted", async () => {
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "rakazo", sinks: [sink] }));
+    const queue = jobs();
+    const memory = store("Ada Lovelace founded the Analytical Society in London.");
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield {
+        type: "usage" as const,
+        provider: "openai-compatible",
+        model: "glm",
+        inputTokens: 80,
+        outputTokens: 4_096,
+        reasoningTokens: 4_000,
+      };
+      yield {
+        type: "done" as const,
+        text: '{"entities":[{"type":"Person","name":"Ada Lovelace"}],"relations":[]}',
+        stopReason: "length",
+      };
+    });
+    await expect(
+      extractMemoryGraph(
+        deps(run, queue, false, {
+          ...model,
+          reasoning: true,
+          maxTokens: 4_096,
+        }),
+        payload(),
+        memory,
+      ),
+    ).resolves.toBe(false);
+    expect(memory.applyExtraction).not.toHaveBeenCalled();
+    expect(memory.markExtracted).not.toHaveBeenCalled();
+    expect(queue.enqueue).toHaveBeenCalledTimes(1);
+    const job = queue.enqueue.mock.calls[0]?.[0];
+    expect(job?.name).toBe("memory.extract");
+    if (job?.name !== "memory.extract") throw new Error("expected memory.extract");
+    expect(job.payload).toMatchObject({ chunkIndex: 0, attempt: 1, scheduleGeneration: 1 });
+    expect(job.queueName).toBe("memory-extract");
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({
+        level: "warn",
+        message: "memory.extract truncated",
+        "memory.fact_id": "fact-1",
+        "memory.chunk": 0,
+        "job.outcome": "transient",
+        "model.stop_reason": "length",
+        "usage.output": 4_096,
+        max_output: 4_096,
+        "memory.json_found": true,
+      }),
+    );
+    expect(JSON.stringify(sink.events)).not.toContain("Lovelace");
+  });
+
+  it("retries JSON that never closes and stops after the attempt budget", async () => {
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "rakazo", sinks: [sink] }));
+    const queue = jobs();
+    const memory = store("Ada Lovelace founded the Analytical Society in London.");
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield {
+        type: "usage" as const,
+        provider: "openai-compatible",
+        model: "glm",
+        inputTokens: 20,
+        outputTokens: 1_024,
+      };
+      yield { type: "done" as const, text: '{"entities":[{"type":"Person","name":"Ada"' };
+    });
+    await expect(extractMemoryGraph(deps(run, queue), payload(), memory)).resolves.toBe(false);
+    expect(memory.markExtracted).not.toHaveBeenCalled();
+    expect(queue.enqueue).toHaveBeenCalledTimes(1);
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({
+        message: "memory.extract truncated",
+        "usage.output": 1_024,
+        max_output: 1_024,
+        "memory.json_found": false,
+      }),
+    );
+
+    const exhausted = jobs();
+    const finished = store("Ada Lovelace founded the Analytical Society in London.");
+    await expect(
+      extractMemoryGraph(deps(run, exhausted), payload({ attempt: 4 }), finished),
+    ).resolves.toBe(false);
+    expect(exhausted.enqueue).not.toHaveBeenCalled();
+    expect(finished.markExtracted).not.toHaveBeenCalled();
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({ message: "memory.extract gave up after truncated replies" }),
+    );
+    const truncated = sink.events.filter((event) => event.message === "memory.extract truncated");
+    expect(truncated).toHaveLength(2);
+    expect(truncated[0]).toMatchObject({ "job.outcome": "transient" });
+    expect(truncated[1]).not.toHaveProperty("job.outcome");
+    expect(truncated[1]).toMatchObject({ "usage.output": 1_024, max_output: 1_024 });
+  });
+
+  it("keeps a finished chunk and retries only the truncated one", async () => {
+    let calls = 0;
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: "done" as const,
+          text: JSON.stringify({
+            entities: [{ type: "Person", name: "Ada Lovelace" }],
+            relations: [],
+          }),
+          stopReason: "stop",
+        };
+        return;
+      }
+      yield {
+        type: "done" as const,
+        text: '{"entities":[{"type":"Organization","name":"Analytical"',
+        stopReason: "length",
+      };
+    });
+    const queue = jobs();
+    const memory = store(longText());
+    await expect(
+      extractMemoryGraph(deps(run, queue), payload({ maxChunkChars: 400 }), memory),
+    ).resolves.toBe(true);
+    expect(calls).toBe(2);
+    expect(memory.applyExtraction).toHaveBeenCalledTimes(1);
+    expect(memory.markExtracted).not.toHaveBeenCalled();
+    const job = queue.enqueue.mock.calls[0]?.[0];
+    expect(job?.name).toBe("memory.extract");
+    if (job?.name !== "memory.extract") throw new Error("expected memory.extract");
+    expect(job.payload).toMatchObject({ chunkIndex: 1, attempt: 1, scheduleGeneration: 1 });
+    expect(queue.enqueue).toHaveBeenCalledTimes(1);
+  });
+
   it("records an empty completion that never produced a JSON object", async () => {
     const sink = createTestSink();
     installLogger(createLogger({ service: "rakazo", sinks: [sink] }));
