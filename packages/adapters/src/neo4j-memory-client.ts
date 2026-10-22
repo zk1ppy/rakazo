@@ -15,6 +15,8 @@ export const NEO4J_FACT_FULLTEXT_INDEX = "rkz_fact_text";
 export const NEO4J_ENTITY_FULLTEXT_INDEX = "rkz_entity_name";
 /** Entity-to-entity edges. Prefixed so they do not share another application's relationship type. */
 export const NEO4J_ENTITY_RELATIONSHIP = "RKZ_REL";
+/** A model refusal to merge two entities. Scoped by spaceId, namespace, and bot id. */
+export const NEO4J_DECLINED_RELATIONSHIP = "RKZ_DECLINED";
 
 export const NEO4J_ENTITY_TYPES = [
   "Person",
@@ -87,6 +89,8 @@ export const NEO4J_MEMORY_SCHEMA_STATEMENTS = [
    FOR (n:Rkz) ON (n.spaceId, n.botId, n.kind, n.generation)`,
   `CREATE INDEX rkz_rel_fact IF NOT EXISTS
    FOR ()-[r:${NEO4J_ENTITY_RELATIONSHIP}]-() ON (r.factId)`,
+  `CREATE INDEX rkz_declined_scope IF NOT EXISTS
+   FOR ()-[r:${NEO4J_DECLINED_RELATIONSHIP}]-() ON (r.spaceId, r.ns)`,
   `CREATE FULLTEXT INDEX ${NEO4J_FACT_FULLTEXT_INDEX} IF NOT EXISTS
    FOR (n:Rkz) ON EACH [n.text]`,
   `CREATE FULLTEXT INDEX ${NEO4J_ENTITY_FULLTEXT_INDEX} IF NOT EXISTS
@@ -1081,6 +1085,118 @@ export async function listNeo4jConsolidationEntities(
     if (entity) entities.push(entity);
   }
   return entities;
+}
+
+export interface Neo4jDeclinedPair {
+  leftId: string;
+  rightId: string;
+  ns: string;
+  botId: string;
+  leftFingerprint: string;
+  rightFingerprint: string;
+}
+
+export interface Neo4jDeclinedPairWrite extends Neo4jDeclinedPair {
+  spaceId: string;
+  now: string;
+}
+
+/**
+ * Refusals whose endpoints are both in `ids`. `spaceId` is the tenant boundary
+ * used by every other Rakazo node. `ns` and `botId` keep a shared refusal off
+ * an isolated bot, and the reverse.
+ */
+export async function listNeo4jDeclinedPairs(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string; ns?: string; ids: string[] },
+  signal?: AbortSignal,
+): Promise<Neo4jDeclinedPair[]> {
+  const ids = [...new Set(input.ids.filter((id) => id.trim().length > 0))];
+  if (ids.length === 0) return [];
+  const result = await driver.run(
+    `MATCH (left:Rkz {spaceId: $spaceId})-[d:${NEO4J_DECLINED_RELATIONSHIP} {spaceId: $spaceId}]-(right:Rkz {spaceId: $spaceId})
+     WHERE left.id IN $ids AND right.id IN $ids
+       AND left.id < right.id
+       AND left.spaceId = $spaceId AND right.spaceId = $spaceId
+       AND ($ns = '' OR (d.ns = $ns AND left.ns = $ns AND right.ns = $ns))
+     RETURN left.id AS leftId,
+            right.id AS rightId,
+            coalesce(d.ns, '') AS ns,
+            coalesce(d.botId, '') AS botId,
+            coalesce(d.leftFingerprint, '') AS leftFingerprint,
+            coalesce(d.rightFingerprint, '') AS rightFingerprint`,
+    {
+      spaceId: input.spaceId,
+      ns: input.ns?.trim() ?? "",
+      ids,
+    },
+    { database, access: "read", signal },
+  );
+  const pairs: Neo4jDeclinedPair[] = [];
+  for (const record of result.records) {
+    const leftId = asString(record.get("leftId"));
+    const rightId = asString(record.get("rightId"));
+    if (!leftId || !rightId) continue;
+    pairs.push({
+      leftId,
+      rightId,
+      ns: asString(record.get("ns")),
+      botId: asString(record.get("botId")),
+      leftFingerprint: asString(record.get("leftFingerprint")),
+      rightFingerprint: asString(record.get("rightFingerprint")),
+    });
+  }
+  return pairs;
+}
+
+/** One refusal between two entities in the same space and namespace. Ids are ordered by the caller. */
+export async function rememberNeo4jDeclinedPair(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: Neo4jDeclinedPairWrite,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!input.leftId || !input.rightId || input.leftId === input.rightId) return;
+  if (input.leftId > input.rightId) return;
+  await driver.run(
+    `MATCH (left:Rkz {id: $leftId, spaceId: $spaceId})
+     MATCH (right:Rkz {id: $rightId, spaceId: $spaceId})
+     WHERE left.ns = $ns AND right.ns = $ns AND left.id < right.id
+     MERGE (left)-[d:${NEO4J_DECLINED_RELATIONSHIP} {spaceId: $spaceId}]->(right)
+     SET d.ns = $ns,
+         d.botId = $botId,
+         d.leftFingerprint = $leftFingerprint,
+         d.rightFingerprint = $rightFingerprint,
+         d.decidedAt = $now`,
+    {
+      spaceId: input.spaceId,
+      leftId: input.leftId,
+      rightId: input.rightId,
+      ns: input.ns,
+      botId: input.botId,
+      leftFingerprint: input.leftFingerprint,
+      rightFingerprint: input.rightFingerprint,
+      now: input.now,
+    },
+    { database, access: "write", signal },
+  );
+}
+
+/** Remove a refusal after one endpoint's name, type, or aliases changed. */
+export async function forgetNeo4jDeclinedPair(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string; leftId: string; rightId: string },
+  signal?: AbortSignal,
+): Promise<void> {
+  await driver.run(
+    `MATCH (left:Rkz {id: $leftId, spaceId: $spaceId})-[d:${NEO4J_DECLINED_RELATIONSHIP} {spaceId: $spaceId}]-(right:Rkz {id: $rightId, spaceId: $spaceId})
+     WHERE left.spaceId = $spaceId AND right.spaceId = $spaceId
+     DELETE d`,
+    input,
+    { database, access: "write", signal },
+  );
 }
 
 export type Neo4jDuplicateMergeReason = "guard" | "foreign" | "unsafe" | "leftover";

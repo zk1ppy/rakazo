@@ -535,6 +535,15 @@ SANDBOX_IDLE_MS=600000    # pause or stop after 10 minutes idle; 0 disables idle
 COMPUTER_MAX_ACTIVE_MS=7200000 # uptime cap for providers that bill while running; minimum 60000; 0 disables
 SANDBOX_COMMAND_TIMEOUT_MS=300000 # stop a shell command after 5 minutes
 MAX_TOOL_CALLS_PER_TURN=  # optional Pi turn tool-call fuse; unset/0 = unlimited
+# Neo4j memory jobs. Unset keeps confirmation 180000 ms / effort low / 32768 tokens,
+# and extraction 90000 ms with the connection cap. A saved Neo4j consolidate
+# setting wins. MEMORY_EXTRACT_THINKING_LEVEL does not override a connection minimum.
+# MEMORY_CONSOLIDATE_TIMEOUT_MS=180000
+# MEMORY_EXTRACT_TIMEOUT_MS=90000
+# MEMORY_CONSOLIDATE_THINKING_LEVEL=low
+# MEMORY_EXTRACT_THINKING_LEVEL=
+# MEMORY_CONSOLIDATE_MAX_OUTPUT_TOKENS=32768
+# MEMORY_EXTRACT_MAX_OUTPUT_TOKENS=
 RAKAZO_MESSAGE_USER_MAX_CHARS=500 # message_user length cap; narration stays at 500
 BOT_MESSAGE_MAX_HOPS=6    # bot-to-bot messages one chain may carry before the next is refused
 E2B_API_KEY=              # when SANDBOX_PROVIDER=e2b

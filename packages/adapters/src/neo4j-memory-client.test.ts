@@ -9,9 +9,11 @@ import {
   ensureNeo4jMemorySchema,
   escapeLuceneQuery,
   findNeo4jPeopleByNorms,
+  forgetNeo4jDeclinedPair,
   linkNeo4jEntities,
   linkNeo4jFactEntity,
   listNeo4jConsolidationEntities,
+  listNeo4jDeclinedPairs,
   listUnextractedNeo4jFacts,
   markNeo4jFactExtracted,
   mergeExtractedNeo4jEntity,
@@ -24,6 +26,7 @@ import {
   readNeo4jFactText,
   realignNeo4jFactTimes,
   recallNeo4jFacts,
+  rememberNeo4jDeclinedPair,
   renameNeo4jEntity,
   resolveNeo4jBoltAddress,
   saveNeo4jFact,
@@ -997,5 +1000,79 @@ describe("Neo4j memory client", () => {
         Array.from({ length: 80 }, (_, index) => `fact-${index}`),
       ),
     ).toHaveLength(64);
+  });
+});
+
+describe("declined consolidation pairs", () => {
+  it("stores a refusal on the two nodes, scoped to the space, namespace, and bot", async () => {
+    const driver = new FakeDriver();
+    await rememberNeo4jDeclinedPair(driver, "neo4j", {
+      spaceId: "space-1",
+      leftId: "apple-org",
+      rightId: "apple-person",
+      ns: "isolated:bot-1",
+      botId: "bot-1",
+      leftFingerprint: "Organization\napple\n",
+      rightFingerprint: "Person\napple\n",
+      now: "2026-10-22T00:00:00.000Z",
+    });
+    const write = driver.calls[0];
+    expect(write?.cypher).toContain("RKZ_DECLINED");
+    expect(write?.cypher).toContain("spaceId: $spaceId");
+    expect(write?.cypher).toContain("d.botId = $botId");
+    expect(write?.params).toMatchObject({
+      spaceId: "space-1",
+      ns: "isolated:bot-1",
+      botId: "bot-1",
+      leftId: "apple-org",
+      rightId: "apple-person",
+    });
+    expect(write?.options.access).toBe("write");
+
+    driver.rows.push({
+      records: [
+        row({
+          leftId: "apple-org",
+          rightId: "apple-person",
+          ns: "isolated:bot-1",
+          botId: "bot-1",
+          leftFingerprint: "Organization\napple\n",
+          rightFingerprint: "Person\napple\n",
+        }),
+      ],
+    });
+    const found = await listNeo4jDeclinedPairs(driver, "neo4j", {
+      spaceId: "space-1",
+      ns: "isolated:bot-1",
+      ids: ["apple-person", "apple-org"],
+    });
+    expect(found).toEqual([
+      {
+        leftId: "apple-org",
+        rightId: "apple-person",
+        ns: "isolated:bot-1",
+        botId: "bot-1",
+        leftFingerprint: "Organization\napple\n",
+        rightFingerprint: "Person\napple\n",
+      },
+    ]);
+    const read = driver.calls[1];
+    expect(read?.cypher).toContain("RKZ_DECLINED {spaceId: $spaceId}");
+    expect(read?.cypher).toContain("left.spaceId = $spaceId");
+    expect(read?.cypher).toContain("left.ns = $ns");
+    expect(read?.params).toMatchObject({ spaceId: "space-1", ns: "isolated:bot-1" });
+    expect(read?.options.access).toBe("read");
+
+    await forgetNeo4jDeclinedPair(driver, "neo4j", {
+      spaceId: "space-1",
+      leftId: "apple-org",
+      rightId: "apple-person",
+    });
+    expect(driver.calls[2]?.cypher).toContain("DELETE d");
+    expect(driver.calls[2]?.params).toMatchObject({ spaceId: "space-1" });
+    await expect(
+      listNeo4jDeclinedPairs(driver, "neo4j", { spaceId: "space-1", ids: [] }),
+    ).resolves.toEqual([]);
+    expect(driver.calls).toHaveLength(3);
   });
 });

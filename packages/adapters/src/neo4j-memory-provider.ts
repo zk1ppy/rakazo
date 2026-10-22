@@ -15,7 +15,12 @@ import type {
 import { memoryExtractJob } from "@rakazo/adapter-kit";
 import { isCloudMetadataHost, isLocalMcpHost } from "@rakazo/contracts";
 import { getLogger } from "@rakazo/logging";
-import type { ConsolidateModelSettings, ConsolidationPage } from "./memory-consolidate.js";
+import type {
+  ConsolidateModelSettings,
+  ConsolidationDecline,
+  ConsolidationDeclineWrite,
+  ConsolidationPage,
+} from "./memory-consolidate.js";
 import {
   assertConsolidateMaxOutputTokens,
   assertConsolidateThinkingLevel,
@@ -50,10 +55,12 @@ import {
   ensureNeo4jMemorySchema,
   escapeLuceneQuery,
   findNeo4jPeopleByNorms,
+  forgetNeo4jDeclinedPair,
   forgetNeo4jFact,
   linkNeo4jEntities,
   linkNeo4jFactEntity,
   listNeo4jConsolidationEntities,
+  listNeo4jDeclinedPairs,
   listUnextractedNeo4jFacts,
   markNeo4jFactExtracted,
   mergeExtractedNeo4jEntity,
@@ -64,6 +71,7 @@ import {
   readNeo4jFactText,
   realignNeo4jFactTimes,
   recallNeo4jFacts,
+  rememberNeo4jDeclinedPair,
   renameNeo4jEntity,
   saveNeo4jFact,
   stampNeo4jExtractedFacts,
@@ -799,6 +807,42 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
       pageIds: page.map((entity) => entity.id),
       pageFull: page.length >= input.limit,
     };
+  }
+
+  async listDeclinedPairs(
+    input: { spaceId: string; ns?: string; ids: string[] },
+    signal?: AbortSignal,
+  ): Promise<ConsolidationDecline[]> {
+    return listNeo4jDeclinedPairs(
+      await this.ready(signal),
+      this.connection.database,
+      input,
+      signal,
+    );
+  }
+
+  async rememberDeclinedPair(
+    input: ConsolidationDeclineWrite,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await rememberNeo4jDeclinedPair(
+      await this.ready(signal),
+      this.connection.database,
+      input,
+      signal,
+    );
+  }
+
+  async forgetDeclinedPair(
+    input: { spaceId: string; leftId: string; rightId: string },
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await forgetNeo4jDeclinedPair(
+      await this.ready(signal),
+      this.connection.database,
+      input,
+      signal,
+    );
   }
 
   async mergeDuplicateEntity(input: Neo4jDuplicateMerge, signal?: AbortSignal) {

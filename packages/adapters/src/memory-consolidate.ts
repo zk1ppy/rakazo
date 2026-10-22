@@ -12,6 +12,7 @@ import { getLogger } from "@rakazo/logging";
 import { resolveDeploymentModel } from "./deployment-model.js";
 import type { Neo4jExtractionModel } from "./memory-extract.js";
 import {
+  isMemoryModelTimeout,
   isRoleLikeName,
   normalizeEntityName,
   ownerResolution,
@@ -40,11 +41,13 @@ import { REASONING_MODEL_MAX_TOKENS } from "./pi-runtime-limits.js";
  * Model calls share the `memory-extract` queue and run one at a time inside the
  * job. Each run asks at most {@link MAX_CONSOLIDATE_LLM_CALLS} times, then
  * reschedules itself if ambiguous pairs remain. A confirmation that is aborted
- * or times out is transient: that pair waits for a later attempt, and the rest
- * of the page still runs. A permanent model failure remembers the pair and
- * continues. If that error still leaves the job, the handler returns so
- * Graphile does not spend another attempt. Merges already committed stay
- * committed.
+ * or times out does not hold the page: that pair is skipped for the rest of
+ * this chain (a bounded list, retried on a later run) and the cursor still
+ * advances. A model refusal is stored on the two nodes and is not asked again
+ * until a name, type, or alias changes. A permanent model failure remembers
+ * the pair for this chain and continues. If that error still leaves the job,
+ * the handler returns so Graphile does not spend another attempt. Merges
+ * already committed stay committed.
  *
  * Canonical name. The surviving node's `name` and `normName` are the more
  * specific display name: a role name loses to a proper name, then more content
@@ -116,6 +119,8 @@ export const MAX_CONSOLIDATE_MERGES = 40;
 export const MAX_CONSOLIDATE_LLM_CALLS = 4;
 export const MAX_CONSOLIDATE_CARRY = 40;
 export const MAX_CONSOLIDATE_REJECTED = 80;
+/** Timed-out pairs carried so this chain does not ask them again. */
+export const MAX_CONSOLIDATE_SKIPPED = 80;
 export const MAX_CONSOLIDATE_ATTEMPTS = 5;
 const CONSOLIDATE_ANSWER_TOKENS = 256;
 const MAX_SCHEDULE_GENERATION = 400;
@@ -195,19 +200,28 @@ export interface ConsolidateModelSettings {
   timeoutMs: number;
 }
 
-/** Missing or invalid stored values use the yes/no defaults so a bad row cannot wedge the job. */
+/**
+ * Missing or invalid stored values use the environment, then the yes/no
+ * defaults, so a bad row cannot wedge the job. A value saved on the provider
+ * wins over the environment. Blank environment values keep today's defaults.
+ */
 export function readConsolidateModelSettings(
   settings: Record<string, string>,
+  env: NodeJS.ProcessEnv = process.env,
 ): ConsolidateModelSettings {
   return {
     thinkingLevel:
       parseConsolidateThinkingLevel(settings.consolidateThinkingLevel) ??
+      parseConsolidateThinkingLevel(env.MEMORY_CONSOLIDATE_THINKING_LEVEL) ??
       DEFAULT_CONSOLIDATE_THINKING_LEVEL,
     maxOutputTokens:
       parseConsolidateMaxOutputTokens(settings.consolidateMaxOutputTokens) ??
+      parseConsolidateMaxOutputTokens(env.MEMORY_CONSOLIDATE_MAX_OUTPUT_TOKENS) ??
       DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
     timeoutMs:
-      parseConsolidateTimeoutMs(settings.consolidateTimeoutMs) ?? DEFAULT_CONSOLIDATE_TIMEOUT_MS,
+      parseConsolidateTimeoutMs(settings.consolidateTimeoutMs) ??
+      parseConsolidateTimeoutMs(env.MEMORY_CONSOLIDATE_TIMEOUT_MS) ??
+      DEFAULT_CONSOLIDATE_TIMEOUT_MS,
   };
 }
 
@@ -320,6 +334,36 @@ export interface MemoryConsolidateStore {
     input: { spaceId: string; ns?: string; norms: string[] },
     signal?: AbortSignal,
   ): Promise<Neo4jConsolidationEntity[]>;
+  /**
+   * Model refusals whose endpoints are in `ids`. Scoped like the entities:
+   * spaceId is the tenant, plus namespace and bot id.
+   */
+  listDeclinedPairs(
+    input: { spaceId: string; ns?: string; ids: string[] },
+    signal?: AbortSignal,
+  ): Promise<ConsolidationDecline[]>;
+  /** Remember a model refusal. A later pass skips the pair while the fingerprint matches. */
+  rememberDeclinedPair(input: ConsolidationDeclineWrite, signal?: AbortSignal): Promise<void>;
+  /** Drop a refusal whose nodes have since changed, so the pair can be asked again. */
+  forgetDeclinedPair(
+    input: { spaceId: string; leftId: string; rightId: string },
+    signal?: AbortSignal,
+  ): Promise<void>;
+}
+
+/** A stored model refusal. Fingerprints are name, type, and aliases at decision time. */
+export interface ConsolidationDecline {
+  leftId: string;
+  rightId: string;
+  ns: string;
+  botId: string;
+  leftFingerprint: string;
+  rightFingerprint: string;
+}
+
+export interface ConsolidationDeclineWrite extends ConsolidationDecline {
+  spaceId: string;
+  now: string;
 }
 
 export interface MemoryConsolidateDeps {
@@ -381,6 +425,41 @@ interface ConsolidationCandidate {
 
 export function consolidationPairKey(leftId: string, rightId: string): string {
   return leftId < rightId ? `${leftId}\n${rightId}` : `${rightId}\n${leftId}`;
+}
+
+/** Normalized name, type, and aliases. A display-name case change does not move this. */
+export function consolidationEntityFingerprint(entity: {
+  type: string;
+  normName: string;
+  aliasNorms: readonly string[];
+}): string {
+  const aliases = [
+    ...new Set(entity.aliasNorms.map((alias) => alias.trim()).filter(Boolean)),
+  ].sort();
+  return `${entity.type}\n${entity.normName}\n${aliases.join("\n")}`;
+}
+
+/** `isolated:<bot>` and `history:<bot>` carry the bot. Shared memory is the space, not one bot. */
+export function memoryBotIdFromNamespace(ns: string): string {
+  if (ns.startsWith("isolated:")) return ns.slice("isolated:".length);
+  if (ns.startsWith("history:")) return ns.slice("history:".length);
+  return "";
+}
+
+/** Stable endpoint order so one refusal is one record. */
+export function declinedPairIdentity(
+  left: Neo4jConsolidationEntity,
+  right: Neo4jConsolidationEntity,
+): ConsolidationDecline {
+  const [first, second] = left.id < right.id ? [left, right] : [right, left];
+  return {
+    leftId: first.id,
+    rightId: second.id,
+    ns: first.ns,
+    botId: memoryBotIdFromNamespace(first.ns),
+    leftFingerprint: consolidationEntityFingerprint(first),
+    rightFingerprint: consolidationEntityFingerprint(second),
+  };
 }
 
 /** Case, accents, and punctuation fold. Slash segments stay whole keys, not tokens. */
@@ -701,7 +780,9 @@ export async function consolidateMemoryGraph(
     store.ownerAliases(),
   );
   const entities = await withOwnerPeople(store, payload, page.entities, owner);
-  const rejected = new Set(payload.rejected ?? []);
+  const skipped = new Set(payload.skipped ?? []);
+  const rejected = new Set([...(payload.rejected ?? []), ...skipped]);
+  await applyStoredDeclines(store, payload, entities, rejected);
   const pairs = selectCandidates(entities, rejected, owner);
   const needsModel = pairs.some((pair) => pair.action === "confirm");
   const model = needsModel ? await resolveConsolidateModel(deps, payload, store) : null;
@@ -743,7 +824,7 @@ export async function consolidateMemoryGraph(
         deferredConfirm = true;
         continue;
       }
-      let answer: boolean | Neo4jEntityType | "omit-type" | "rate_limit" | "timeout";
+      let answer: boolean | Neo4jEntityType | "omit-type" | "rate_limit" | "timeout" | "unreadable";
       try {
         answer = await confirmDuplicate(
           deps,
@@ -771,14 +852,31 @@ export async function consolidateMemoryGraph(
       if (answer === "timeout") {
         llmCalls += 1;
         timedOutKeys.push(key);
+        skipped.add(key);
+        rejected.add(key);
+        noteRejection(rejectionReasons, payload, left, right, "timeout");
         continue;
       }
       llmCalls += 1;
-      if (answer === false) {
+      if (answer === false || answer === "unreadable") {
         declined += 1;
         rejectedPairs += 1;
         rejected.add(key);
-        noteRejection(rejectionReasons, payload, left, right, "declined");
+        if (answer === false && left.ns === right.ns) {
+          const identity = declinedPairIdentity(left, right);
+          await store.rememberDeclinedPair({
+            spaceId: payload.spaceId,
+            ...identity,
+            now: new Date().toISOString(),
+          });
+        }
+        noteRejection(
+          rejectionReasons,
+          payload,
+          left,
+          right,
+          answer === false ? "declined" : "unreadable",
+        );
         continue;
       }
       accepted += 1;
@@ -840,12 +938,12 @@ export async function consolidateMemoryGraph(
     "memory.from": collapsedBefore.from + collapsedAfter.from,
   });
 
-  const retryTimeout = timedOutKeys.length > 0 && payload.attempt + 1 < MAX_CONSOLIDATE_ATTEMPTS;
-  if (!retryTimeout) {
-    for (const key of timedOutKeys) rejected.add(key);
-  }
-  const rejectedList = boundList([...rejected], MAX_CONSOLIDATE_REJECTED);
-  const followUp = rateLimited || retryTimeout || deferredMerge || deferredConfirm || page.pageFull;
+  const skippedList = boundList([...skipped], MAX_CONSOLIDATE_SKIPPED);
+  const rejectedList = boundList(
+    [...rejected].filter((key) => !skipped.has(key)),
+    MAX_CONSOLIDATE_REJECTED,
+  );
+  const followUp = rateLimited || deferredMerge || deferredConfirm || page.pageFull;
   getLogger().info("memory.consolidate finished a page", {
     "memory.space_id": payload.spaceId,
     "memory.merged": merges,
@@ -856,28 +954,27 @@ export async function consolidateMemoryGraph(
     "memory.rejected_reasons": formatRejectionReasons(rejectionReasons),
     "memory.relations_deduped": collapsedBefore.relations + collapsedAfter.relations,
     "memory.timed_out": timedOutKeys.length,
+    "memory.skipped": skippedList.length,
     "memory.page": page.pageIds.length,
     "memory.follow_up": followUp,
   });
-  if (rateLimited) {
-    await rescheduleRateLimit(deps, payload, rejectedList);
-    return;
-  }
-  if (retryTimeout) {
-    await rescheduleTimeout(deps, payload, rejectedList, timedOutKeys.length);
-    return;
-  }
   if (timedOutKeys.length > 0) {
-    getLogger().error("memory.consolidate gave up after confirmation timeouts", {
+    getLogger().info("memory.consolidate skipped a timed-out confirmation", {
       "memory.space_id": payload.spaceId,
       "memory.timed_out": timedOutKeys.length,
+      "job.outcome": "transient",
     });
+  }
+  if (rateLimited) {
+    await rescheduleRateLimit(deps, payload, rejectedList, skippedList);
+    return;
   }
   if (deferredMerge || deferredConfirm) {
     await enqueueContinuation(deps, payload, {
       ...(payload.afterId ? { afterId: payload.afterId } : {}),
       ...(payload.carryIds?.length ? { carryIds: payload.carryIds } : {}),
       rejected: rejectedList,
+      skipped: skippedList,
       attempt: 0,
     });
     return;
@@ -890,8 +987,51 @@ export async function consolidateMemoryGraph(
     afterId,
     carryIds: nextCarry(payload.carryIds ?? [], [...live.values()], scanned),
     rejected: rejectedList,
+    skipped: skippedList,
     attempt: 0,
   });
+}
+
+/**
+ * A stored refusal blocks the pair while both nodes still have the same
+ * normalized name, type, and aliases. A mismatch is forgotten on a real run
+ * so the pair can be asked again. A dry run only hides a still-matching refusal.
+ */
+async function applyStoredDeclines(
+  store: MemoryConsolidateStore,
+  scope: { spaceId: string; ns?: string },
+  entities: readonly Neo4jConsolidationEntity[],
+  rejected: Set<string>,
+  options?: { forgetStale?: boolean },
+): Promise<void> {
+  const ids = entities.map((entity) => entity.id);
+  if (ids.length === 0) return;
+  const declines = await store.listDeclinedPairs({
+    spaceId: scope.spaceId,
+    ...(scope.ns ? { ns: scope.ns } : {}),
+    ids,
+  });
+  const byId = new Map(entities.map((entity) => [entity.id, entity]));
+  const forgetStale = options?.forgetStale !== false;
+  for (const decline of declines) {
+    const left = byId.get(decline.leftId);
+    const right = byId.get(decline.rightId);
+    if (!left || !right || left.ns !== right.ns || left.ns !== decline.ns) continue;
+    const current = declinedPairIdentity(left, right);
+    const fresh =
+      current.leftFingerprint === decline.leftFingerprint &&
+      current.rightFingerprint === decline.rightFingerprint;
+    if (fresh) {
+      rejected.add(consolidationPairKey(left.id, right.id));
+      continue;
+    }
+    if (!forgetStale) continue;
+    await store.forgetDeclinedPair({
+      spaceId: scope.spaceId,
+      leftId: decline.leftId,
+      rightId: decline.rightId,
+    });
+  }
 }
 
 /** Page members plus entities carried forward so a merge across the boundary still collapses. */
@@ -1036,7 +1176,15 @@ export async function previewMemoryConsolidation(
       about = collapsed.about;
       from = collapsed.from;
     }
-    for (const candidate of selectCandidates(page.entities, new Set())) {
+    const declined = new Set<string>();
+    await applyStoredDeclines(
+      store,
+      { spaceId: input.spaceId, ...(input.ns ? { ns: input.ns } : {}) },
+      page.entities,
+      declined,
+      { forgetStale: false },
+    );
+    for (const candidate of selectCandidates(page.entities, declined)) {
       const pair: ConsolidationPreviewPair = {
         action: candidate.action,
         reason: candidate.reason,
@@ -1195,7 +1343,7 @@ async function confirmDuplicate(
   byId: ReadonlyMap<string, Neo4jConsolidationEntity>,
   callIndex: number,
   mode: "same" | "type",
-): Promise<boolean | Neo4jEntityType | "omit-type" | "rate_limit" | "timeout"> {
+): Promise<boolean | Neo4jEntityType | "omit-type" | "rate_limit" | "timeout" | "unreadable"> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), settings.timeoutMs);
   timer.unref?.();
@@ -1242,7 +1390,7 @@ async function confirmDuplicate(
   } catch (error) {
     if (isRateLimitFailure(error)) return "rate_limit";
     const reason = error instanceof Error ? error.message : "model call failed";
-    if (isConfirmAbort(error, controller.signal)) {
+    if (isMemoryModelTimeout(error, controller.signal)) {
       logConfirmTimeout(payload.spaceId, settings.timeoutMs, reason);
       return "timeout";
     }
@@ -1266,7 +1414,7 @@ async function confirmDuplicate(
     if (!typed) {
       if (isRateLimitMessage(text)) return "rate_limit";
       logUnreadableDecision(payload.spaceId, text);
-      return false;
+      return "unreadable";
     }
     if (!typed.same) return false;
     if (!typed.type) return "omit-type";
@@ -1276,7 +1424,7 @@ async function confirmDuplicate(
   if (decision === null) {
     if (isRateLimitMessage(text)) return "rate_limit";
     logUnreadableDecision(payload.spaceId, text);
-    return false;
+    return "unreadable";
   }
   return decision;
 }
@@ -1301,38 +1449,6 @@ function logUnreadableDecision(spaceId: string, text: string): void {
   });
 }
 
-function isConfirmAbort(error: unknown, signal: AbortSignal): boolean {
-  if (signal.aborted) return true;
-  if (error instanceof Error && error.name === "AbortError") return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return /request was aborted|operation was aborted|\btimed? out\b|\btimeout\b/i.test(message);
-}
-
-async function rescheduleTimeout(
-  deps: MemoryConsolidateDeps,
-  payload: BackgroundJobPayloads["memory.consolidate"],
-  rejected: string[],
-  timedOut: number,
-): Promise<void> {
-  const delay = consolidateRetryDelay(payload.attempt);
-  getLogger().info("memory.consolidate will retry a timed-out confirmation", {
-    "memory.space_id": payload.spaceId,
-    "memory.retry_in_ms": delay,
-    "memory.timed_out": timedOut,
-  });
-  await enqueueContinuation(
-    deps,
-    payload,
-    {
-      ...(payload.afterId ? { afterId: payload.afterId } : {}),
-      ...(payload.carryIds?.length ? { carryIds: payload.carryIds } : {}),
-      rejected,
-      attempt: payload.attempt + 1,
-    },
-    new Date(Date.now() + delay),
-  );
-}
-
 function consolidateRetryDelay(attempt: number): number {
   return Math.min(15 * 60_000, 15_000 * 2 ** Math.min(attempt, 6));
 }
@@ -1341,6 +1457,7 @@ async function rescheduleRateLimit(
   deps: MemoryConsolidateDeps,
   payload: BackgroundJobPayloads["memory.consolidate"],
   rejected: string[],
+  skipped: string[],
 ): Promise<void> {
   if (payload.attempt + 1 >= MAX_CONSOLIDATE_ATTEMPTS) {
     getLogger().error("memory.consolidate gave up after rate limits", {
@@ -1360,6 +1477,7 @@ async function rescheduleRateLimit(
       ...(payload.afterId ? { afterId: payload.afterId } : {}),
       ...(payload.carryIds?.length ? { carryIds: payload.carryIds } : {}),
       rejected,
+      skipped,
       attempt: payload.attempt + 1,
     },
     new Date(Date.now() + delay),
@@ -1373,6 +1491,7 @@ async function enqueueContinuation(
     afterId?: string;
     carryIds?: string[];
     rejected: string[];
+    skipped: string[];
     attempt: number;
   },
   availableAt?: Date,
@@ -1393,6 +1512,7 @@ async function enqueueContinuation(
         ...(next.afterId ? { afterId: next.afterId } : {}),
         ...(next.carryIds?.length ? { carryIds: next.carryIds } : {}),
         ...(next.rejected.length ? { rejected: next.rejected } : {}),
+        ...(next.skipped.length ? { skipped: next.skipped } : {}),
         attempt: next.attempt,
         scheduleGeneration,
         ...(payload.automatic ? { automatic: true } : {}),
