@@ -10,6 +10,7 @@ export interface ExtractBackfillCliOptions {
   force: boolean;
   repairOnly: boolean;
   retryEmpty: boolean;
+  includeFailed: boolean;
   since?: string;
 }
 
@@ -31,6 +32,7 @@ export async function runExtractBackfill(deps: {
       force: deps.options.force,
       repairOnly: deps.options.repairOnly,
       retryEmpty: deps.options.retryEmpty,
+      includeFailed: deps.options.includeFailed,
       ...(deps.options.since ? { since: deps.options.since } : {}),
     });
     const lines = [
@@ -38,6 +40,7 @@ export async function runExtractBackfill(deps: {
       `repair-only ${deps.options.repairOnly}`,
       `force ${deps.options.force}`,
       `retry-empty ${deps.options.retryEmpty}`,
+      `include-failed ${deps.options.includeFailed}`,
       `since ${deps.options.since ?? "-"}`,
       `spaces ${counts.spaces}`,
       `disabled ${counts.disabled}`,

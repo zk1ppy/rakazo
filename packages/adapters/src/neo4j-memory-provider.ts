@@ -71,6 +71,7 @@ import {
   listNeo4jDeferredPairs,
   listUnextractedNeo4jFacts,
   markNeo4jFactExtracted,
+  markNeo4jFactExtractFailed,
   mergeExtractedNeo4jEntity,
   mergeNeo4jDuplicateEntity,
   noteNeo4jPairTimeout,
@@ -749,7 +750,7 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
 
   async listEmptyExtractedFacts(
     spaceId: string,
-    input: { limit: number; skip: number; since?: string },
+    input: { limit: number; skip: number; since?: string; includeFailed?: boolean },
     signal?: AbortSignal,
   ) {
     return listEmptyExtractedNeo4jFacts(
@@ -760,6 +761,7 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
         limit: input.limit,
         skip: input.skip,
         since: input.since ?? null,
+        includeFailed: input.includeFailed === true,
       },
       signal,
     );
@@ -820,6 +822,24 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
     signal?: AbortSignal,
   ): Promise<void> {
     await markNeo4jFactExtracted(await this.ready(signal), this.connection.database, input, signal);
+  }
+
+  async markExtractFailed(
+    input: {
+      factId: string;
+      spaceId: string;
+      ns: string;
+      extractFailedAt: string;
+      reason: "truncated" | "timeout";
+    },
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await markNeo4jFactExtractFailed(
+      await this.ready(signal),
+      this.connection.database,
+      input,
+      signal,
+    );
   }
 
   async listConsolidationPage(

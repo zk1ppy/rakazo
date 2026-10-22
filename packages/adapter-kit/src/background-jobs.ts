@@ -33,6 +33,7 @@ const payloadSchemas = {
     maxChunkChars: z.number().int().min(400).max(20_000),
     chunkIndex: z.number().int().min(0).max(7),
     attempt: z.number().int().min(0).max(8),
+    truncatedAttempts: z.number().int().min(0).max(8).optional(),
     scheduleGeneration: z.number().int().min(0).max(80),
   }),
   "memory.consolidate": z.object({

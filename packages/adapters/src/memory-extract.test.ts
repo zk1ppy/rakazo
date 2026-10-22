@@ -28,6 +28,7 @@ import {
   readExtractChatRelations,
   readExtractMaxRelations,
   readExtractMaxRelationsPerEntity,
+  readExtractMaxTruncatedAttempts,
   readExtractTimeoutMs,
   readNeo4jExtractionModel,
   readOwnerAliases,
@@ -81,6 +82,7 @@ function store(
 ): MemoryExtractStore & {
   applyExtraction: ReturnType<typeof vi.fn>;
   markExtracted: ReturnType<typeof vi.fn>;
+  markExtractFailed: ReturnType<typeof vi.fn>;
 } {
   return {
     extractionEnabled: () => options?.enabled ?? true,
@@ -92,6 +94,9 @@ function store(
     ),
     markExtracted: vi.fn(
       async (_input: Parameters<MemoryExtractStore["markExtracted"]>[0]) => undefined,
+    ),
+    markExtractFailed: vi.fn(
+      async (_input: Parameters<MemoryExtractStore["markExtractFailed"]>[0]) => undefined,
     ),
   };
 }
@@ -917,8 +922,14 @@ describe("extractMemoryGraph", () => {
     const job = queue.enqueue.mock.calls[0]?.[0];
     expect(job?.name).toBe("memory.extract");
     if (job?.name !== "memory.extract") throw new Error("expected memory.extract");
-    expect(job.payload).toMatchObject({ chunkIndex: 0, attempt: 1, scheduleGeneration: 1 });
+    expect(job.payload).toMatchObject({
+      chunkIndex: 0,
+      attempt: 1,
+      truncatedAttempts: 1,
+      scheduleGeneration: 1,
+    });
     expect(job.queueName).toBe("memory-extract");
+    expect(memory.markExtractFailed).not.toHaveBeenCalled();
     expect(sink.events).toContainEqual(
       expect.objectContaining({
         level: "warn",
@@ -952,7 +963,11 @@ describe("extractMemoryGraph", () => {
     });
     await expect(extractMemoryGraph(deps(run, queue), payload(), memory)).resolves.toBe(false);
     expect(memory.markExtracted).not.toHaveBeenCalled();
+    expect(memory.markExtractFailed).not.toHaveBeenCalled();
     expect(queue.enqueue).toHaveBeenCalledTimes(1);
+    const retried = queue.enqueue.mock.calls[0]?.[0];
+    if (retried?.name !== "memory.extract") throw new Error("expected memory.extract");
+    expect(retried.payload.truncatedAttempts).toBe(1);
     expect(sink.events).toContainEqual(
       expect.objectContaining({
         message: "memory.extract truncated",
@@ -965,10 +980,17 @@ describe("extractMemoryGraph", () => {
     const exhausted = jobs();
     const finished = store("Ada Lovelace founded the Analytical Society in London.");
     await expect(
-      extractMemoryGraph(deps(run, exhausted), payload({ attempt: 4 }), finished),
+      extractMemoryGraph(deps(run, exhausted), payload({ truncatedAttempts: 1 }), finished),
     ).resolves.toBe(false);
     expect(exhausted.enqueue).not.toHaveBeenCalled();
     expect(finished.markExtracted).not.toHaveBeenCalled();
+    expect(finished.markExtractFailed).toHaveBeenCalledWith({
+      factId: "fact-1",
+      spaceId: "space-1",
+      ns: "shared",
+      extractFailedAt: expect.any(String),
+      reason: "truncated",
+    });
     expect(sink.events).toContainEqual(
       expect.objectContaining({ message: "memory.extract gave up after truncated replies" }),
     );
@@ -1011,7 +1033,12 @@ describe("extractMemoryGraph", () => {
     const job = queue.enqueue.mock.calls[0]?.[0];
     expect(job?.name).toBe("memory.extract");
     if (job?.name !== "memory.extract") throw new Error("expected memory.extract");
-    expect(job.payload).toMatchObject({ chunkIndex: 1, attempt: 1, scheduleGeneration: 1 });
+    expect(job.payload).toMatchObject({
+      chunkIndex: 1,
+      attempt: 1,
+      truncatedAttempts: 1,
+      scheduleGeneration: 1,
+    });
     expect(queue.enqueue).toHaveBeenCalledTimes(1);
   });
 
@@ -1202,8 +1229,14 @@ describe("extractMemoryGraph", () => {
     const job = queue.enqueue.mock.calls[0]?.[0];
     expect(job?.name).toBe("memory.extract");
     if (job?.name !== "memory.extract") throw new Error("expected memory.extract");
-    expect(job.payload).toMatchObject({ chunkIndex: 0, attempt: 1, scheduleGeneration: 1 });
+    expect(job.payload).toMatchObject({
+      chunkIndex: 0,
+      attempt: 1,
+      truncatedAttempts: 1,
+      scheduleGeneration: 1,
+    });
     expect(job.queueName).toBe("memory-extract");
+    expect(memory.markExtractFailed).not.toHaveBeenCalled();
     expect(sink.events).toContainEqual(
       expect.objectContaining({
         message: "memory.extract timed out",
@@ -1215,17 +1248,88 @@ describe("extractMemoryGraph", () => {
     );
   });
 
-  it("stops retrying an extraction timeout after the attempt budget", async () => {
+  it("marks the fact failed after the truncated-attempt budget", async () => {
     const queue = jobs();
     const memory = store("Ada Lovelace founded the Analytical Society in London.");
     const run = vi.fn<AgentRuntime["run"]>(() => {
       throw new Error("Request timed out");
     });
     await expect(
-      extractMemoryGraph(deps(run, queue), payload({ attempt: 4 }), memory),
+      extractMemoryGraph(deps(run, queue), payload({ truncatedAttempts: 1 }), memory),
     ).resolves.toBe(false);
     expect(queue.enqueue).not.toHaveBeenCalled();
     expect(memory.markExtracted).not.toHaveBeenCalled();
+    expect(memory.markExtractFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "timeout" }),
+    );
+
+    vi.stubEnv("MEMORY_EXTRACT_MAX_TRUNCATED_ATTEMPTS", "1");
+    const once = jobs();
+    const capped = store("Ada Lovelace founded the Analytical Society in London.");
+    await expect(extractMemoryGraph(deps(run, once), payload(), capped)).resolves.toBe(false);
+    expect(once.enqueue).not.toHaveBeenCalled();
+    expect(capped.markExtractFailed).toHaveBeenCalledTimes(1);
+    expect(readExtractMaxTruncatedAttempts({})).toBe(2);
+    expect(readExtractMaxTruncatedAttempts({ MEMORY_EXTRACT_MAX_TRUNCATED_ATTEMPTS: "4" })).toBe(4);
+    expect(readExtractMaxTruncatedAttempts({ MEMORY_EXTRACT_MAX_TRUNCATED_ATTEMPTS: "nope" })).toBe(
+      2,
+    );
+  });
+
+  it("does not mark a rate-limited fact failed when the rate-limit budget is spent", async () => {
+    const queue = jobs();
+    const memory = store("Ada Lovelace founded the Analytical Society in London.");
+    await extractMemoryGraph(
+      deps(() => {
+        throw new TransientModelError("429 rate limit");
+      }, queue),
+      payload({ attempt: 4 }),
+      memory,
+    );
+    expect(queue.enqueue).not.toHaveBeenCalled();
+    expect(memory.markExtracted).not.toHaveBeenCalled();
+    expect(memory.markExtractFailed).not.toHaveBeenCalled();
+  });
+
+  it("logs dropped paths and capped relations with the stop reason", async () => {
+    vi.stubEnv("MEMORY_EXTRACT_MAX_RELATIONS", "1");
+    vi.stubEnv("MEMORY_EXTRACT_MAX_RELATIONS_PER_ENTITY", "1");
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "rakazo", sinks: [sink] }));
+    const memory = store("Ada Lovelace founded the Analytical Society in London.");
+    const reply = JSON.stringify({
+      entities: [
+        { type: "Person", name: "Ada Lovelace" },
+        { type: "Object", name: "src/notes/plan.md" },
+        { type: "Organization", name: "Analytical Society" },
+        { type: "Event", name: "The Exhibition" },
+        { type: "Location", name: "London" },
+      ],
+      relations: [
+        { source: "Ada Lovelace", target: "Analytical Society", type: "founded" },
+        { source: "Ada Lovelace", target: "Analytical Society", type: "mentioned_in" },
+        { source: "Analytical Society", target: "Ada Lovelace", type: "employs" },
+        { source: "The Exhibition", target: "London", type: "located_in" },
+      ],
+    });
+    await extractMemoryGraph(
+      deps(async function* () {
+        yield { type: "done" as const, text: reply, stopReason: "stop" };
+      }),
+      payload(),
+      memory,
+    );
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({
+        message: "memory.extract wrote a graph",
+        "model.stop_reason": "stop",
+        "memory.names_dropped": 1,
+        "memory.relations_dropped": 1,
+        "memory.relations_capped": 1,
+        "memory.relations_per_entity": 1,
+        "memory.entities_kept": 4,
+      }),
+    );
   });
 
   it("uses the extraction timeout, effort, and output cap from the environment", async () => {

@@ -848,7 +848,8 @@ export interface Neo4jUnextractedFact {
  * Already extracted means `extractedAt` is set or the fact has an outgoing
  * :ABOUT edge. The extraction job writes `extractedAt` after the last chunk,
  * including a complete result that stores no entities. A truncated reply does
- * not. Facts extracted before the property existed are recognized by the
+ * not. A fact with `extractFailedAt` is a durable failure and stays out of
+ * this list. Facts extracted before the property existed are recognized by the
  * :ABOUT edge. `includeExtracted` returns those facts as well.
  */
 export async function listUnextractedNeo4jFacts(
@@ -860,6 +861,7 @@ export async function listUnextractedNeo4jFacts(
   const result = await driver.run(
     `MATCH (f:Rkz:Fact {spaceId: $spaceId})
      WHERE f.expiredAt IS NULL
+       AND f.extractFailedAt IS NULL
        AND (
          $includeExtracted
          OR (f.extractedAt IS NULL AND NOT (f)-[:ABOUT]->())
@@ -922,7 +924,7 @@ export async function stampNeo4jExtractedFacts(
 ): Promise<number> {
   const result = await driver.run(
     `MATCH (f:Rkz:Fact {spaceId: $spaceId})-[:ABOUT]->()
-     WHERE f.expiredAt IS NULL AND f.extractedAt IS NULL
+     WHERE f.expiredAt IS NULL AND f.extractedAt IS NULL AND f.extractFailedAt IS NULL
      SET f.extractedAt = coalesce(f.createdAt, f.validFrom, $extractedAt)
      RETURN count(f) AS marked`,
     input,
@@ -932,25 +934,39 @@ export async function stampNeo4jExtractedFacts(
 }
 
 /**
- * Live facts whose extraction stored nothing: `extractedAt` is set and the
- * fact has no outgoing :ABOUT edge. `since` keeps a fact when that marker, or
- * the fact's stored time, is at or after an ISO timestamp. Null `since` keeps
- * every empty extraction.
+ * Live facts whose extraction stored nothing: `extractedAt` is set, the fact
+ * has no outgoing :ABOUT edge, and `extractFailedAt` is unset. `includeFailed`
+ * also returns durable stalls. `since` keeps a fact when `extractedAt`,
+ * `extractFailedAt`, or the fact's stored time is at or after an ISO timestamp.
+ * Null `since` keeps every matching fact.
  */
 export async function listEmptyExtractedNeo4jFacts(
   driver: Neo4jMemoryDriver,
   database: string,
-  input: { spaceId: string; limit: number; skip: number; since?: string | null },
+  input: {
+    spaceId: string;
+    limit: number;
+    skip: number;
+    since?: string | null;
+    includeFailed?: boolean;
+  },
   signal?: AbortSignal,
 ): Promise<Neo4jUnextractedFact[]> {
   const result = await driver.run(
     `MATCH (f:Rkz:Fact {spaceId: $spaceId})
      WHERE f.expiredAt IS NULL
-       AND f.extractedAt IS NOT NULL
-       AND NOT (f)-[:ABOUT]->()
+       AND (
+         (
+           f.extractedAt IS NOT NULL
+           AND f.extractFailedAt IS NULL
+           AND NOT (f)-[:ABOUT]->()
+         )
+         OR ($includeFailed AND f.extractFailedAt IS NOT NULL)
+       )
        AND (
          $since IS NULL
          OR f.extractedAt >= $since
+         OR f.extractFailedAt >= $since
          OR coalesce(f.createdAt, f.validFrom) >= $since
        )
      RETURN f.id AS factId, f.ns AS ns, f.botId AS botId, f.text AS text
@@ -962,6 +978,7 @@ export async function listEmptyExtractedNeo4jFacts(
       limit: input.limit,
       skip: input.skip,
       since: input.since ?? null,
+      includeFailed: input.includeFailed === true,
     },
     { database, access: "read", signal },
   );
@@ -978,7 +995,8 @@ export async function listEmptyExtractedNeo4jFacts(
 }
 
 /**
- * Drop `extractedAt` on facts that still have no outgoing :ABOUT edge.
+ * Drop `extractedAt` on facts that still have no outgoing :ABOUT edge, and
+ * drop `extractFailedAt` on a durable stall even when that fact has an edge.
  * Returns the ids that were cleared. An empty id list does not touch the graph.
  */
 export async function clearNeo4jExtractedAt(
@@ -992,9 +1010,11 @@ export async function clearNeo4jExtractedAt(
     `MATCH (f:Rkz:Fact {spaceId: $spaceId})
      WHERE f.expiredAt IS NULL
        AND f.id IN $factIds
-       AND f.extractedAt IS NOT NULL
-       AND NOT (f)-[:ABOUT]->()
-     REMOVE f.extractedAt
+       AND (
+         (f.extractedAt IS NOT NULL AND f.extractFailedAt IS NULL AND NOT (f)-[:ABOUT]->())
+         OR f.extractFailedAt IS NOT NULL
+       )
+     REMOVE f.extractedAt, f.extractFailedAt, f.extractFailedReason
      RETURN f.id AS factId`,
     { spaceId: input.spaceId, factIds: [...input.factIds] },
     { database, access: "write", signal },
@@ -1007,6 +1027,31 @@ export async function clearNeo4jExtractedAt(
   return cleared;
 }
 
+/**
+ * Record a durable stall. `extractedAt` stays unset, so backfill does not
+ * treat the fact as extracted. A later success removes these properties.
+ */
+export async function markNeo4jFactExtractFailed(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: {
+    factId: string;
+    spaceId: string;
+    ns: string;
+    extractFailedAt: string;
+    reason: string;
+  },
+  signal?: AbortSignal,
+): Promise<void> {
+  await driver.run(
+    `MATCH (f:Rkz:Fact {id: $factId, spaceId: $spaceId, ns: $ns})
+     WHERE f.expiredAt IS NULL
+     SET f.extractFailedAt = $extractFailedAt, f.extractFailedReason = $reason`,
+    input,
+    { database, access: "write", signal },
+  );
+}
+
 /** Record that extraction finished for this fact. Overwrites an older marker. */
 export async function markNeo4jFactExtracted(
   driver: Neo4jMemoryDriver,
@@ -1017,7 +1062,8 @@ export async function markNeo4jFactExtracted(
   await driver.run(
     `MATCH (f:Rkz:Fact {id: $factId, spaceId: $spaceId, ns: $ns})
      WHERE f.expiredAt IS NULL
-     SET f.extractedAt = $extractedAt`,
+     SET f.extractedAt = $extractedAt
+     REMOVE f.extractFailedAt, f.extractFailedReason`,
     input,
     { database, access: "write", signal },
   );

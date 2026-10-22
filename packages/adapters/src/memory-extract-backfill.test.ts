@@ -55,6 +55,7 @@ function options(overrides: Partial<BackfillExtractOptions> = {}): BackfillExtra
     force: false,
     repairOnly: false,
     retryEmpty: false,
+    includeFailed: false,
     ...overrides,
   };
 }
@@ -67,6 +68,7 @@ describe("parseBackfillExtractArgs", () => {
       force: false,
       repairOnly: false,
       retryEmpty: false,
+      includeFailed: false,
     });
     expect(
       parseBackfillExtractArgs(["--dry-run", "--space", " space-9 ", "--limit", "25"]),
@@ -77,6 +79,7 @@ describe("parseBackfillExtractArgs", () => {
       force: false,
       repairOnly: false,
       retryEmpty: false,
+      includeFailed: false,
     });
   });
 
@@ -91,6 +94,7 @@ describe("parseBackfillExtractArgs", () => {
       force: false,
       repairOnly: false,
       retryEmpty: false,
+      includeFailed: false,
     });
     expect(parseBackfillExtractArgs(["--", "--space", "X", "--limit", "10"])).toEqual({
       spaceId: "X",
@@ -99,6 +103,7 @@ describe("parseBackfillExtractArgs", () => {
       force: false,
       repairOnly: false,
       retryEmpty: false,
+      includeFailed: false,
     });
   });
 
@@ -133,6 +138,7 @@ describe("parseBackfillExtractArgs", () => {
       force: false,
       repairOnly: false,
       retryEmpty: true,
+      includeFailed: false,
       since: "2026-10-22T16:00:00.000Z",
     });
     expect(parseBackfillExtractArgs(["--retry-empty"])).toMatchObject({
@@ -146,6 +152,13 @@ describe("parseBackfillExtractArgs", () => {
     expect(() => parseBackfillExtractArgs(["--since", "2026-10-22T16:00:00Z"])).toThrow(
       /--since requires --retry-empty/,
     );
+    expect(() => parseBackfillExtractArgs(["--include-failed"])).toThrow(
+      /--include-failed requires --retry-empty/,
+    );
+    expect(parseBackfillExtractArgs(["--retry-empty", "--include-failed"])).toMatchObject({
+      retryEmpty: true,
+      includeFailed: true,
+    });
     expect(() => parseBackfillExtractArgs(["--retry-empty", "--force"])).toThrow(
       /cannot be used together/,
     );
@@ -371,16 +384,19 @@ describe("backfillMemoryExtraction", () => {
   });
 
   it("re-enqueues empty extractions and clears the marker only outside a dry run", async () => {
-    const listed = vi.fn(async (input: { limit: number; skip: number; since?: string }) => {
-      expect(input.since).toBe("2026-10-22T16:00:00.000Z");
-      if (input.skip > 0) return [];
-      return [
-        fact({ factId: "empty-1", text: "ok" }),
-        fact({ factId: "empty-2" }),
-        fact({ factId: "empty-3" }),
-        fact({ factId: "kept-edge" }),
-      ];
-    });
+    const listed = vi.fn(
+      async (input: { limit: number; skip: number; since?: string; includeFailed?: boolean }) => {
+        expect(input.since).toBe("2026-10-22T16:00:00.000Z");
+        expect(input.includeFailed).toBe(false);
+        if (input.skip > 0) return [];
+        return [
+          fact({ factId: "empty-1", text: "ok" }),
+          fact({ factId: "empty-2" }),
+          fact({ factId: "empty-3" }),
+          fact({ factId: "kept-edge" }),
+        ];
+      },
+    );
     const listFacts = vi.fn(async () => [fact({ factId: "unextracted" })]);
     const clearExtractedAt = vi.fn(async (ids: readonly string[]) =>
       ids.filter((id) => id !== "kept-edge"),
@@ -429,6 +445,19 @@ describe("backfillMemoryExtraction", () => {
       sample: ["empty-2", "empty-3", "kept-edge"],
       dryRun: true,
     });
+  });
+
+  it("forwards --include-failed to the empty-extraction list", async () => {
+    const listed = vi.fn(async () => [fact({ factId: "failed-1" })]);
+    const counts = await backfillMemoryExtraction(
+      [space(async () => [], { listEmptyExtractedFacts: listed })],
+      jobs(),
+      options({ retryEmpty: true, includeFailed: true, dryRun: true, limit: 5 }),
+    );
+    expect(listed).toHaveBeenCalledWith(
+      expect.objectContaining({ includeFailed: true, limit: 5, skip: 0 }),
+    );
+    expect(counts).toMatchObject({ enqueued: 1, includeFailed: true, dryRun: true });
   });
 
   it("logs the cause when realigning one space fails", async () => {

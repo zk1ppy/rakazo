@@ -45,6 +45,7 @@ export interface BackfillSpace {
     limit: number;
     skip: number;
     since?: string;
+    includeFailed?: boolean;
   }): Promise<BackfillFact[]>;
   /**
    * Remove extractedAt from facts that still have no outgoing :ABOUT edge.
@@ -65,6 +66,11 @@ export interface BackfillExtractOptions {
    * Clears that marker only when this is not a dry run.
    */
   retryEmpty: boolean;
+  /**
+   * With --retry-empty, also re-enqueue facts marked extractFailedAt.
+   * Those facts stay out of the queue otherwise.
+   */
+  includeFailed: boolean;
   /** ISO instant. With --retry-empty, keeps facts at or after this time. */
   since?: string;
 }
@@ -90,12 +96,13 @@ export interface BackfillExtractCounts {
   force: boolean;
   repairOnly: boolean;
   retryEmpty: boolean;
+  includeFailed: boolean;
 }
 
 const EMPTY_EXTRACT_SAMPLE = 20;
 
 const USAGE =
-  "Usage: memory:backfill-extract [--] [--dry-run] [--repair-only] [--force] [--retry-empty] [--since ISO_DATE] [--space SPACE_ID] [--limit N]";
+  "Usage: memory:backfill-extract [--] [--dry-run] [--repair-only] [--force] [--retry-empty] [--include-failed] [--since ISO_DATE] [--space SPACE_ID] [--limit N]";
 
 export function parseBackfillExtractArgs(argv: readonly string[]): {
   spaceId?: string;
@@ -104,6 +111,7 @@ export function parseBackfillExtractArgs(argv: readonly string[]): {
   force: boolean;
   repairOnly: boolean;
   retryEmpty: boolean;
+  includeFailed: boolean;
   since?: string;
 } {
   let spaceId: string | undefined;
@@ -112,6 +120,7 @@ export function parseBackfillExtractArgs(argv: readonly string[]): {
   let force = false;
   let repairOnly = false;
   let retryEmpty = false;
+  let includeFailed = false;
   let since: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -131,6 +140,10 @@ export function parseBackfillExtractArgs(argv: readonly string[]): {
     }
     if (arg === "--retry-empty") {
       retryEmpty = true;
+      continue;
+    }
+    if (arg === "--include-failed") {
+      includeFailed = true;
       continue;
     }
     if (arg === "--since") {
@@ -167,6 +180,7 @@ export function parseBackfillExtractArgs(argv: readonly string[]): {
     throw new Error("--retry-empty and --repair-only cannot be used together");
   }
   if (since && !retryEmpty) throw new Error("--since requires --retry-empty");
+  if (includeFailed && !retryEmpty) throw new Error("--include-failed requires --retry-empty");
   return {
     ...(spaceId ? { spaceId } : {}),
     limit,
@@ -174,6 +188,7 @@ export function parseBackfillExtractArgs(argv: readonly string[]): {
     force,
     repairOnly,
     retryEmpty,
+    includeFailed,
     ...(since ? { since } : {}),
   };
 }
@@ -207,8 +222,9 @@ function parseSince(value: string | undefined): string {
  * so the next default run enqueues it once. `--force` ignores both signals.
  * `--repair-only` enqueues nothing. `--retry-empty` enqueues only facts that
  * have the marker and no outgoing :ABOUT edge, and clears the marker when it
- * is not a dry run. `--since` limits that pass to a fact whose stored time or
- * `extractedAt` is at or after the given instant.
+ * is not a dry run. A fact with `extractFailedAt` is left alone unless
+ * `--include-failed` is set. `--since` limits that pass to a fact whose stored
+ * time, `extractedAt`, or `extractFailedAt` is at or after the given instant.
  */
 export async function backfillMemoryExtraction(
   spaces: readonly BackfillSpace[],
@@ -231,6 +247,7 @@ export async function backfillMemoryExtraction(
     force: options.force,
     repairOnly: options.repairOnly,
     retryEmpty: options.retryEmpty,
+    includeFailed: options.includeFailed,
   };
   let remaining = options.limit;
   for (const space of spaces) {
@@ -354,6 +371,7 @@ async function enqueueEmptyExtractions(
         limit: requested,
         skip,
         ...(options.since ? { since: options.since } : {}),
+        includeFailed: options.includeFailed,
       });
     } catch (error) {
       counts.failed += 1;
