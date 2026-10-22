@@ -14,9 +14,8 @@ describe("worker shutdown signal", () => {
     "finishes stop after SIGTERM, including a second signal",
     async () => {
       const childPath = path.join(import.meta.dirname, "shutdown-signal.child.ts");
-      const child = spawn(process.execPath, ["--import", "tsx", childPath], {
+      const child = spawn(process.execPath, ["--import", "tsx", childPath, "400"], {
         cwd: root,
-        env: { ...process.env, HOLD_MS: "400" },
         stdio: ["ignore", "pipe", "pipe"],
       });
       let output = "";
