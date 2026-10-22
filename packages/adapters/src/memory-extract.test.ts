@@ -21,8 +21,10 @@ import {
   normalizeRelationType,
   parseMemoryExtraction,
   planExtractionChunks,
+  readExtractTimeoutMs,
   readNeo4jExtractionModel,
   readOwnerAliases,
+  resolveExtractThinkingLevel,
 } from "./memory-extract.js";
 
 const payload = (
@@ -525,6 +527,7 @@ describe("extraction role and measurement guards", () => {
 
 describe("extractMemoryGraph", () => {
   afterEach(() => {
+    vi.unstubAllEnvs();
     installLogger(createLogger({ service: "rakazo", level: "off", sinks: [] }));
   });
 
@@ -916,5 +919,88 @@ describe("extractMemoryGraph", () => {
     expect(unusedPin).not.toHaveBeenCalled();
     expect(unsetDefault).toHaveBeenCalledWith({ userId: "user-1", spaceId: "space-1" });
     expect(unsetDefault.mock.calls[0]?.[0]).not.toHaveProperty("botId");
+  });
+
+  it("retries an aborted extraction instead of failing it permanently", async () => {
+    const sink = createTestSink();
+    const previous = getLogger();
+    installLogger(createLogger({ service: "rakazo", sinks: [sink] }));
+    const queue = jobs();
+    const memory = store("Ada Lovelace founded the Analytical Society in London.");
+    const run = vi.fn<AgentRuntime["run"]>(() => {
+      throw new Error("Request was aborted");
+    });
+    try {
+      await expect(extractMemoryGraph(deps(run, queue), payload(), memory)).resolves.toBe(false);
+    } finally {
+      installLogger(previous);
+    }
+    expect(memory.markExtracted).not.toHaveBeenCalled();
+    expect(queue.enqueue).toHaveBeenCalledTimes(1);
+    const job = queue.enqueue.mock.calls[0]?.[0];
+    expect(job?.name).toBe("memory.extract");
+    if (job?.name !== "memory.extract") throw new Error("expected memory.extract");
+    expect(job.payload).toMatchObject({ chunkIndex: 0, attempt: 1, scheduleGeneration: 1 });
+    expect(job.queueName).toBe("memory-extract");
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({
+        message: "memory.extract timed out",
+        "job.outcome": "transient",
+      }),
+    );
+    expect(sink.events).not.toContainEqual(
+      expect.objectContaining({ message: "memory.extract failed", "job.outcome": "permanent" }),
+    );
+  });
+
+  it("stops retrying an extraction timeout after the attempt budget", async () => {
+    const queue = jobs();
+    const memory = store("Ada Lovelace founded the Analytical Society in London.");
+    const run = vi.fn<AgentRuntime["run"]>(() => {
+      throw new Error("Request timed out");
+    });
+    await expect(
+      extractMemoryGraph(deps(run, queue), payload({ attempt: 4 }), memory),
+    ).resolves.toBe(false);
+    expect(queue.enqueue).not.toHaveBeenCalled();
+    expect(memory.markExtracted).not.toHaveBeenCalled();
+  });
+
+  it("uses the extraction timeout, effort, and output cap from the environment", async () => {
+    expect(readExtractTimeoutMs({})).toBe(90_000);
+    expect(readExtractTimeoutMs({ MEMORY_EXTRACT_TIMEOUT_MS: "240000" })).toBe(240_000);
+    expect(readExtractTimeoutMs({ MEMORY_EXTRACT_TIMEOUT_MS: "nope" })).toBe(90_000);
+    expect(
+      resolveExtractThinkingLevel(
+        { reasoning: true, thinkingLevel: "high", minReasoningEffort: "low" },
+        { MEMORY_EXTRACT_THINKING_LEVEL: "high" },
+      ),
+    ).toBe("low");
+    expect(
+      resolveExtractThinkingLevel({ reasoning: true }, { MEMORY_EXTRACT_THINKING_LEVEL: "low" }),
+    ).toBe("low");
+    expect(resolveExtractThinkingLevel({ reasoning: true }, {})).toBe("medium");
+
+    vi.stubEnv("MEMORY_EXTRACT_TIMEOUT_MS", "240000");
+    vi.stubEnv("MEMORY_EXTRACT_THINKING_LEVEL", "low");
+    vi.stubEnv("MEMORY_EXTRACT_MAX_OUTPUT_TOKENS", "8192");
+    const run = vi.fn<AgentRuntime["run"]>(async function* (_request, context) {
+      expect(context?.signal?.aborted).toBe(false);
+      yield { type: "done" as const, text: '{"entities":[],"relations":[]}' };
+    });
+    await extractMemoryGraph(
+      deps(run, jobs(), false, {
+        ...model,
+        reasoning: true,
+        thinkingLevel: "high",
+        maxTokens: 65_536,
+      }),
+      payload(),
+      store("Ada Lovelace founded the Analytical Society in London."),
+    );
+    expect(run.mock.calls[0]?.[0].model).toMatchObject({
+      thinkingLevel: "low",
+      maxTokens: 8192,
+    });
   });
 });

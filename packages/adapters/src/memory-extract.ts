@@ -31,7 +31,18 @@ export const MAX_EXTRACT_CHUNKS = 8;
 export const MAX_MEMORY_EXTRACT_TEXT_CHARS = 20_000;
 /** Tries for one chunk, including the first call. Later tries are rescheduled, not failed. */
 export const MAX_EXTRACT_ATTEMPTS = 5;
-const EXTRACT_TIMEOUT_MS = 90_000;
+/**
+ * Whole extraction call, including reasoning. A reasoning model can still be
+ * writing when a shorter abort fires, and pi reports that signal as
+ * "Request was aborted".
+ */
+export const DEFAULT_EXTRACT_TIMEOUT_MS = 90_000;
+const MIN_EXTRACT_TIMEOUT_MS = 15_000;
+const MAX_EXTRACT_TIMEOUT_MS = 600_000;
+const MIN_EXTRACT_MAX_OUTPUT_TOKENS = 64;
+const MAX_EXTRACT_MAX_OUTPUT_TOKENS = 131_072;
+const EXTRACT_EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ExtractThinkingLevel = (typeof EXTRACT_EFFORTS)[number];
 const MIN_EXTRACT_CHARS = 12;
 const MIN_EXTRACT_WORDS = 3;
 
@@ -411,7 +422,80 @@ export interface MemoryExtractDeps {
   deploymentModelConfigured?: boolean;
 }
 
-type ExtractCall = "ok" | "rate_limit";
+type ExtractCall = "ok" | "rate_limit" | "timeout";
+
+/** Blank or invalid values fall back so a bad environment cannot wedge the job. */
+export function readExtractTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = parseBoundedInt(
+    env.MEMORY_EXTRACT_TIMEOUT_MS,
+    MIN_EXTRACT_TIMEOUT_MS,
+    MAX_EXTRACT_TIMEOUT_MS,
+  );
+  return parsed ?? DEFAULT_EXTRACT_TIMEOUT_MS;
+}
+
+/**
+ * Shared completion cap for one extraction when reasoning is on. Unset keeps
+ * the connection cap. A stored minimum effort still wins over this level.
+ */
+export function readExtractMaxOutputTokens(
+  env: NodeJS.ProcessEnv = process.env,
+): number | undefined {
+  return parseBoundedInt(
+    env.MEMORY_EXTRACT_MAX_OUTPUT_TOKENS,
+    MIN_EXTRACT_MAX_OUTPUT_TOKENS,
+    MAX_EXTRACT_MAX_OUTPUT_TOKENS,
+  );
+}
+
+export function readExtractThinkingLevel(
+  env: NodeJS.ProcessEnv = process.env,
+): ExtractThinkingLevel | undefined {
+  const trimmed = env.MEMORY_EXTRACT_THINKING_LEVEL?.trim() ?? "";
+  if (!trimmed) return undefined;
+  if ((EXTRACT_EFFORTS as readonly string[]).includes(trimmed))
+    return trimmed as ExtractThinkingLevel;
+  return undefined;
+}
+
+/**
+ * Effort for one extraction. An environment level is the requested effort.
+ * A stored minimum on the connection is still the effort used, ahead of that
+ * request and ahead of the chat effort. Unset keeps today's resolution.
+ */
+export function resolveExtractThinkingLevel(
+  model: {
+    reasoning?: boolean;
+    thinkingLevel?: string | null;
+    minReasoningEffort?: string | null;
+  },
+  env: NodeJS.ProcessEnv = process.env,
+): ReturnType<typeof extractionThinkingLevel> {
+  const configured = readExtractThinkingLevel(env);
+  if (!configured) return extractionThinkingLevel(model);
+  return extractionThinkingLevel({
+    reasoning: model.reasoning,
+    thinkingLevel: configured,
+    minReasoningEffort: model.minReasoningEffort,
+  });
+}
+
+function parseBoundedInt(value: string | undefined, min: number, max: number): number | undefined {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return undefined;
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const parsed = Number(trimmed);
+  if (parsed < min || parsed > max) return undefined;
+  return parsed;
+}
+
+/** Our abort, or a provider timeout. pi reports the signal as "Request was aborted". */
+export function isMemoryModelTimeout(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  if (error instanceof Error && error.name === "AbortError") return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /request was aborted|operation was aborted|\btimed? out\b|\btimeout\b/i.test(message);
+}
 
 /**
  * Non-retryable extraction failure. The job outcome stays permanent.
@@ -462,8 +546,8 @@ export async function extractMemoryGraph(
     const chunk = chunks[index];
     if (!chunk) continue;
     const call = await callExtractor(deps, payload, model, chunk, index, subjectName, ownerAliases);
-    if (call.kind === "rate_limit") {
-      await rescheduleExtract(deps, payload, index, attempt);
+    if (call.kind === "rate_limit" || call.kind === "timeout") {
+      await rescheduleExtract(deps, payload, index, attempt, call.kind);
       return wrote;
     }
     const extracted = parseMemoryExtraction(
@@ -581,21 +665,33 @@ async function rescheduleExtract(
   payload: BackgroundJobPayloads["memory.extract"],
   chunkIndex: number,
   attempt: number,
+  reason: "rate_limit" | "timeout",
 ): Promise<void> {
   if (attempt + 1 >= MAX_EXTRACT_ATTEMPTS) {
-    getLogger().error("memory.extract gave up after rate limits", {
-      "memory.fact_id": payload.factId,
-      "memory.chunk": chunkIndex,
-    });
+    getLogger().error(
+      reason === "timeout"
+        ? "memory.extract gave up after timeouts"
+        : "memory.extract gave up after rate limits",
+      {
+        "memory.fact_id": payload.factId,
+        "memory.chunk": chunkIndex,
+      },
+    );
     return;
   }
   const delay = memoryExtractRateLimitDelayMs(attempt);
-  getLogger().info("memory.extract rate limited", {
-    "memory.fact_id": payload.factId,
-    "memory.chunk": chunkIndex,
-    "memory.retry_in_ms": delay,
-    "job.queue": MEMORY_EXTRACT_QUEUE_NAME,
-  });
+  getLogger().info(
+    reason === "timeout"
+      ? "memory.extract will retry after a timeout"
+      : "memory.extract rate limited",
+    {
+      "memory.fact_id": payload.factId,
+      "memory.chunk": chunkIndex,
+      "memory.retry_in_ms": delay,
+      "job.queue": MEMORY_EXTRACT_QUEUE_NAME,
+      ...(reason === "timeout" ? { "job.outcome": "transient" as const } : {}),
+    },
+  );
   await deps.jobs.enqueue(
     memoryExtractJob(
       {
@@ -623,8 +719,17 @@ async function callExtractor(
   stopReason?: string;
   usage?: Extract<AgentRuntimeEvent, { type: "usage" }>;
 }> {
+  const timeoutMs = readExtractTimeoutMs();
+  const thinkingLevel = resolveExtractThinkingLevel(model);
+  const outputCap = readExtractMaxOutputTokens();
+  const callModel: AgentRunRequest["model"] = { ...model, thinkingLevel };
+  if (outputCap !== undefined && thinkingLevel !== "off") {
+    const ceiling =
+      typeof model.maxTokens === "number" && model.maxTokens >= 1 ? model.maxTokens : outputCap;
+    callModel.maxTokens = Math.min(ceiling, outputCap);
+  }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), EXTRACT_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   timer.unref?.();
   const operationId = `memory-extract:${payload.factId}:${chunkIndex}`;
   let streamed = "";
@@ -651,10 +756,7 @@ async function callExtractor(
         // that connection's max output. A second call would spend another
         // quota unit.
         visibleOutputTokens: EXTRACT_ANSWER_TOKENS,
-        model: {
-          ...model,
-          thinkingLevel: extractionThinkingLevel(model),
-        },
+        model: callModel,
       },
       {
         operationId,
@@ -678,6 +780,10 @@ async function callExtractor(
   } catch (error) {
     if (isRateLimitFailure(error)) return { kind: "rate_limit", text: "" };
     const reason = error instanceof Error ? error.message : "model call failed";
+    if (isMemoryModelTimeout(error, controller.signal)) {
+      logExtractTimeout(payload, chunkIndex, timeoutMs, reason, reportedUsage);
+      return { kind: "timeout", text: "" };
+    }
     getLogger().error("memory.extract failed", {
       "memory.fact_id": payload.factId,
       "memory.chunk": chunkIndex,
@@ -689,9 +795,30 @@ async function callExtractor(
   } finally {
     clearTimeout(timer);
   }
+  if (controller.signal.aborted) {
+    logExtractTimeout(payload, chunkIndex, timeoutMs, "Request was aborted", reportedUsage);
+    return { kind: "timeout", text: "" };
+  }
   const text = (finalText || streamed).trim();
   if (!parseJsonObject(text) && isRateLimitMessage(text)) return { kind: "rate_limit", text: "" };
   return { kind: "ok", text, stopReason, usage: reportedUsage };
+}
+
+function logExtractTimeout(
+  payload: BackgroundJobPayloads["memory.extract"],
+  chunkIndex: number,
+  timeoutMs: number,
+  reason: string,
+  usage: Extract<AgentRuntimeEvent, { type: "usage" }> | undefined,
+): void {
+  getLogger().warn("memory.extract timed out", {
+    "memory.fact_id": payload.factId,
+    "memory.chunk": chunkIndex,
+    "job.outcome": "transient",
+    "memory.timeout_ms": timeoutMs,
+    reason,
+    ...extractionUsageLog(usage),
+  });
 }
 
 async function recordExtractUsage(

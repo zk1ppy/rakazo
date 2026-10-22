@@ -1,11 +1,20 @@
 import type { BackgroundJob, JobPublisher } from "@rakazo/adapter-kit";
-import { describe, expect, it, vi } from "vitest";
+import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   BackfillExtractOptions,
   BackfillFact,
   BackfillSpace,
 } from "./memory-extract-backfill.js";
-import { backfillMemoryExtraction, parseBackfillExtractArgs } from "./memory-extract-backfill.js";
+import {
+  backfillMemoryExtraction,
+  loadNeo4jBackfillSpaces,
+  parseBackfillExtractArgs,
+} from "./memory-extract-backfill.js";
+
+afterEach(() => {
+  installLogger(createLogger({ service: "rakazo", level: "off", sinks: [] }));
+});
 
 const fact = (overrides: Partial<BackfillFact> = {}): BackfillFact => ({
   factId: "fact-1",
@@ -57,6 +66,10 @@ describe("parseBackfillExtractArgs", () => {
   });
 
   it("skips a pnpm -- separator", () => {
+    expect(parseBackfillExtractArgs(["--", "--space", "X", "--dry-run"])).toMatchObject({
+      spaceId: "X",
+      dryRun: true,
+    });
     expect(parseBackfillExtractArgs(["--", "--dry-run"])).toEqual({
       limit: 100,
       dryRun: true,
@@ -289,6 +302,47 @@ describe("backfillMemoryExtraction", () => {
       skipped: 5,
       enqueued: 0,
       repairOnly: true,
+    });
+  });
+
+  it("logs the cause when realigning one space fails", async () => {
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "test", sinks: [sink] }));
+    const counts = await backfillMemoryExtraction(
+      [
+        space(async () => [], {
+          realignTimes: async () => Promise.reject(new Error("neo4j down")),
+        }),
+      ],
+      jobs(),
+      options(),
+    );
+    expect(counts.failed).toBe(1);
+    expect(sink.events[0]?.error).toMatchObject({ message: "neo4j down" });
+  });
+});
+
+describe("loadNeo4jBackfillSpaces", () => {
+  it("records and logs a space whose secret row-level security hid", async () => {
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "test", sinks: [sink] }));
+    const loaded = await loadNeo4jBackfillSpaces(
+      {
+        spaceMemoryConfig: {
+          findMany: async () => [
+            { spaceId: "space-1", userId: "user-1", settings: {}, secret: null },
+          ],
+        },
+      } as never,
+      { load: async () => "{}" },
+    );
+    expect(loaded.spaces).toEqual([]);
+    expect(loaded.failures).toEqual([
+      { spaceId: "space-1", reason: "memory secret is not visible" },
+    ]);
+    expect(sink.events[0]).toMatchObject({
+      message: "memory backfill skipped a space",
+      error: { message: "memory secret is not visible" },
     });
   });
 });

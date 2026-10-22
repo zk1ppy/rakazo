@@ -27,6 +27,7 @@ export * from "./model-backups.js";
 export * from "./model-credentials.js";
 export * from "./repos.js";
 export * from "./row-security.js";
+export * from "./schema-ready.js";
 export * from "./scope.js";
 export * from "./security-events.js";
 export * from "./sessions.js";

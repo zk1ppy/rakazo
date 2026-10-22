@@ -42,6 +42,7 @@ const payloadSchemas = {
     afterId: z.string().min(1).max(200).optional(),
     carryIds: z.array(z.string().min(1).max(200)).max(40).optional(),
     rejected: z.array(z.string().min(3).max(400)).max(80).optional(),
+    skipped: z.array(z.string().min(3).max(400)).max(80).optional(),
     attempt: z.number().int().min(0).max(8),
     scheduleGeneration: z.number().int().min(0).max(400),
     automatic: z.boolean().optional(),
@@ -245,9 +246,10 @@ export function memoryExtractJob(
 }
 
 /**
- * A dropped database connection can retry this row. Rate limits and confirmation
- * timeouts do not: the handler reschedules a new row and returns. A permanent
- * model failure also returns, so Graphile does not spend the remaining attempts.
+ * A dropped database connection can retry this row. Rate limits reschedule a
+ * new row and return. A confirmation timeout skips that pair and the page
+ * still advances. A permanent model failure also returns, so Graphile does
+ * not spend the remaining attempts.
  * The key alternates with scheduleGeneration so that follow-up survives the
  * successful row's delete.
  */

@@ -712,7 +712,8 @@ export interface BackgroundJobPayloads {
    * `afterId` is an exclusive entity-id cursor. `carryIds` are short names from
    * the previous page that might match a later, more specific name. `rejected`
    * pairs were already refused, so a follow-up does not ask the model again.
-   * attempt counts rate-limit reschedules. scheduleGeneration alternates the job key.
+   * `skipped` pairs timed out; this chain does not ask them again, and a later
+   * run can. attempt counts rate-limit reschedules. scheduleGeneration alternates the job key.
    * `automatic` marks a dream-mode run. The handler drops it when dream mode is off.
    * A manual enqueue leaves it unset and still runs.
    */
@@ -723,6 +724,7 @@ export interface BackgroundJobPayloads {
     afterId?: string;
     carryIds?: string[];
     rejected?: string[];
+    skipped?: string[];
     attempt: number;
     scheduleGeneration: number;
     automatic?: boolean;

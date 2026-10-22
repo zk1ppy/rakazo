@@ -8,17 +8,23 @@ import { TransientModelError } from "@rakazo/adapter-kit";
 import type { PrismaClient } from "@rakazo/db";
 import { createLogger, createTestSink, getLogger, installLogger } from "@rakazo/logging";
 import { describe, expect, it, vi } from "vitest";
-import type { MemoryConsolidateDeps, MemoryConsolidateStore } from "./memory-consolidate.js";
+import type {
+  ConsolidationDecline,
+  MemoryConsolidateDeps,
+  MemoryConsolidateStore,
+} from "./memory-consolidate.js";
 import {
   assertConsolidateTimeoutMs,
   chooseWinningType,
   classifyConsolidationPair,
   consolidateMemoryGraph,
+  consolidationEntityFingerprint,
   DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
   DEFAULT_CONSOLIDATE_THINKING_LEVEL,
   DEFAULT_CONSOLIDATE_TIMEOUT_MS,
-  MAX_CONSOLIDATE_ATTEMPTS,
+  declinedPairIdentity,
   MAX_CONSOLIDATE_LLM_CALLS,
+  memoryBotIdFromNamespace,
   memoryConsolidatePrompt,
   parseConsolidationDecision,
   parseConsolidationTypeDecision,
@@ -85,6 +91,8 @@ function pageStore(
 ): MemoryConsolidateStore & {
   merges: Neo4jDuplicateMerge[];
   renames: Neo4jEntityRename[];
+  declines: ConsolidationDecline[];
+  forgotten: Array<{ leftId: string; rightId: string }>;
   collapses: Array<{
     spaceId: string;
     ids: string[];
@@ -95,6 +103,8 @@ function pageStore(
 } {
   const merges: Neo4jDuplicateMerge[] = [];
   const renames: Neo4jEntityRename[] = [];
+  const declines: ConsolidationDecline[] = [];
+  const forgotten: Array<{ leftId: string; rightId: string }> = [];
   const collapses: Array<{
     spaceId: string;
     ids: string[];
@@ -105,6 +115,8 @@ function pageStore(
   return {
     merges,
     renames,
+    declines,
+    forgotten,
     collapses,
     extractionModel: () => null,
     consolidateModelSettings: () => readConsolidateModelSettings({}),
@@ -127,6 +139,35 @@ function pageStore(
     },
     ownerAliases: () => options?.aliases ?? [],
     findPeopleByNorms: async () => options?.people ?? [],
+    listDeclinedPairs: async (input) =>
+      declines.filter(
+        (decline) =>
+          input.ids.includes(decline.leftId) &&
+          input.ids.includes(decline.rightId) &&
+          (!input.ns || decline.ns === input.ns),
+      ),
+    rememberDeclinedPair: async (input) => {
+      const index = declines.findIndex(
+        (decline) => decline.leftId === input.leftId && decline.rightId === input.rightId,
+      );
+      const stored = {
+        leftId: input.leftId,
+        rightId: input.rightId,
+        ns: input.ns,
+        botId: input.botId,
+        leftFingerprint: input.leftFingerprint,
+        rightFingerprint: input.rightFingerprint,
+      };
+      if (index >= 0) declines[index] = stored;
+      else declines.push(stored);
+    },
+    forgetDeclinedPair: async (input) => {
+      forgotten.push({ leftId: input.leftId, rightId: input.rightId });
+      const index = declines.findIndex(
+        (decline) => decline.leftId === input.leftId && decline.rightId === input.rightId,
+      );
+      if (index >= 0) declines.splice(index, 1);
+    },
   };
 }
 
@@ -916,24 +957,67 @@ describe("consolidateMemoryGraph", () => {
   it("reads consolidate model settings and falls back when they are blank or invalid", () => {
     expect(DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS).toBe(REASONING_MODEL_MAX_TOKENS);
     expect(DEFAULT_CONSOLIDATE_TIMEOUT_MS).toBe(180_000);
-    expect(readConsolidateModelSettings({})).toEqual({
+    expect(readConsolidateModelSettings({}, {})).toEqual({
       thinkingLevel: DEFAULT_CONSOLIDATE_THINKING_LEVEL,
       maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
       timeoutMs: DEFAULT_CONSOLIDATE_TIMEOUT_MS,
     });
     expect(
-      readConsolidateModelSettings({
-        consolidateThinkingLevel: " minimal ",
-        consolidateMaxOutputTokens: "2048",
-        consolidateTimeoutMs: " 180000 ",
-      }),
+      readConsolidateModelSettings(
+        {},
+        {
+          MEMORY_CONSOLIDATE_THINKING_LEVEL: "high",
+          MEMORY_CONSOLIDATE_MAX_OUTPUT_TOKENS: "8192",
+          MEMORY_CONSOLIDATE_TIMEOUT_MS: "300000",
+        },
+      ),
+    ).toEqual({ thinkingLevel: "high", maxOutputTokens: 8192, timeoutMs: 300_000 });
+    expect(
+      readConsolidateModelSettings(
+        { consolidateThinkingLevel: "low", consolidateTimeoutMs: "180000" },
+        {
+          MEMORY_CONSOLIDATE_THINKING_LEVEL: "high",
+          MEMORY_CONSOLIDATE_TIMEOUT_MS: "300000",
+        },
+      ),
+    ).toEqual({
+      thinkingLevel: "low",
+      maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
+      timeoutMs: 180_000,
+    });
+    expect(
+      readConsolidateModelSettings(
+        {},
+        {
+          MEMORY_CONSOLIDATE_THINKING_LEVEL: "turbo",
+          MEMORY_CONSOLIDATE_MAX_OUTPUT_TOKENS: "4",
+          MEMORY_CONSOLIDATE_TIMEOUT_MS: "nope",
+        },
+      ),
+    ).toEqual({
+      thinkingLevel: DEFAULT_CONSOLIDATE_THINKING_LEVEL,
+      maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
+      timeoutMs: DEFAULT_CONSOLIDATE_TIMEOUT_MS,
+    });
+    expect(
+      readConsolidateModelSettings(
+        {
+          consolidateThinkingLevel: " minimal ",
+          consolidateMaxOutputTokens: "2048",
+          consolidateTimeoutMs: " 180000 ",
+        },
+        {},
+      ),
     ).toEqual({ thinkingLevel: "minimal", maxOutputTokens: 2048, timeoutMs: 180_000 });
     expect(
-      readConsolidateModelSettings({
-        consolidateThinkingLevel: "turbo",
-        consolidateMaxOutputTokens: "4",
-        consolidateTimeoutMs: "1000",
-      }),
+      readConsolidateModelSettings(
+        {
+          consolidateThinkingLevel: "turbo",
+          consolidateMaxOutputTokens: "4",
+          consolidateTimeoutMs: "1000",
+        },
+        {},
+      ),
     ).toEqual({
       thinkingLevel: DEFAULT_CONSOLIDATE_THINKING_LEVEL,
       maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
@@ -1024,13 +1108,8 @@ describe("consolidateMemoryGraph", () => {
     }
     expect(calls).toHaveLength(3);
     expect(store.merges.map((merge) => merge.dropId).sort()).toEqual(["Ada-short", "Cleo-short"]);
-    const job = queue.enqueue.mock.calls[0]?.[0];
-    expect(job?.name).toBe("memory.consolidate");
-    if (job?.name !== "memory.consolidate") throw new Error("expected memory.consolidate");
-    expect(job.payload.attempt).toBe(1);
-    expect(job.payload.afterId).toBeUndefined();
-    expect(job.payload.rejected ?? []).not.toContain("Bea-full\nBea-short");
-    expect(job.availableAt).toBeInstanceOf(Date);
+    expect(queue.enqueue).not.toHaveBeenCalled();
+    expect(store.declines).toEqual([]);
     expect(sink.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1062,6 +1141,89 @@ describe("consolidateMemoryGraph", () => {
     expect(queue.enqueue).not.toHaveBeenCalled();
   });
 
+  it("advances a full page instead of retrying a timed-out pair", async () => {
+    const run: AgentRuntime["run"] = async function* (_request, context) {
+      await new Promise<void>((resolve) => {
+        const signal = context?.signal;
+        if (!signal || signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      throw new Error("Request was aborted");
+    };
+    const store = pageStore(
+      [
+        entity({ id: "ada-short", name: "Ada", normName: "ada" }),
+        entity({ id: "ada-full", name: "Ada Example", normName: "ada example" }),
+      ],
+      { pageFull: true, pageIds: ["ada-short", "ada-full"] },
+    );
+    store.consolidateModelSettings = () => ({
+      thinkingLevel: "low",
+      maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
+      timeoutMs: 20,
+    });
+    const queue = jobs();
+    await consolidateMemoryGraph(deps(run, queue), payload, store);
+    expect(store.merges).toEqual([]);
+    expect(store.declines).toEqual([]);
+    const job = queue.enqueue.mock.calls[0]?.[0];
+    expect(job?.name).toBe("memory.consolidate");
+    if (job?.name !== "memory.consolidate") throw new Error("expected memory.consolidate");
+    expect(job.payload.afterId).toBe("ada-full");
+    expect(job.payload.attempt).toBe(0);
+    expect(job.payload.skipped).toEqual(["ada-full\nada-short"]);
+    expect(job.payload.rejected ?? []).not.toContain("ada-full\nada-short");
+    expect(job.availableAt).toBeUndefined();
+  });
+
+  it("asks the next pairs after a page of confirmation timeouts", async () => {
+    const run: AgentRuntime["run"] = async function* (_request, context) {
+      await new Promise<void>((resolve) => {
+        const signal = context?.signal;
+        if (!signal || signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      throw new Error("Request was aborted");
+    };
+    const people = ["Ada", "Bea", "Cleo", "Dora", "Eve"].flatMap((name) => [
+      entity({ id: `${name}-short`, name, normName: name.toLowerCase() }),
+      entity({
+        id: `${name}-full`,
+        name: `${name} Example`,
+        normName: `${name.toLowerCase()} example`,
+      }),
+    ]);
+    const store = pageStore(people);
+    store.consolidateModelSettings = () => ({
+      thinkingLevel: "low",
+      maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
+      timeoutMs: 20,
+    });
+    const queue = jobs();
+    await consolidateMemoryGraph(deps(run, queue), payload, store);
+    expect(store.merges).toEqual([]);
+    const job = queue.enqueue.mock.calls[0]?.[0];
+    expect(job?.name).toBe("memory.consolidate");
+    if (job?.name !== "memory.consolidate") throw new Error("expected memory.consolidate");
+    expect(job.payload.afterId).toBeUndefined();
+    expect(job.payload.attempt).toBe(0);
+    expect(job.payload.skipped).toHaveLength(MAX_CONSOLIDATE_LLM_CALLS);
+    const second = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done" as const, text: '{"same":true}' };
+    });
+    const next = jobs();
+    await consolidateMemoryGraph(deps(second, next), job.payload, store);
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(store.merges.map((merge) => merge.dropId)).toEqual(["Eve-short"]);
+    expect(next.enqueue).not.toHaveBeenCalled();
+  });
+
   it("does not retry a confirmation that keeps timing out", async () => {
     const run: AgentRuntime["run"] = async function* (_request, context) {
       await new Promise<void>((resolve) => {
@@ -1084,12 +1246,9 @@ describe("consolidateMemoryGraph", () => {
       timeoutMs: 20,
     });
     const queue = jobs();
-    await consolidateMemoryGraph(
-      deps(run, queue),
-      { ...payload, attempt: MAX_CONSOLIDATE_ATTEMPTS - 1 },
-      store,
-    );
+    await consolidateMemoryGraph(deps(run, queue), payload, store);
     expect(store.merges).toEqual([]);
+    expect(store.declines).toEqual([]);
     expect(queue.enqueue).not.toHaveBeenCalled();
   });
 
@@ -1126,5 +1285,47 @@ describe("consolidateMemoryGraph", () => {
       "memory.decision_snippet": "not a decision",
     });
     expect(queue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("does not ask again after the model refuses, until a name, type, or alias changes", async () => {
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done" as const, text: '{"same":false}' };
+    });
+    const person = entity({ id: "apple-person", name: "Apple", normName: "apple" });
+    const org = entity({
+      id: "apple-org",
+      ns: "isolated:bot-1",
+      type: "Organization",
+      name: "Apple",
+      normName: "apple",
+    });
+    person.ns = "isolated:bot-1";
+    const store = pageStore([person, org]);
+    await consolidateMemoryGraph(deps(run), payload, store);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(store.merges).toEqual([]);
+    expect(store.declines).toEqual([
+      expect.objectContaining({
+        leftId: "apple-org",
+        rightId: "apple-person",
+        ns: "isolated:bot-1",
+        botId: "bot-1",
+        leftFingerprint: consolidationEntityFingerprint(org),
+        rightFingerprint: consolidationEntityFingerprint(person),
+      }),
+    ]);
+    expect(memoryBotIdFromNamespace("shared")).toBe("");
+    expect(memoryBotIdFromNamespace("history:bot-9")).toBe("bot-9");
+
+    run.mockClear();
+    await consolidateMemoryGraph(deps(run), payload, store);
+    expect(run).not.toHaveBeenCalled();
+
+    org.aliasNorms = ["apple inc"];
+    org.aliases = ["Apple Inc"];
+    await consolidateMemoryGraph(deps(run), payload, store);
+    expect(store.forgotten).toEqual([{ leftId: "apple-org", rightId: "apple-person" }]);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(declinedPairIdentity(person, org).botId).toBe("bot-1");
   });
 });
