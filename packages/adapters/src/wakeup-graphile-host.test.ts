@@ -10,6 +10,7 @@ import type { Runner } from "graphile-worker";
 import { makeWorkerUtils } from "graphile-worker";
 import type { Pool } from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { clearGraphileWorkerIds, graphileWorkerIds } from "./worker-locks.js";
 
 const run = vi.hoisted(() => vi.fn());
 
@@ -315,6 +316,7 @@ describe("GraphileJobPublisher.enqueue", () => {
 describe("GraphileJobWorkerHost runner lifecycle", () => {
   afterEach(() => {
     run.mockReset();
+    clearGraphileWorkerIds();
   });
 
   it("backs off then restarts when runner.promise rejects with 53300", async () => {
@@ -514,6 +516,23 @@ describe("GraphileJobWorkerHost runner lifecycle", () => {
     expect(refund?.params).toEqual([["pool-self"], ["42"]]);
     const unlock = queries.find((query) => query.sql.includes("force_unlock_workers"));
     expect(unlock?.params).toEqual([["pool-self"]]);
+  });
+
+  it("keeps every pool id in the process, including one started again", async () => {
+    clearGraphileWorkerIds();
+    const first = mockRunner();
+    run.mockResolvedValueOnce(first.runner);
+    const host = new GraphileJobWorkerHost({} as Pool, { sleep: async () => undefined });
+    await host.start(handlers());
+    const on = first.runner.events.on as ReturnType<typeof vi.fn>;
+    const created = on.mock.calls.find((call) => call[0] === "worker:create")?.[1] as
+      | ((event: { worker: { workerPool: { id: string } } }) => void)
+      | undefined;
+    created?.({ worker: { workerPool: { id: "pool-a" } } });
+    created?.({ worker: { workerPool: { id: "pool-b" } } });
+    expect(graphileWorkerIds()).toEqual(["pool-a", "pool-b"]);
+    await host.stop();
+    expect(graphileWorkerIds()).toEqual(["pool-a", "pool-b"]);
   });
 });
 

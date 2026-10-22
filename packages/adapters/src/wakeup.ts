@@ -17,6 +17,7 @@ import { DREAM_CRON_ITEM } from "./memory-dream.js";
 import {
   DEFAULT_WORKER_SHUTDOWN_GRACE_MS,
   releaseOwnWorkerLocks,
+  rememberGraphileWorkerId,
   WORKER_SHUTDOWN_SETTLE_MS,
 } from "./worker-locks.js";
 
@@ -211,7 +212,11 @@ export class GraphileJobWorkerHost implements JobWorkerHost {
 
   private notePool(event: { worker?: { workerPool?: { id?: string } } }): void {
     const id = event.worker?.workerPool?.id;
-    if (id) this.poolIds.add(id);
+    if (!id) return;
+    this.poolIds.add(id);
+    // Process-wide: a sweep must exclude every pool in this process, not only
+    // the host that is stopping. Ids stay for the life of the process.
+    rememberGraphileWorkerId(id);
   }
 
   private async launchRunner(): Promise<void> {

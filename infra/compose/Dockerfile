@@ -42,5 +42,7 @@ ARG GIT_SHA
 ENV NODE_ENV=production
 ENV GIT_SHA=$GIT_SHA
 EXPOSE 3100 5173 7091
+# pnpm start is `sh -c node …`. pnpm 9 signals that shell and exits, so node
+# never runs its shutdown handler. The script execs node, which becomes PID 1.
 USER node
-CMD ["pnpm", "--filter", "@rakazo/api", "start"]
+CMD ["/app/infra/compose/start-api.sh"]

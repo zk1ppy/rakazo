@@ -531,6 +531,7 @@ AGENT_RUNTIME=pi          # Keep scripted only for pnpm test.
 WAKEUP_DRIVER=graphile
 # WORKER_SHUTDOWN_GRACE_MS=10000
 # WORKER_UNLOCK_STALE_LOCKS_AFTER_MS=
+# WORKER_UNLOCK_STALE_LOCKS_INTERVAL_MS=300000
 SANDBOX_IDLE_MS=600000    # pause or stop after 10 minutes idle; 0 disables idle sleep
 # Set 0 when self-hosting with Docker, where an idle computer costs nothing, to keep long-running apps and sessions up.
 # E2B, CreateOS and Boat still apply their own timeouts.
@@ -1595,16 +1596,34 @@ On Kubernetes set `terminationGracePeriodSeconds` to at least 45 with the defaul
 grace kills the process while the queue is still locked; graphile only clears that lock after 4
 hours.
 
-`WORKER_UNLOCK_STALE_LOCKS_AFTER_MS` is off when unset or 0. When set, startup releases job and
-queue locks older than that and held by another worker id, and logs each one with the job id, queue,
-and previous worker id. The lock is held for the whole job, not for one model call, so the threshold
-has to be longer than the longest job. A rolling update starts the new pod while the old one is
-still running, and a short threshold unlocks that live job so both run it. Leave the variable unset
-whenever more than one worker uses the database. A single replica can set 3600000 (60 minutes).
-That is safe with a Recreate strategy, which stops the old pod before the new one starts, or when
-no job can run longer than the threshold. `MEMORY_CONSOLIDATE_JOB_BUDGET_MS` (default 1200000,
-20 minutes) stops a consolidation page once that budget is spent and enqueues the rest, so that
-job stays inside the 60 minute window aside from the confirmation already in flight.
+Run the API and the worker with `node`, not `pnpm start`. pnpm 9 runs the package script as
+`sh -c node …`. SIGTERM sent to pnpm is forwarded to that shell. The shell exits immediately and
+does not signal node, then pnpm exits without waiting, so the grace above never starts. When pnpm
+is PID 1, the container then kills the orphaned node process. The image command
+(`infra/compose/start-api.sh`), Compose, and the Railway entrypoint exec node so it is the process
+that receives SIGTERM. A second SIGTERM while shutdown is already running does not exit early.
+
+`WORKER_UNLOCK_STALE_LOCKS_AFTER_MS` is off when unset or 0. Any other positive whole number of
+milliseconds is accepted, including `1` and `60000`: parsing has no higher minimum. When set, the
+worker releases job and queue locks older than that and held by another process, once before it
+takes a job and again every `WORKER_UNLOCK_STALE_LOCKS_INTERVAL_MS` (default 300000 when the age is
+set; `0` repeats nothing and leaves the startup pass). Each release is logged with the job id,
+queue, and previous worker id. A pool id this process has registered is left alone, including every
+runner started again in the same process after a database connection failure.
+
+Leave the age unset whenever more than one worker uses the database. A rolling update starts the
+new pod while the old one is still running, and a short age unlocks that live job so both run it.
+Without Recreate, one replica has the same overlap, so the age has to be longer than the longest
+job (3600000, 60 minutes, when nothing runs longer than that).
+
+One replica with a Recreate strategy stops the old pod before the new one starts, so no other worker
+can be alive. Set `60000` there. That is the shortest age to use: the sweep reads this process's
+pool ids and applies them in a later database statement, and one minute stays above that gap. A
+dead worker's lock that is already a minute old is released at startup. A younger one is released
+on a later pass once it crosses a minute, instead of waiting for graphile's 4 hour sweep.
+`MEMORY_CONSOLIDATE_JOB_BUDGET_MS` (default 1200000, 20 minutes) can be longer than this age. The
+running job belongs to this process and is excluded. A positive age below 60000 is accepted; it
+leaves less room for that gap.
 
 ## Other deployment layouts
 
