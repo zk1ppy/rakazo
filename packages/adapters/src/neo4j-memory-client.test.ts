@@ -6,6 +6,7 @@ import type { Neo4jMemoryDriver, Neo4jMemoryRows, Neo4jRunOptions } from "./neo4
 import {
   collapseNeo4jParallelRelations,
   countExtractedNeo4jFacts,
+  deleteNeo4jEntities,
   ensureNeo4jMemorySchema,
   escapeLuceneQuery,
   findNeo4jPeopleByNorms,
@@ -14,6 +15,7 @@ import {
   linkNeo4jFactEntity,
   listNeo4jConsolidationEntities,
   listNeo4jDeclinedPairs,
+  listNeo4jDeferredPairs,
   listUnextractedNeo4jFacts,
   markNeo4jFactExtracted,
   mergeExtractedNeo4jEntity,
@@ -21,6 +23,7 @@ import {
   NEO4J_ENTITY_FULLTEXT_INDEX,
   NEO4J_FACT_FULLTEXT_INDEX,
   NEO4J_MEMORY_SCHEMA_STATEMENTS,
+  noteNeo4jPairTimeout,
   purgeNeo4jChatSources,
   readNeo4jFactLearnedAt,
   readNeo4jFactText,
@@ -28,14 +31,17 @@ import {
   recallNeo4jFacts,
   rememberNeo4jDeclinedPair,
   renameNeo4jEntity,
+  replaceNeo4jThreadChatFact,
   resolveNeo4jBoltAddress,
   saveNeo4jFact,
   stampNeo4jExtractedFacts,
   upsertNeo4jEntity,
 } from "./neo4j-memory-client.js";
 import {
+  canonicalRelationType,
   mergeRelationProvenance,
   normalizeRelationType,
+  readRelationVocabulary,
   relationCollapseKey,
   unionRelationIds,
 } from "./relation-type.js";
@@ -337,6 +343,11 @@ describe("Neo4j memory client", () => {
     expect(created).toContain("r.createdAt = $now");
     expect(created).toContain("r.sourceIds = sourceIds");
     expect(driver.calls[1]?.params).toMatchObject({ type: "lives_in" });
+    expect(canonicalRelationType("contact_of", readRelationVocabulary({}))).toBe("knows");
+    expect(canonicalRelationType("trains_in", readRelationVocabulary({}))).toBe("related_to");
+    expect(
+      canonicalRelationType("trains_in", readRelationVocabulary({ MEMORY_RELATION_TYPES: "*" })),
+    ).toBe("trains_in");
     expect(normalizeRelationType("lives in")).toBe("lives_in");
     expect(normalizeRelationType("LIVES_IN")).toBe("lives_in");
   });
@@ -586,7 +597,8 @@ describe("Neo4j memory client", () => {
     const cypher = driver.calls[0]?.cypher ?? "";
     expect(cypher).toContain("spaceId: $spaceId");
     expect(cypher).toContain("ORDER BY e.id");
-    expect(cypher).toContain("COUNT { (e)--() }");
+    expect(cypher).toContain("COUNT { (e)-[:RKZ_REL|ABOUT]-() }");
+    expect(cypher).not.toContain("COUNT { (e)--() }");
     expect(cypher).toContain("aliasNorms");
     expect(cypher).toContain("RKZ_REL");
     expect(cypher).not.toContain("Nicolas");
@@ -743,6 +755,7 @@ describe("Neo4j memory client", () => {
       empty,
       empty,
       empty,
+      empty,
       { records: [row({ id: "keep" })] },
     );
     await expect(
@@ -781,15 +794,18 @@ describe("Neo4j memory client", () => {
     expect(cypher[7]).toContain("-[rel:MENTIONS]->(other)");
     expect(cypher[7]).toContain("MERGE (keep)-[moved:MENTIONS]->(other)");
     expect(cypher[8]).toContain("-[rel:MENTIONS]->(drop:Rkz {id: $dropId");
-    expect(cypher[9]).toContain("DELETE rel");
-    expect(cypher[10]).toContain("-[rel]-(drop)");
-    const commit = cypher[11] ?? "";
+    expect(cypher[9]).toContain("DELETE d");
+    expect(cypher[9]).toContain("RKZ_DECLINED");
+    expect(cypher[9]).toContain("RKZ_DEFERRED");
+    expect(cypher[10]).toContain("DELETE rel");
+    expect(cypher[11]).toContain("-[rel]-(drop)");
+    const commit = cypher[12] ?? "";
     expect(commit).toContain("keep:Person");
     expect(commit).toContain("REMOVE keep:Object, keep:Location, keep:Event, keep:Organization");
     expect(commit).toContain("DELETE drop");
     expect(commit).toContain("NOT (drop)--()");
     expect(commit).not.toContain("DETACH DELETE");
-    expect(writes[11]?.params).toMatchObject({
+    expect(writes[12]?.params).toMatchObject({
       keepId: "keep",
       dropId: "drop",
       spaceId: "space-1",
@@ -800,7 +816,7 @@ describe("Neo4j memory client", () => {
       aliasNorms: ["nicolas"],
     });
     expect(writes.every((call) => call.params.spaceId === "space-1")).toBe(true);
-    expect(writes).toHaveLength(12);
+    expect(writes).toHaveLength(13);
     expect(commit).toContain("SET keep:Entity");
     expect(commit).not.toContain("REMOVE keep:Rkz");
     expect(commit).not.toContain("REMOVE keep:Entity");
@@ -813,6 +829,7 @@ describe("Neo4j memory client", () => {
       { records: [row({ id: "keep" })] },
       { records: [row({ foreign: 0 })] },
       { records: [] },
+      empty,
       empty,
       empty,
       empty,
@@ -1074,5 +1091,196 @@ describe("declined consolidation pairs", () => {
       listNeo4jDeclinedPairs(driver, "neo4j", { spaceId: "space-1", ids: [] }),
     ).resolves.toEqual([]);
     expect(driver.calls).toHaveLength(3);
+  });
+});
+
+describe("relation vocabulary and graph cleanup", () => {
+  const previousTypes = process.env.MEMORY_RELATION_TYPES;
+  const previousSynonyms = process.env.MEMORY_RELATION_SYNONYMS;
+
+  function restoreVocabulary(): void {
+    if (previousTypes === undefined) delete process.env.MEMORY_RELATION_TYPES;
+    else process.env.MEMORY_RELATION_TYPES = previousTypes;
+    if (previousSynonyms === undefined) delete process.env.MEMORY_RELATION_SYNONYMS;
+    else process.env.MEMORY_RELATION_SYNONYMS = previousSynonyms;
+  }
+
+  it("writes a synonym as the canonical type", async () => {
+    delete process.env.MEMORY_RELATION_TYPES;
+    delete process.env.MEMORY_RELATION_SYNONYMS;
+    try {
+      const driver = new FakeDriver();
+      driver.rows.push({ records: [] }, { records: [row({ id: "ada" })] });
+      await linkNeo4jEntities(driver, "neo4j", {
+        fromId: "ada",
+        toId: "bea",
+        spaceId: "space-1",
+        ns: "shared",
+        type: "contact_of",
+        factId: "fact-1",
+        now: "2026-01-01T00:00:00.000Z",
+      });
+      expect(driver.calls[1]?.params).toMatchObject({ type: "knows" });
+    } finally {
+      restoreVocabulary();
+    }
+  });
+
+  it("rewrites parallel types before collapsing them when asked", async () => {
+    delete process.env.MEMORY_RELATION_TYPES;
+    delete process.env.MEMORY_RELATION_SYNONYMS;
+    try {
+      const driver = new FakeDriver();
+      driver.rows.push(
+        { records: [row({ rewritten: 3 })] },
+        { records: [row({ removed: 2 })] },
+        { records: [row({ removed: 0 })] },
+        { records: [row({ removed: 0 })] },
+      );
+      await expect(
+        collapseNeo4jParallelRelations(driver, "neo4j", {
+          spaceId: "space-1",
+          ids: ["ada", "bea"],
+          collapseTypes: true,
+        }),
+      ).resolves.toEqual({ relations: 2, about: 0, from: 0, rewritten: 3 });
+      expect(driver.calls).toHaveLength(4);
+      const rewrite = driver.calls[0]?.cypher ?? "";
+      expect(rewrite).toContain("SET r.type = canonical");
+      expect(rewrite).toContain("WHEN 'contact_of' THEN 'knows'");
+      expect(rewrite).toContain("ELSE 'related_to'");
+      expect(driver.calls[1]?.cypher).toContain("size(rels) > 1");
+    } finally {
+      restoreVocabulary();
+    }
+
+    process.env.MEMORY_RELATION_TYPES = "*";
+    try {
+      const passthrough = new FakeDriver();
+      passthrough.rows.push(
+        { records: [row({ removed: 1 })] },
+        { records: [row({ removed: 0 })] },
+        { records: [row({ removed: 0 })] },
+      );
+      await expect(
+        collapseNeo4jParallelRelations(passthrough, "neo4j", {
+          spaceId: "space-1",
+          ids: ["ada"],
+          collapseTypes: true,
+        }),
+      ).resolves.toEqual({ relations: 1, about: 0, from: 0, rewritten: 0 });
+      expect(passthrough.calls).toHaveLength(3);
+      expect(passthrough.calls[0]?.cypher).not.toContain("SET r.type = canonical");
+    } finally {
+      restoreVocabulary();
+    }
+  });
+
+  it("replaces an earlier chat summary for the same thread", async () => {
+    const driver = new FakeDriver();
+    driver.rows.push({ records: [row({ removed: 1 })] });
+    await expect(
+      replaceNeo4jThreadChatFact(driver, "neo4j", {
+        spaceId: "space-1",
+        botId: "bot-1",
+        threadId: "thread-1",
+        keepFactId: "fact-new",
+      }),
+    ).resolves.toBe(1);
+    const call = driver.calls[0];
+    expect(call?.cypher).toContain('kind: "chat", threadId: $threadId');
+    expect(call?.cypher).toContain("DETACH DELETE f");
+    expect(call?.cypher).not.toContain("DETACH DELETE s");
+    expect(call?.params).toMatchObject({
+      spaceId: "space-1",
+      botId: "bot-1",
+      threadId: "thread-1",
+      keepFactId: "fact-new",
+    });
+    expect(call?.options.access).toBe("write");
+  });
+
+  it("counts timeouts on RKZ_DEFERRED and refuses an unordered pair", async () => {
+    const driver = new FakeDriver();
+    await expect(
+      noteNeo4jPairTimeout(driver, "neo4j", {
+        spaceId: "space-1",
+        leftId: "bea",
+        rightId: "ada",
+        ns: "shared",
+        botId: "",
+        leftFingerprint: "Person\nada\n",
+        rightFingerprint: "Person\nbea\n",
+        now: "2026-10-22T00:00:00.000Z",
+      }),
+    ).resolves.toBe(0);
+    expect(driver.calls).toHaveLength(0);
+
+    driver.rows.push({ records: [row({ timeouts: 2 })] });
+    await expect(
+      noteNeo4jPairTimeout(driver, "neo4j", {
+        spaceId: "space-1",
+        leftId: "ada",
+        rightId: "bea",
+        ns: "shared",
+        botId: "",
+        leftFingerprint: "Person\nada\n",
+        rightFingerprint: "Person\nbea\n",
+        now: "2026-10-22T00:00:00.000Z",
+      }),
+    ).resolves.toBe(2);
+    const write = driver.calls[0];
+    expect(write?.cypher).toContain("RKZ_DEFERRED");
+    expect(write?.cypher).not.toContain("RKZ_DECLINED");
+    expect(write?.cypher).toContain("coalesce(d.timeouts, 0) + 1");
+    expect(write?.options.access).toBe("write");
+
+    driver.rows.push({
+      records: [
+        row({
+          leftId: "ada",
+          rightId: "bea",
+          ns: "shared",
+          botId: "",
+          leftFingerprint: "Person\nada\n",
+          rightFingerprint: "Person\nbea\n",
+          timeouts: 2,
+        }),
+      ],
+    });
+    await expect(
+      listNeo4jDeferredPairs(driver, "neo4j", { spaceId: "space-1", ids: ["bea", "ada"] }),
+    ).resolves.toEqual([
+      {
+        leftId: "ada",
+        rightId: "bea",
+        ns: "shared",
+        botId: "",
+        leftFingerprint: "Person\nada\n",
+        rightFingerprint: "Person\nbea\n",
+        timeouts: 2,
+      },
+    ]);
+    expect(driver.calls[1]?.cypher).toContain("RKZ_DEFERRED");
+    expect(driver.calls[1]?.options.access).toBe("read");
+    await expect(
+      listNeo4jDeferredPairs(driver, "neo4j", { spaceId: "space-1", ids: [] }),
+    ).resolves.toEqual([]);
+  });
+
+  it("detaches entities that the cleanup command deletes", async () => {
+    const driver = new FakeDriver();
+    await expect(
+      deleteNeo4jEntities(driver, "neo4j", { spaceId: "space-1", ids: [] }),
+    ).resolves.toBe(0);
+    expect(driver.calls).toHaveLength(0);
+    driver.rows.push({ records: [row({ deleted: 2 })] });
+    await expect(
+      deleteNeo4jEntities(driver, "neo4j", { spaceId: "space-1", ids: ["path", "path"] }),
+    ).resolves.toBe(2);
+    expect(driver.calls[0]?.cypher).toContain("DETACH DELETE e");
+    expect(driver.calls[0]?.cypher).toContain("e.spaceId = $spaceId");
+    expect(driver.calls[0]?.params).toMatchObject({ spaceId: "space-1", ids: ["path"] });
+    expect(driver.calls[0]?.options.access).toBe("write");
   });
 });

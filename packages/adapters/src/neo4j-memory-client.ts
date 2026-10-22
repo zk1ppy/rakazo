@@ -4,7 +4,12 @@ import type { Driver } from "neo4j-driver";
 import neo4j from "neo4j-driver";
 import type { ResolvedAddress, ResolveHostname } from "./network-address.js";
 import { isCloudMetadataAddress, isPrivateAddress } from "./network-address.js";
-import { MAX_RELATION_PROVENANCE_IDS, normalizeRelationType } from "./relation-type.js";
+import {
+  canonicalRelationType,
+  MAX_RELATION_PROVENANCE_IDS,
+  readRelationVocabulary,
+  relationTypeCase,
+} from "./relation-type.js";
 
 /**
  * The only module that imports `neo4j-driver`. Graph reads and writes stay on the
@@ -17,6 +22,11 @@ export const NEO4J_ENTITY_FULLTEXT_INDEX = "rkz_entity_name";
 export const NEO4J_ENTITY_RELATIONSHIP = "RKZ_REL";
 /** A model refusal to merge two entities. Scoped by spaceId, namespace, and bot id. */
 export const NEO4J_DECLINED_RELATIONSHIP = "RKZ_DECLINED";
+/**
+ * A confirmation that timed out too many times. Not a refusal and not a business
+ * edge: consolidation skips the pair until a name, type, or alias changes.
+ */
+export const NEO4J_DEFERRED_RELATIONSHIP = "RKZ_DEFERRED";
 
 export const NEO4J_ENTITY_TYPES = [
   "Person",
@@ -333,6 +343,8 @@ export interface Neo4jFactWrite {
   provenance: string;
   confidence: number;
   generation: number | null;
+  /** Set on a chat summary so the next compaction of that thread can replace it. */
+  threadId?: string | null;
   now: string;
 }
 
@@ -366,11 +378,13 @@ export async function saveNeo4jFact(
        f.confidence = $confidence,
        f.provenance = $provenance,
        f.botId = $botId,
-       f.generation = $generation
+       f.generation = $generation,
+       f.threadId = $threadId
+     SET f.threadId = CASE WHEN $threadId IS NULL THEN f.threadId ELSE $threadId END
      MERGE (f)-[rel:FROM]->(s)
      ON CREATE SET rel.provenance = $provenance
      RETURN f.id AS id`,
-    { ...fact },
+    { ...fact, threadId: fact.threadId ?? null },
     { database, access: "write", signal },
   );
   const id = result.records[0]?.get("id");
@@ -504,6 +518,53 @@ export async function purgeNeo4jChatSources(
   );
 }
 
+/**
+ * Delete earlier chat summaries for one thread and the edges that exist only
+ * because of them. ABOUT leaves with the fact. A relation that also cites
+ * another fact keeps that fact id. The source node is shared by generation
+ * and stays.
+ */
+export async function replaceNeo4jThreadChatFact(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string; botId: string; threadId: string; keepFactId: string },
+  signal?: AbortSignal,
+): Promise<number> {
+  const result = await driver.run(
+    `MATCH (f:Rkz:Fact {spaceId: $spaceId, botId: $botId, kind: "chat", threadId: $threadId})
+     WHERE f.id <> $keepFactId
+     WITH collect(DISTINCT f) AS facts, collect(DISTINCT f.id) AS doomedFactIds
+     WITH facts, doomedFactIds, [] AS doomedSourceIds
+     WHERE size(doomedFactIds) > 0
+     OPTIONAL MATCH (a:Rkz)-[rel:${NEO4J_ENTITY_RELATIONSHIP}]-(b:Rkz)
+     WHERE a.spaceId = $spaceId AND b.spaceId = $spaceId
+       AND (
+         rel.factId IN doomedFactIds
+         OR any(id IN coalesce(rel.factIds, []) WHERE id IN doomedFactIds)
+       )
+     WITH facts, doomedFactIds, doomedSourceIds, collect(DISTINCT rel) AS matched
+     WITH facts, doomedFactIds, doomedSourceIds,
+          [rel IN matched WHERE rel IS NOT NULL] AS rels
+     WITH facts, doomedFactIds, doomedSourceIds, rels,
+          [rel IN rels WHERE size(${cypherDropIds("rel", "doomedFactIds")}) = 0] AS emptyRels,
+          [rel IN rels WHERE size(${cypherDropIds("rel", "doomedFactIds")}) > 0] AS keepRels
+     FOREACH (rel IN keepRels |
+       SET rel.factIds = ${cypherDropIds("rel", "doomedFactIds")},
+           rel.factId = head(${cypherDropIds("rel", "doomedFactIds")}),
+           rel.sourceIds = ${cypherDropIds("rel", "doomedSourceIds", "sourceIds")},
+           rel.mentions = size(${cypherDropIds("rel", "doomedFactIds")})
+     )
+     FOREACH (rel IN emptyRels | DELETE rel)
+     WITH DISTINCT facts
+     UNWIND facts AS f
+     DETACH DELETE f
+     RETURN count(f) AS removed`,
+    input,
+    { database, access: "write", signal },
+  );
+  return asNumber(result.records[0]?.get("removed"));
+}
+
 export interface Neo4jEntityWrite {
   id: string;
   type: Neo4jEntityType;
@@ -588,7 +649,7 @@ export async function linkNeo4jEntities(
   },
   signal?: AbortSignal,
 ): Promise<void> {
-  const type = normalizeRelationType(input.type);
+  const type = canonicalRelationType(input.type);
   if (!type) throw new Error("Neo4j relation type is empty.");
   const params = { ...input, type, time: input.time ?? null };
   const options: Neo4jRunOptions = { database, access: "write", signal };
@@ -662,6 +723,8 @@ export interface ParallelRelationCollapse {
   about: number;
   /** Extra FROM edges deleted. Writers already merge one FROM per pair. */
   from: number;
+  /** Edges whose business type was rewritten to the vocabulary before the collapse. */
+  rewritten?: number;
 }
 
 /**
@@ -681,6 +744,11 @@ export async function collapseNeo4jParallelRelations(
     scope?: "page" | "space";
     /** Count duplicates without writing. */
     dryRun?: boolean;
+    /**
+     * Rewrite business types through the vocabulary, then collapse parallel
+     * edges that share a direction. Fact ids on the surviving edge are the union.
+     */
+    collapseTypes?: boolean;
   },
   signal?: AbortSignal,
 ): Promise<ParallelRelationCollapse> {
@@ -691,13 +759,36 @@ export async function collapseNeo4jParallelRelations(
     access: input.dryRun ? "read" : "write",
     signal,
   };
+  const vocabulary = readRelationVocabulary();
   const params = {
     spaceId: input.spaceId,
     ids: input.ids,
     ns: input.ns ?? "",
     scope,
     types: [...NEO4J_ENTITY_TYPES],
+    relationAllowed: [...vocabulary.allowed],
   };
+  let rewritten = 0;
+  if (input.collapseTypes && !vocabulary.passthrough && !input.dryRun) {
+    const rewrite = await driver.run(
+      `MATCH (a:Rkz)-[r:${NEO4J_ENTITY_RELATIONSHIP}]->(b:Rkz)
+       WHERE a.spaceId = $spaceId AND b.spaceId = $spaceId
+         AND a.id <> b.id
+         AND ${RELATION_ENDPOINT.replaceAll("node", "a")}
+         AND ${RELATION_ENDPOINT.replaceAll("node", "b")}
+         AND ($scope = 'space' OR a.id IN $ids OR b.id IN $ids)
+         AND ($ns = '' OR (a.ns = $ns AND b.ns = $ns))
+       WITH r, ${cypherRelationType("r.type")} AS relType
+       WHERE relType <> ''
+       WITH r, relType, ${relationTypeCase("relType", vocabulary)} AS canonical
+       WHERE relType <> canonical
+       SET r.type = canonical
+       RETURN count(r) AS rewritten`,
+      params,
+      options,
+    );
+    rewritten = asNumber(rewrite.records[0]?.get("rewritten"));
+  }
   const relations = await driver.run(
     input.dryRun ? COLLAPSE_RELATIONS_PREVIEW : COLLAPSE_RELATIONS,
     params,
@@ -717,6 +808,7 @@ export async function collapseNeo4jParallelRelations(
     relations: asNumber(relations.records[0]?.get("removed")),
     about: asNumber(about.records[0]?.get("removed")),
     from: asNumber(fromEdges.records[0]?.get("removed")),
+    ...(input.collapseTypes ? { rewritten } : {}),
   };
 }
 
@@ -1014,7 +1106,7 @@ RETURN e.id AS id,
        coalesce(e.summary, '') AS summary,
        neighborIds,
        factIds,
-       COUNT { (e)--() } AS degree
+       COUNT { (e)-[:${NEO4J_ENTITY_RELATIONSHIP}|ABOUT]-() } AS degree
 `;
 
 /** People whose normalized name or alias is in the list. An empty list does no query. */
@@ -1183,6 +1275,114 @@ export async function rememberNeo4jDeclinedPair(
   );
 }
 
+export interface Neo4jDeferredPair extends Neo4jDeclinedPair {
+  timeouts: number;
+}
+
+export interface Neo4jDeferredPairWrite extends Neo4jDeclinedPairWrite {}
+
+/**
+ * Timeouts whose endpoints are both in `ids`. A pair at the cap is skipped.
+ * A fingerprint mismatch is stale and should be forgotten.
+ */
+export async function listNeo4jDeferredPairs(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string; ns?: string; ids: string[] },
+  signal?: AbortSignal,
+): Promise<Neo4jDeferredPair[]> {
+  const ids = [...new Set(input.ids.filter((id) => id.trim().length > 0))];
+  if (ids.length === 0) return [];
+  const result = await driver.run(
+    `MATCH (left:Rkz {spaceId: $spaceId})-[d:${NEO4J_DEFERRED_RELATIONSHIP} {spaceId: $spaceId}]-(right:Rkz {spaceId: $spaceId})
+     WHERE left.id IN $ids AND right.id IN $ids
+       AND left.id < right.id
+       AND left.spaceId = $spaceId AND right.spaceId = $spaceId
+       AND ($ns = '' OR (d.ns = $ns AND left.ns = $ns AND right.ns = $ns))
+     RETURN left.id AS leftId,
+            right.id AS rightId,
+            coalesce(d.ns, '') AS ns,
+            coalesce(d.botId, '') AS botId,
+            coalesce(d.leftFingerprint, '') AS leftFingerprint,
+            coalesce(d.rightFingerprint, '') AS rightFingerprint,
+            coalesce(d.timeouts, 0) AS timeouts`,
+    {
+      spaceId: input.spaceId,
+      ns: input.ns?.trim() ?? "",
+      ids,
+    },
+    { database, access: "read", signal },
+  );
+  const pairs: Neo4jDeferredPair[] = [];
+  for (const record of result.records) {
+    const leftId = asString(record.get("leftId"));
+    const rightId = asString(record.get("rightId"));
+    if (!leftId || !rightId) continue;
+    pairs.push({
+      leftId,
+      rightId,
+      ns: asString(record.get("ns")),
+      botId: asString(record.get("botId")),
+      leftFingerprint: asString(record.get("leftFingerprint")),
+      rightFingerprint: asString(record.get("rightFingerprint")),
+      timeouts: asNumber(record.get("timeouts")),
+    });
+  }
+  return pairs;
+}
+
+/** Increment the timeout counter. Returns the count after this timeout. */
+export async function noteNeo4jPairTimeout(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: Neo4jDeferredPairWrite,
+  signal?: AbortSignal,
+): Promise<number> {
+  if (!input.leftId || !input.rightId || input.leftId === input.rightId) return 0;
+  if (input.leftId > input.rightId) return 0;
+  const result = await driver.run(
+    `MATCH (left:Rkz {id: $leftId, spaceId: $spaceId})
+     MATCH (right:Rkz {id: $rightId, spaceId: $spaceId})
+     WHERE left.ns = $ns AND right.ns = $ns AND left.id < right.id
+     MERGE (left)-[d:${NEO4J_DEFERRED_RELATIONSHIP} {spaceId: $spaceId}]->(right)
+     SET d.ns = $ns,
+         d.botId = $botId,
+         d.leftFingerprint = $leftFingerprint,
+         d.rightFingerprint = $rightFingerprint,
+         d.timeouts = coalesce(d.timeouts, 0) + 1,
+         d.updatedAt = $now
+     RETURN d.timeouts AS timeouts`,
+    {
+      spaceId: input.spaceId,
+      leftId: input.leftId,
+      rightId: input.rightId,
+      ns: input.ns,
+      botId: input.botId,
+      leftFingerprint: input.leftFingerprint,
+      rightFingerprint: input.rightFingerprint,
+      now: input.now,
+    },
+    { database, access: "write", signal },
+  );
+  return asNumber(result.records[0]?.get("timeouts"));
+}
+
+/** Drop a timeout marker after one endpoint's name, type, or aliases changed. */
+export async function forgetNeo4jDeferredPair(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string; leftId: string; rightId: string },
+  signal?: AbortSignal,
+): Promise<void> {
+  await driver.run(
+    `MATCH (left:Rkz {id: $leftId, spaceId: $spaceId})-[d:${NEO4J_DEFERRED_RELATIONSHIP} {spaceId: $spaceId}]-(right:Rkz {id: $rightId, spaceId: $spaceId})
+     WHERE left.spaceId = $spaceId AND right.spaceId = $spaceId
+     DELETE d`,
+    input,
+    { database, access: "write", signal },
+  );
+}
+
 /** Remove a refusal after one endpoint's name, type, or aliases changed. */
 export async function forgetNeo4jDeclinedPair(
   driver: Neo4jMemoryDriver,
@@ -1197,6 +1397,124 @@ export async function forgetNeo4jDeclinedPair(
     input,
     { database, access: "write", signal },
   );
+}
+
+export interface Neo4jCleanupEntity {
+  id: string;
+  name: string;
+  type: string;
+}
+
+/** One page of named entities. The caller decides which names to delete. */
+export async function listNeo4jCleanupEntities(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string; skip: number; limit: number },
+  signal?: AbortSignal,
+): Promise<Neo4jCleanupEntity[]> {
+  const result = await driver.run(
+    `MATCH (e:Rkz {spaceId: $spaceId})
+     WHERE e.name IS NOT NULL
+       AND (e:Entity OR e:Person OR e:Object OR e:Location OR e:Event OR e:Organization
+            OR coalesce(e.entityType, '') IN $types)
+     RETURN e.id AS id, coalesce(e.name, '') AS name, coalesce(e.entityType, '') AS entityType
+     ORDER BY e.id
+     SKIP $skip
+     LIMIT $limit`,
+    {
+      spaceId: input.spaceId,
+      skip: input.skip,
+      limit: input.limit,
+      types: [...NEO4J_ENTITY_TYPES],
+    },
+    { database, access: "read", signal },
+  );
+  const entities: Neo4jCleanupEntity[] = [];
+  for (const record of result.records) {
+    const id = asString(record.get("id"));
+    const name = asString(record.get("name"));
+    if (!id || !name) continue;
+    entities.push({ id, name, type: asString(record.get("entityType")) });
+  }
+  return entities;
+}
+
+/** DETACH DELETE removes every edge on the node, including ABOUT and RKZ_REL. */
+export async function deleteNeo4jEntities(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string; ids: string[] },
+  signal?: AbortSignal,
+): Promise<number> {
+  const ids = [...new Set(input.ids.filter((id) => id.trim().length > 0))];
+  if (ids.length === 0) return 0;
+  const result = await driver.run(
+    `MATCH (e:Rkz {spaceId: $spaceId})
+     WHERE e.id IN $ids AND e.spaceId = $spaceId
+     DETACH DELETE e
+     RETURN count(e) AS deleted`,
+    { spaceId: input.spaceId, ids },
+    { database, access: "write", signal },
+  );
+  return asNumber(result.records[0]?.get("deleted"));
+}
+
+export interface Neo4jCleanupDeclined {
+  leftId: string;
+  rightId: string;
+  leftFingerprint: string;
+  rightFingerprint: string;
+  leftType: string;
+  leftNorm: string;
+  leftAliasNorms: string[];
+  rightType: string;
+  rightNorm: string;
+  rightAliasNorms: string[];
+}
+
+/** Refusals in one space, with the endpoints' current name, type, and aliases. */
+export async function listNeo4jCleanupDeclined(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string },
+  signal?: AbortSignal,
+): Promise<Neo4jCleanupDeclined[]> {
+  const result = await driver.run(
+    `MATCH (left:Rkz {spaceId: $spaceId})-[d:${NEO4J_DECLINED_RELATIONSHIP} {spaceId: $spaceId}]-(right:Rkz {spaceId: $spaceId})
+     WHERE left.id < right.id
+       AND left.spaceId = $spaceId AND right.spaceId = $spaceId
+     RETURN left.id AS leftId,
+            right.id AS rightId,
+            coalesce(d.leftFingerprint, '') AS leftFingerprint,
+            coalesce(d.rightFingerprint, '') AS rightFingerprint,
+            coalesce(left.entityType, '') AS leftType,
+            coalesce(left.normName, '') AS leftNorm,
+            left.aliasNorms AS leftAliasNorms,
+            coalesce(right.entityType, '') AS rightType,
+            coalesce(right.normName, '') AS rightNorm,
+            right.aliasNorms AS rightAliasNorms`,
+    { spaceId: input.spaceId },
+    { database, access: "read", signal },
+  );
+  const pairs: Neo4jCleanupDeclined[] = [];
+  for (const record of result.records) {
+    const leftId = asString(record.get("leftId"));
+    const rightId = asString(record.get("rightId"));
+    if (!leftId || !rightId) continue;
+    pairs.push({
+      leftId,
+      rightId,
+      leftFingerprint: asString(record.get("leftFingerprint")),
+      rightFingerprint: asString(record.get("rightFingerprint")),
+      leftType: asString(record.get("leftType")),
+      leftNorm: asString(record.get("leftNorm")),
+      leftAliasNorms: asStringList(record.get("leftAliasNorms")),
+      rightType: asString(record.get("rightType")),
+      rightNorm: asString(record.get("rightNorm")),
+      rightAliasNorms: asStringList(record.get("rightAliasNorms")),
+    });
+  }
+  return pairs;
 }
 
 export type Neo4jDuplicateMergeReason = "guard" | "foreign" | "unsafe" | "leftover";
@@ -1235,7 +1553,13 @@ export interface Neo4jDuplicateMergeResult {
   reason?: Neo4jDuplicateMergeReason;
 }
 
-const HANDLED_MERGE_RELATIONSHIPS = new Set(["ABOUT", NEO4J_ENTITY_RELATIONSHIP, "FROM"]);
+const HANDLED_MERGE_RELATIONSHIPS = new Set([
+  "ABOUT",
+  NEO4J_ENTITY_RELATIONSHIP,
+  "FROM",
+  NEO4J_DECLINED_RELATIONSHIP,
+  NEO4J_DEFERRED_RELATIONSHIP,
+]);
 const SAFE_RELATIONSHIP_TYPE = /^[A-Z][A-Z0-9_]{0,63}$/;
 
 /**
@@ -1243,7 +1567,8 @@ const SAFE_RELATIONSHIP_TYPE = /^[A-Z][A-Z0-9_]{0,63}$/;
  * Refuses a different namespace or space. A different type is refused unless
  * `sourceTypes` lists the labels on the two nodes; the survivor is then relabeled
  * to `type` and the other POLE+O labels are removed. Known edges (ABOUT, RKZ_REL, FROM)
- * keep their endpoints and properties. Any other safe relationship type is copied.
+ * keep their endpoints and properties. RKZ_DECLINED and RKZ_DEFERRED are deleted,
+ * not copied. Any other safe relationship type is copied.
  * An unsafe type or a cross-space edge leaves both nodes in place.
  * A second call is a no-op once the duplicate id is gone.
  * The kept id is not rewritten.
@@ -1347,6 +1672,12 @@ export async function mergeNeo4jDuplicateEntity(
     await driver.run(rewireCopiedRelationship(relType, "out"), scope, write);
     await driver.run(rewireCopiedRelationship(relType, "in"), scope, write);
   }
+  await driver.run(
+    `MATCH (drop:Rkz {id: $dropId, spaceId: $spaceId})-[d:${NEO4J_DECLINED_RELATIONSHIP}|${NEO4J_DEFERRED_RELATIONSHIP}]-()
+     DELETE d`,
+    scope,
+    write,
+  );
   await driver.run(
     `MATCH (keep:Rkz {id: $keepId, spaceId: $spaceId})-[rel]-(drop:Rkz {id: $dropId, spaceId: $spaceId})
      DELETE rel`,

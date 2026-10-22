@@ -387,6 +387,33 @@ describe("Neo4jMemoryProvider", () => {
       generation: 4,
       uri: "rakazo://chat/space-1/bot-1/4",
       provenance: "rakazo space:space-1 bot:bot-1 history:4",
+      threadId: null,
+    });
+    expect(queries(driver)).toHaveLength(1);
+  });
+
+  it("replaces the previous chat summary of the same thread", async () => {
+    const driver = new FakeDriver();
+    driver.rows.push({ records: [row({ id: "fact-h" })] }, { records: [row({ removed: 1 })] });
+    await providerFor(driver).save(
+      {
+        content: "Talked about shipping and training.",
+        scope: "isolated",
+        botId: "bot-1",
+        source: { kind: "history", generation: 4 },
+      },
+      { ...context, operationId: "history-compact:thread-1" },
+    );
+    const writes = queries(driver);
+    expect(writes).toHaveLength(2);
+    expect(writes[0]?.params.threadId).toBe("thread-1");
+    expect(writes[1]?.cypher).toContain("threadId: $threadId");
+    expect(writes[1]?.cypher).toContain("DETACH DELETE f");
+    expect(writes[1]?.params).toMatchObject({
+      spaceId: "space-1",
+      botId: "bot-1",
+      threadId: "thread-1",
+      keepFactId: writes[0]?.params.factId,
     });
   });
 

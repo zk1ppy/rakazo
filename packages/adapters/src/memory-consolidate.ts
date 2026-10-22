@@ -14,6 +14,7 @@ import { combineJobAbort, JobAbortedError, throwIfJobAborted } from "./job-abort
 import type { Neo4jExtractionModel } from "./memory-extract.js";
 import {
   isMemoryModelTimeout,
+  isPathShapedName,
   isRoleLikeName,
   normalizeEntityName,
   ownerResolution,
@@ -28,7 +29,6 @@ import type {
   ParallelRelationCollapse,
 } from "./neo4j-memory-client.js";
 import { NEO4J_ENTITY_TYPES } from "./neo4j-memory-client.js";
-import { REASONING_MODEL_MAX_TOKENS } from "./pi-runtime-limits.js";
 
 /**
  * Merge duplicate Neo4j entities in one space.
@@ -45,11 +45,15 @@ import { REASONING_MODEL_MAX_TOKENS } from "./pi-runtime-limits.js";
  * (default 20 minutes) stops the page before the next confirmation once that
  * time has passed and reschedules the same page, so the graphile lock is not
  * held for an unbounded chain of calls. The confirmation already running
- * finishes first. A confirmation that is aborted
- * or times out does not hold the page: that pair is skipped for the rest of
- * this chain (a bounded list, retried on a later run) and the cursor still
- * advances. A model refusal is stored on the two nodes and is not asked again
- * until a name, type, or alias changes. A permanent model failure remembers
+ * finishes first. A confirmation that is aborted or times out is remembered
+ * as RKZ_DEFERRED and skipped for the rest of this chain. A later run asks it
+ * again until MEMORY_CONSOLIDATE_MAX_PAIR_TIMEOUTS (default 2). Past that cap
+ * the pair is skipped without a refusal. A name, type, or alias change forgets
+ * the marker. A full page whose confirmation budget is spent on timeouts
+ * advances the cursor, unless the job time budget already stopped the page.
+ * A shorter page stays so the remaining pairs are still asked. A model refusal
+ * is stored on the two nodes and is not asked again until a name, type, or
+ * alias changes. A permanent model failure remembers
  * the pair for this chain and continues. If that error still leaves the job,
  * the handler returns so Graphile does not spend another attempt. Merges
  * already committed stay committed.
@@ -176,10 +180,10 @@ export type ConsolidateThinkingLevel = (typeof CONSOLIDATE_EFFORTS)[number];
 /**
  * Confirmation uses low effort. On OpenAI-compatible providers the output
  * setting is the shared completion cap: reasoning and the JSON answer spend it
- * together. A 1024 cap can be spent before the answer. The default is the same
- * reasoning reservation extraction uses when the connection has no smaller cap.
- * A stored chat max still ceilings the call. With thinking off, only the
- * visible answer is sent.
+ * together. A confirmation is a small JSON object, so the default cap is 4096.
+ * A stored chat max still ceilings the call. Raise the cap when a model spends
+ * it on reasoning before the answer. With thinking off, only the visible answer
+ * is sent.
  *
  * The confirm abort used to be a fixed 45s. A reasoning model on a slow
  * OpenAI-compatible provider can still be writing the answer then, and pi
@@ -188,7 +192,9 @@ export type ConsolidateThinkingLevel = (typeof CONSOLIDATE_EFFORTS)[number];
  * stream's own time-to-headers bound still applies before the first byte.
  */
 export const DEFAULT_CONSOLIDATE_THINKING_LEVEL: ConsolidateThinkingLevel = "low";
-export const DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS = REASONING_MODEL_MAX_TOKENS;
+export const DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS = 4_096;
+/** Timeouts recorded on one pair before a later run skips it. Not a refusal. */
+export const DEFAULT_CONSOLIDATE_MAX_PAIR_TIMEOUTS = 2;
 /**
  * Whole confirmation, including reasoning. Long enough that a slow serialized
  * model is not aborted while it is still producing the yes/no.
@@ -206,6 +212,8 @@ const MIN_CONSOLIDATE_MAX_OUTPUT_TOKENS = 64;
 const MAX_CONSOLIDATE_MAX_OUTPUT_TOKENS = 131_072;
 const MIN_CONSOLIDATE_TIMEOUT_MS = 15_000;
 const MAX_CONSOLIDATE_TIMEOUT_MS = 600_000;
+const MIN_CONSOLIDATE_MAX_PAIR_TIMEOUTS = 1;
+const MAX_CONSOLIDATE_MAX_PAIR_TIMEOUTS = 20;
 
 export interface ConsolidateModelSettings {
   thinkingLevel: ConsolidateThinkingLevel;
@@ -323,6 +331,50 @@ function parseConsolidateTimeoutMs(value: string | undefined): number | null {
   return parsed;
 }
 
+/**
+ * How many timeouts one pair may accumulate before a later run skips it.
+ * Blank or out of range keeps 2. The marker is RKZ_DEFERRED, not a refusal.
+ */
+export function readConsolidateMaxPairTimeouts(env: NodeJS.ProcessEnv = process.env): number {
+  const trimmed = env.MEMORY_CONSOLIDATE_MAX_PAIR_TIMEOUTS?.trim() ?? "";
+  if (!/^\d+$/.test(trimmed)) return DEFAULT_CONSOLIDATE_MAX_PAIR_TIMEOUTS;
+  const parsed = Number(trimmed);
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < MIN_CONSOLIDATE_MAX_PAIR_TIMEOUTS ||
+    parsed > MAX_CONSOLIDATE_MAX_PAIR_TIMEOUTS
+  ) {
+    return DEFAULT_CONSOLIDATE_MAX_PAIR_TIMEOUTS;
+  }
+  return parsed;
+}
+
+/**
+ * Entity types that are not proposed to each other. Unset skips Event.
+ * `-` or blank proposes every type.
+ */
+export function readConsolidateSkipTypes(env: NodeJS.ProcessEnv = process.env): Set<string> {
+  const raw = env.MEMORY_CONSOLIDATE_SKIP_TYPES;
+  const source = raw === undefined ? "Event" : raw.trim();
+  if (!source || source === "-") return new Set();
+  const types = new Set<string>();
+  for (const part of source.split(",")) {
+    const found = NEO4J_ENTITY_TYPES.find(
+      (type) => type.toLowerCase() === part.trim().toLowerCase(),
+    );
+    if (found) types.add(found);
+  }
+  return types;
+}
+
+/** Unset stays off so an existing graph is not rewritten until an operator asks. */
+export function readConsolidateCollapseRelationTypes(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const value = env.MEMORY_CONSOLIDATE_COLLAPSE_RELATION_TYPES?.trim().toLowerCase() ?? "";
+  return value === "on" || value === "true" || value === "1";
+}
+
 export interface ConsolidationPage {
   entities: Neo4jConsolidationEntity[];
   pageIds: string[];
@@ -356,6 +408,7 @@ export interface MemoryConsolidateStore {
       ns?: string;
       scope?: "page" | "space";
       dryRun?: boolean;
+      collapseTypes?: boolean;
     },
     signal?: AbortSignal,
   ): Promise<ParallelRelationCollapse>;
@@ -381,6 +434,21 @@ export interface MemoryConsolidateStore {
     input: { spaceId: string; leftId: string; rightId: string },
     signal?: AbortSignal,
   ): Promise<void>;
+  /**
+   * Timeout markers whose endpoints are in `ids`. `timeouts` is how many times
+   * the pair has already been cut off. This is not a refusal.
+   */
+  listDeferredPairs(
+    input: { spaceId: string; ns?: string; ids: string[] },
+    signal?: AbortSignal,
+  ): Promise<ConsolidationDeferred[]>;
+  /** Record one timeout and return the count including this one. */
+  notePairTimeout(input: ConsolidationDeclineWrite, signal?: AbortSignal): Promise<number>;
+  /** Drop a timeout marker whose nodes have since changed. */
+  forgetDeferredPair(
+    input: { spaceId: string; leftId: string; rightId: string },
+    signal?: AbortSignal,
+  ): Promise<void>;
 }
 
 /** A stored model refusal. Fingerprints are name, type, and aliases at decision time. */
@@ -396,6 +464,11 @@ export interface ConsolidationDecline {
 export interface ConsolidationDeclineWrite extends ConsolidationDecline {
   spaceId: string;
   now: string;
+}
+
+/** A stored timeout. The pair is skipped once `timeouts` reaches the cap. */
+export interface ConsolidationDeferred extends ConsolidationDecline {
+  timeouts: number;
 }
 
 export interface MemoryConsolidateDeps {
@@ -435,7 +508,7 @@ export class MemoryConsolidatePermanentError extends Error {
 export type ConsolidationClass =
   | { action: "merge"; reason: "alias" | "prefix-evidence" }
   | { action: "confirm"; reason: "prefix" | "subset" | "token" | "type-conflict" | "role" }
-  | { action: "skip"; reason: "type" | "namespace" | "self" | "weak" };
+  | { action: "skip"; reason: "type" | "namespace" | "self" | "weak" | "numeric" | "skipped-type" };
 
 export interface CanonicalEntityPlan {
   keep: Neo4jConsolidationEntity;
@@ -503,6 +576,8 @@ function foldMatchKey(value: string): string {
 function slashSegments(raw: string): string[] {
   const trimmed = raw.trim();
   if (/^https?:\/\//i.test(trimmed)) return [];
+  // A path is one name. Its segments are not aliases of other entities.
+  if (isPathShapedName(trimmed)) return [];
   const parts = trimmed
     .split(/\s*\/\s*/u)
     .map((part) => part.trim())
@@ -561,9 +636,26 @@ export function classifyConsolidationPair(
   left: Neo4jConsolidationEntity,
   right: Neo4jConsolidationEntity,
   owner?: { subjectNorm: string; aliases: ReadonlySet<string> } | null,
+  options?: { skipTypes?: ReadonlySet<string> },
 ): ConsolidationClass {
   if (left.id === right.id) return { action: "skip", reason: "self" };
   if (left.ns !== right.ns) return { action: "skip", reason: "namespace" };
+  if (isPathShapedName(left.name) || isPathShapedName(right.name)) {
+    if (keysOverlap(left, right)) return { action: "merge", reason: "alias" };
+    return { action: "skip", reason: "weak" };
+  }
+  // A shared name or alias still merges when the other display name contains
+  // different digits. A slash fragment such as "10 9h" does not.
+  if (left.type === right.type && identityOverlap(left, right)) {
+    return { action: "merge", reason: "alias" };
+  }
+  if (numericTokensDiffer(rawTokens(left.normName), rawTokens(right.normName))) {
+    return { action: "skip", reason: "numeric" };
+  }
+  const skipTypes = options?.skipTypes ?? readConsolidateSkipTypes();
+  if (skipTypes.has(left.type) && skipTypes.has(right.type)) {
+    return { action: "skip", reason: "skipped-type" };
+  }
   if (left.type !== right.type) {
     if (crossTypeNameMatch(left, right)) return { action: "confirm", reason: "type-conflict" };
     return { action: "skip", reason: "type" };
@@ -817,6 +909,7 @@ export async function consolidateMemoryGraph(
   const skipped = new Set(payload.skipped ?? []);
   const rejected = new Set([...(payload.rejected ?? []), ...skipped]);
   await applyStoredDeclines(store, payload, entities, rejected);
+  await applyStoredDefers(store, payload, entities, rejected);
   const pairs = selectCandidates(entities, rejected, owner);
   const needsModel = pairs.some((pair) => pair.action === "confirm");
   const model = needsModel ? await resolveConsolidateModel(deps, payload, store) : null;
@@ -857,7 +950,9 @@ export async function consolidateMemoryGraph(
     if (!left || !right || left.id === right.id) continue;
     const key = consolidationPairKey(left.id, right.id);
     if (rejected.has(key)) continue;
-    const decision = classifyConsolidationPair(left, right, owner);
+    const decision = classifyConsolidationPair(left, right, owner, {
+      skipTypes: readConsolidateSkipTypes(),
+    });
     if (decision.action === "skip") continue;
     let chosenType: Neo4jEntityType | undefined;
     if (decision.action === "confirm") {
@@ -897,7 +992,9 @@ export async function consolidateMemoryGraph(
         timedOutKeys.push(key);
         skipped.add(key);
         rejected.add(key);
-        noteRejection(rejectionReasons, payload, left, right, "timeout");
+        const timeouts = await notePairTimeout(store, payload, left, right);
+        const capped = timeouts >= readConsolidateMaxPairTimeouts();
+        noteRejection(rejectionReasons, payload, left, right, capped ? "timeout-cap" : "timeout");
         continue;
       }
       llmCalls += 1;
@@ -974,9 +1071,13 @@ export async function consolidateMemoryGraph(
   if (!rateLimited) await promoteCanonicalNames(store, payload.spaceId, live, rejected);
 
   const collapsedAfter = await collapseParallel(store, payload, relationIds, "page");
+  const relationsMerged = collapsedBefore.relations + collapsedAfter.relations;
+  const typesRewritten = (collapsedBefore.rewritten ?? 0) + (collapsedAfter.rewritten ?? 0);
   getLogger().info("memory.consolidate deduplicated relations", {
     "memory.space_id": payload.spaceId,
-    "memory.relations": collapsedBefore.relations + collapsedAfter.relations,
+    "memory.relations": relationsMerged,
+    "memory.relations_merged": relationsMerged,
+    "memory.types_rewritten": typesRewritten,
     "memory.about": collapsedBefore.about + collapsedAfter.about,
     "memory.from": collapsedBefore.from + collapsedAfter.from,
   });
@@ -986,7 +1087,9 @@ export async function consolidateMemoryGraph(
     [...rejected].filter((key) => !skipped.has(key)),
     MAX_CONSOLIDATE_REJECTED,
   );
-  const followUp = rateLimited || deferredMerge || deferredConfirm || budgetSpent || page.pageFull;
+  const timeoutAdvances = page.pageFull && timedOutKeys.length > 0;
+  const holdPage = deferredMerge || budgetSpent || (deferredConfirm && !timeoutAdvances);
+  const followUp = rateLimited || holdPage || deferredConfirm || page.pageFull;
   getLogger().info("memory.consolidate finished a page", {
     "memory.space_id": payload.spaceId,
     "memory.merged": merges,
@@ -999,6 +1102,7 @@ export async function consolidateMemoryGraph(
     "memory.timed_out": timedOutKeys.length,
     "memory.skipped": skippedList.length,
     "memory.page": page.pageIds.length,
+    "memory.cursor": rateLimited || holdPage ? "held" : page.pageFull ? "advanced" : "done",
     "memory.follow_up": followUp,
   });
   if (timedOutKeys.length > 0) {
@@ -1019,7 +1123,7 @@ export async function consolidateMemoryGraph(
       "memory.follow_up": true,
     });
   }
-  if (deferredMerge || deferredConfirm || budgetSpent) {
+  if (holdPage) {
     await enqueueContinuation(deps, payload, {
       ...(payload.afterId ? { afterId: payload.afterId } : {}),
       ...(payload.carryIds?.length ? { carryIds: payload.carryIds } : {}),
@@ -1081,6 +1185,69 @@ async function applyStoredDeclines(
       leftId: decline.leftId,
       rightId: decline.rightId,
     });
+  }
+}
+
+/**
+ * A pair that has timed out enough times is skipped. The marker is not a
+ * refusal: a name, type, or alias change deletes it so the pair can be asked
+ * again. A fresh run has an empty `skipped` list, so this is what stops the
+ * same pairs from filling the confirmation budget on every dream.
+ */
+async function applyStoredDefers(
+  store: MemoryConsolidateStore,
+  scope: { spaceId: string; ns?: string },
+  entities: readonly Neo4jConsolidationEntity[],
+  rejected: Set<string>,
+): Promise<void> {
+  const ids = entities.map((entity) => entity.id);
+  if (ids.length === 0) return;
+  const cap = readConsolidateMaxPairTimeouts();
+  const deferred = await store.listDeferredPairs({
+    spaceId: scope.spaceId,
+    ...(scope.ns ? { ns: scope.ns } : {}),
+    ids,
+  });
+  const byId = new Map(entities.map((entity) => [entity.id, entity]));
+  for (const marker of deferred) {
+    const left = byId.get(marker.leftId);
+    const right = byId.get(marker.rightId);
+    if (!left || !right || left.ns !== right.ns || left.ns !== marker.ns) continue;
+    const current = declinedPairIdentity(left, right);
+    const fresh =
+      current.leftFingerprint === marker.leftFingerprint &&
+      current.rightFingerprint === marker.rightFingerprint;
+    if (!fresh) {
+      await store.forgetDeferredPair({
+        spaceId: scope.spaceId,
+        leftId: marker.leftId,
+        rightId: marker.rightId,
+      });
+      continue;
+    }
+    if (marker.timeouts >= cap) rejected.add(consolidationPairKey(left.id, right.id));
+  }
+}
+
+async function notePairTimeout(
+  store: MemoryConsolidateStore,
+  payload: BackgroundJobPayloads["memory.consolidate"],
+  left: Neo4jConsolidationEntity,
+  right: Neo4jConsolidationEntity,
+): Promise<number> {
+  if (left.ns !== right.ns) return 0;
+  try {
+    return await store.notePairTimeout({
+      spaceId: payload.spaceId,
+      ...declinedPairIdentity(left, right),
+      now: new Date().toISOString(),
+    });
+  } catch (error) {
+    getLogger().warn("memory.consolidate could not record a pair timeout", {
+      "memory.space_id": payload.spaceId,
+      message: error instanceof Error ? error.message : "timeout marker failed",
+    });
+    return 0;
   }
 }
 
@@ -1307,11 +1474,13 @@ function collapseParallel(
   ids: string[],
   scope: "page" | "space",
 ): Promise<ParallelRelationCollapse> {
+  const collapseTypes = readConsolidateCollapseRelationTypes();
   return store.collapseParallelRelations({
     spaceId: payload.spaceId,
     ids,
     scope,
     ...(payload.ns ? { ns: payload.ns } : {}),
+    ...(collapseTypes ? { collapseTypes: true } : {}),
   });
 }
 
@@ -1320,6 +1489,7 @@ function selectCandidates(
   rejected: ReadonlySet<string>,
   owner?: { subjectNorm: string; aliases: ReadonlySet<string> } | null,
 ): ConsolidationCandidate[] {
+  const skipTypes = readConsolidateSkipTypes();
   const pairs: ConsolidationCandidate[] = [];
   for (let index = 0; index < entities.length; index += 1) {
     const left = entities[index];
@@ -1328,7 +1498,7 @@ function selectCandidates(
       const right = entities[next];
       if (!right) continue;
       if (rejected.has(consolidationPairKey(left.id, right.id))) continue;
-      const decision = classifyConsolidationPair(left, right, owner);
+      const decision = classifyConsolidationPair(left, right, owner, { skipTypes });
       if (decision.action === "skip") continue;
       pairs.push({
         left,
@@ -1703,6 +1873,21 @@ function keysOverlap(left: Neo4jConsolidationEntity, right: Neo4jConsolidationEn
   return entityKeys(left).some((key) => rightKeys.has(key) && strongMergeKey(key, left, right));
 }
 
+/** Names and aliases only. Slash segments are not identity: "22/10" and "23/10" share "10". */
+function identityKeys(entity: Neo4jConsolidationEntity): string[] {
+  const keys = new Set<string>();
+  addMatchKey(keys, entity.normName);
+  addMatchKey(keys, entity.name);
+  for (const alias of entity.aliasNorms) addMatchKey(keys, alias);
+  for (const alias of entity.aliases) addMatchKey(keys, alias);
+  return [...keys];
+}
+
+function identityOverlap(left: Neo4jConsolidationEntity, right: Neo4jConsolidationEntity): boolean {
+  const rightKeys = new Set(identityKeys(right));
+  return identityKeys(left).some((key) => rightKeys.has(key) && strongMergeKey(key, left, right));
+}
+
 /**
  * Immediate merge evidence is a multi-token name, a distinctive handle, or a
  * one-word name that is a token of the other entity's name. A single alphabetic
@@ -1901,7 +2086,17 @@ function entityAppearsRejected(id: string, rejected: ReadonlySet<string>): boole
   return false;
 }
 
+/** Digits and dates distinguish sessions that share the rest of the name. */
+function numericTokensDiffer(left: readonly string[], right: readonly string[]): boolean {
+  const a = left.filter((token) => /\p{N}/u.test(token)).sort();
+  const b = right.filter((token) => /\p{N}/u.test(token)).sort();
+  if (a.length === 0 && b.length === 0) return false;
+  if (a.length !== b.length) return true;
+  return a.some((token, index) => token !== b[index]);
+}
+
 function tokenSimilarity(left: readonly string[], right: readonly string[]): boolean {
+  if (numericTokensDiffer(left, right)) return false;
   const a = new Set(left.filter((token) => token.length >= 3 && !STOPWORDS.has(token)));
   const b = new Set(right.filter((token) => token.length >= 3 && !STOPWORDS.has(token)));
   if (a.size === 0 || b.size === 0) return false;
