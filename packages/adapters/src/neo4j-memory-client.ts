@@ -632,6 +632,17 @@ export async function linkNeo4jFactEntity(
   if (result.records.length === 0) throw new Error("Neo4j fact or entity was not found.");
 }
 
+export type RelationCreateBlock = "event" | "tool";
+
+/**
+ * Asked only when the pair has no edge of this canonical type yet.
+ * `allow` returns a block reason to skip the create. `created` runs after a new edge.
+ */
+export interface RelationCreateGate {
+  allow(fromId: string, toId: string): RelationCreateBlock | null;
+  created(fromId: string, toId: string): void;
+}
+
 export async function linkNeo4jEntities(
   driver: Neo4jMemoryDriver,
   database: string,
@@ -648,17 +659,75 @@ export async function linkNeo4jEntities(
     time?: string | null;
   },
   signal?: AbortSignal,
-): Promise<void> {
+  gate?: RelationCreateGate,
+): Promise<"updated" | "created" | RelationCreateBlock> {
   const type = canonicalRelationType(input.type);
   if (!type) throw new Error("Neo4j relation type is empty.");
-  const params = { ...input, type, time: input.time ?? null };
+  const vocabulary = readRelationVocabulary();
+  const params = {
+    ...input,
+    type,
+    time: input.time ?? null,
+    relationAllowed: [...vocabulary.allowed],
+  };
   const options: Neo4jRunOptions = { database, access: "write", signal };
   // MERGE on {type} would update every parallel edge instead of collapsing them.
   // The queue is serialized, so a read of the current edges then one write is safe.
-  const updated = await driver.run(LINK_EXISTING_RELATION, params, options);
-  if (updated.records.length > 0) return;
+  // The match uses the vocabulary, so a synonym of the same directed pair collapses too.
+  const updated = await driver.run(linkExistingRelation(vocabulary), params, options);
+  if (updated.records.length > 0) return "updated";
+  const blocked = gate?.allow(input.fromId, input.toId) ?? null;
+  if (blocked) return blocked;
   const created = await driver.run(LINK_NEW_RELATION, params, options);
   if (created.records.length === 0) throw new Error("Neo4j fact or entities were not found.");
+  gate?.created(input.fromId, input.toId);
+  return "created";
+}
+
+export interface Neo4jEndpointDegree {
+  id: string;
+  name: string;
+  type: string;
+  degree: number;
+}
+
+/**
+ * RKZ_REL degree of the given :Rkz nodes in one space.
+ * Declined and deferred edges are not counted. Other applications' relationships are not read.
+ */
+export async function readNeo4jEndpointDegrees(
+  driver: Neo4jMemoryDriver,
+  database: string,
+  input: { spaceId: string; ids: string[] },
+  signal?: AbortSignal,
+): Promise<Neo4jEndpointDegree[]> {
+  const ids = [...new Set(input.ids.filter((id) => id.trim().length > 0))];
+  if (ids.length === 0) return [];
+  const result = await driver.run(
+    `UNWIND $ids AS id
+     MATCH (e:Rkz {id: id, spaceId: $spaceId})
+     WHERE e.spaceId = $spaceId
+     OPTIONAL MATCH (e)-[r:${NEO4J_ENTITY_RELATIONSHIP}]-(other:Rkz)
+     WHERE other.spaceId = $spaceId
+     RETURN e.id AS id,
+            coalesce(e.name, '') AS name,
+            coalesce(e.entityType, head([label IN labels(e) WHERE label IN $types]), '') AS entityType,
+            count(r) AS degree`,
+    { spaceId: input.spaceId, ids, types: [...NEO4J_ENTITY_TYPES] },
+    { database, access: "read", signal },
+  );
+  const degrees: Neo4jEndpointDegree[] = [];
+  for (const record of result.records) {
+    const id = asString(record.get("id"));
+    if (!id) continue;
+    degrees.push({
+      id,
+      name: asString(record.get("name")),
+      type: asString(record.get("entityType")),
+      degree: asNumber(record.get("degree")),
+    });
+  }
+  return degrees;
 }
 
 /**
@@ -1525,6 +1594,8 @@ export interface Neo4jCleanupEntity {
   id: string;
   name: string;
   type: string;
+  /** Undirected RKZ_REL count. Declined edges are not included. */
+  degree: number;
 }
 
 /** One page of named entities. The caller decides which names to delete. */
@@ -1539,10 +1610,16 @@ export async function listNeo4jCleanupEntities(
      WHERE e.name IS NOT NULL
        AND (e:Entity OR e:Person OR e:Object OR e:Location OR e:Event OR e:Organization
             OR coalesce(e.entityType, '') IN $types)
-     RETURN e.id AS id, coalesce(e.name, '') AS name, coalesce(e.entityType, '') AS entityType
+     WITH e
      ORDER BY e.id
      SKIP $skip
-     LIMIT $limit`,
+     LIMIT $limit
+     OPTIONAL MATCH (e)-[r:${NEO4J_ENTITY_RELATIONSHIP}]-(other:Rkz)
+     WHERE other.spaceId = $spaceId
+     RETURN e.id AS id,
+            coalesce(e.name, '') AS name,
+            coalesce(e.entityType, '') AS entityType,
+            count(r) AS degree`,
     {
       spaceId: input.spaceId,
       skip: input.skip,
@@ -1556,7 +1633,12 @@ export async function listNeo4jCleanupEntities(
     const id = asString(record.get("id"));
     const name = asString(record.get("name"));
     if (!id || !name) continue;
-    entities.push({ id, name, type: asString(record.get("entityType")) });
+    entities.push({
+      id,
+      name,
+      type: asString(record.get("entityType")),
+      degree: asNumber(record.get("degree")),
+    });
   }
   return entities;
 }
@@ -2110,7 +2192,9 @@ function cypherReduceTime(rels: string): string {
   return `reduce(kept = null, timed IN ${rels} | CASE WHEN kept IS NOT NULL THEN kept WHEN timed.time IS NULL OR timed.time = '' THEN null ELSE timed.time END)`;
 }
 
-const LINK_EXISTING_RELATION = `
+function linkExistingRelation(vocabulary: ReturnType<typeof readRelationVocabulary>): string {
+  const matchedType = relationTypeCase(cypherRelationType("r.type"), vocabulary);
+  return `
 MATCH (f:Rkz:Fact {id: $factId, spaceId: $spaceId})
 MATCH (a:Rkz:Entity {id: $fromId, spaceId: $spaceId, ns: $ns})
 MATCH (b:Rkz:Entity {id: $toId, spaceId: $spaceId, ns: $ns})
@@ -2119,7 +2203,7 @@ WHERE src.spaceId = $spaceId
 WITH f, a, b, collect(DISTINCT src.id) AS learnedSourceIds
 WITH f, a, b, [id IN learnedSourceIds WHERE id IS NOT NULL] AS learnedSourceIds
 OPTIONAL MATCH (a)-[r:${NEO4J_ENTITY_RELATIONSHIP}]->(b)
-WHERE ${cypherRelationType("r.type")} = $type
+WHERE ${matchedType} = $type
 WITH f, a, b, learnedSourceIds, r
 ORDER BY coalesce(r.createdAt, '9999'), elementId(r)
 WITH f, a, b, learnedSourceIds, collect(r) AS matched
@@ -2152,6 +2236,7 @@ SET keeper.type = $type,
 FOREACH (extra IN extras | DELETE extra)
 RETURN keeper.type AS type
 `;
+}
 
 const LINK_NEW_RELATION = `
 MATCH (f:Rkz:Fact {id: $factId, spaceId: $spaceId})

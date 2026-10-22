@@ -37,6 +37,7 @@ import {
   isPipedreamEnabled,
   LocalAgentHomeStore,
   LocalArtifactStore,
+  loadExtractPatternConfig,
   McpConnector,
   McpOAuthBroker,
   mcpStdioOptionsFromEnv,
@@ -88,6 +89,7 @@ const logger = createRootLogger(SERVICE_NAMES.worker);
 
 async function main() {
   const config = loadWorkerConfig();
+  loadExtractPatternConfig(config.env);
   // Shared by Prisma, the reconciliation leadership lock, and both graphile-worker
   // components (see GraphileJobPublisher/GraphileJobWorkerHost) — one pool instead
   // of four separate ones. Keep this modest: graphile holds a LISTEN client and

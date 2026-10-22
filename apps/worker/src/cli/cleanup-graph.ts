@@ -2,7 +2,11 @@ import { loadRootEnv } from "@rakazo/core/node/load-root-env";
 
 loadRootEnv();
 
-import { closeNeo4jMemoryDrivers, parseCleanupGraphArgs } from "@rakazo/adapters";
+import {
+  closeNeo4jMemoryDrivers,
+  loadExtractPatternConfig,
+  parseCleanupGraphArgs,
+} from "@rakazo/adapters";
 import { createDb } from "@rakazo/db";
 import { SERVICE_NAMES } from "@rakazo/logging";
 import { createRootLogger } from "@rakazo/logging/axiom";
@@ -11,8 +15,9 @@ import { createWorkerSecretStore } from "../secret-store.js";
 import { runCleanupGraph } from "./run-cleanup-graph.js";
 
 /**
- * List entities the extractor would now drop, and refusals whose fingerprint
- * no longer matches. Dry-run is the default. `--apply` deletes them.
+ * List entities the extractor would now drop, event hubs, object hubs, and
+ * refusals whose fingerprint no longer matches. Dry-run is the default.
+ * `--apply` deletes the dropped entities and the stale refusals. Hubs stay.
  *
  *   pnpm --filter @rakazo/worker memory:cleanup-graph -- --space SPACE_ID
  *   pnpm --filter @rakazo/worker memory:cleanup-graph -- --space SPACE_ID --apply
@@ -20,6 +25,7 @@ import { runCleanupGraph } from "./run-cleanup-graph.js";
 const options = parseCleanupGraphArgs(process.argv.slice(2));
 const config = loadWorkerConfig();
 const logger = createRootLogger(SERVICE_NAMES.worker);
+loadExtractPatternConfig(config.env);
 
 const { prisma, pool } = createDb(config.databaseUrl);
 const secrets = await createWorkerSecretStore(config.env);

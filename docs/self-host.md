@@ -550,10 +550,15 @@ MAX_TOOL_CALLS_PER_TURN=  # optional Pi turn tool-call fuse; unset/0 = unlimited
 # MEMORY_CONSOLIDATE_THINKING_LEVEL=low
 # MEMORY_EXTRACT_THINKING_LEVEL=
 # MEMORY_CONSOLIDATE_MAX_OUTPUT_TOKENS=4096
-# MEMORY_EXTRACT_MAX_OUTPUT_TOKENS=
-# Extraction keeps 32 relations per chunk and 6 per entity. Chat summaries still
-# emit relations unless MEMORY_EXTRACT_CHAT_RELATIONS=off. Snake_case ids are
-# dropped. Consolidation skips Event/Event pairs, and skips a pair after 2
+# When thinking is off this is the visible answer budget. Unset uses 4096.
+# MEMORY_EXTRACT_MAX_OUTPUT_TOKENS=4096
+# Extraction keeps 32 relations per chunk and 6 per entity. An Event stops at 8
+# edges across facts, and an MCP server or sandbox stops at 4. Chat summaries still
+# emit relations unless MEMORY_EXTRACT_CHAT_RELATIONS=off. Snake_case ids, file
+# names, briefs, routines, and outages are dropped. Operational and tool-hub
+# patterns are MEMORY_EXTRACT_OPERATIONAL_PATTERNS and MEMORY_EXTRACT_TOOL_HUB_PATTERNS.
+# Consolidation skips Event/Event
+# pairs, and skips a pair after 2
 # timeouts (RKZ_DEFERRED). Parallel relation types are not rewritten until
 # MEMORY_CONSOLIDATE_COLLAPSE_RELATION_TYPES=on. See .env.example.
 RAKAZO_MESSAGE_USER_MAX_CHARS=500 # message_user length cap; narration stays at 500

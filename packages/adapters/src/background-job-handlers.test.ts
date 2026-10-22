@@ -253,7 +253,9 @@ describe("createBackgroundJobHandlers", () => {
         return "Ada Lovelace founded the Analytical Society in London.";
       }
 
-      override async applyExtraction() {}
+      override async applyExtraction() {
+        return { eventDegreeCapped: 0, toolDegreeCapped: 0 };
+      }
 
       override async markExtracted() {}
     }

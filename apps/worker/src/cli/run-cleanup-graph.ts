@@ -9,8 +9,9 @@ export interface CleanupGraphCliOptions {
 }
 
 /**
- * List path-shaped entities and stale refusals. The default is a dry run.
- * `--apply` deletes the entities and the stale refusals.
+ * List noise entities, event hubs, object hubs, and stale refusals.
+ * The default is a dry run. `--apply` deletes noise entities and stale refusals.
+ * Hubs are listed and left in place.
  */
 export async function runCleanupGraph(deps: {
   prisma: Pick<PrismaClient, "spaceMemoryConfig">;

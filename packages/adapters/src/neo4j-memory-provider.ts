@@ -30,6 +30,7 @@ import {
 } from "./memory-consolidate.js";
 import { neo4jDreamEnabled } from "./memory-dream.js";
 import type {
+  DegreeEndpoint,
   ExtractedEntityWrite,
   ExtractedRelationWrite,
   Neo4jExtractionModel,
@@ -40,8 +41,11 @@ import {
   neo4jExtractionEnabled,
   neo4jMaxChunkChars,
   planExtractionChunks,
+  readExtractMaxEventDegree,
+  readExtractMaxToolDegree,
   readNeo4jExtractionModel,
   readOwnerAliases,
+  relationCreateCap,
 } from "./memory-extract.js";
 import type {
   Neo4jConsolidationEntity,
@@ -77,6 +81,7 @@ import {
   noteNeo4jPairTimeout,
   openNeo4jMemoryDriver,
   purgeNeo4jChatSources,
+  readNeo4jEndpointDegrees,
   readNeo4jFactLearnedAt,
   readNeo4jFactText,
   realignNeo4jFactTimes,
@@ -1057,7 +1062,7 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
       now: string;
     },
     signal?: AbortSignal,
-  ): Promise<void> {
+  ): Promise<{ eventDegreeCapped: number; toolDegreeCapped: number }> {
     const driver = await this.ready(signal);
     const database = this.connection.database;
     const learnedAt =
@@ -1096,11 +1101,30 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
         signal,
       );
     }
+    const endpointIds = [...new Set(ids.values())];
+    const observed = await readNeo4jEndpointDegrees(
+      driver,
+      database,
+      { spaceId: input.spaceId, ids: endpointIds },
+      signal,
+    );
+    const endpoints = new Map(observed.map((row) => [row.id, { ...row }]));
+    const caps = { event: readExtractMaxEventDegree(), tool: readExtractMaxToolDegree() };
+    let eventDegreeCapped = 0;
+    let toolDegreeCapped = 0;
+    const ends = (fromId: string, toId: string): DegreeEndpoint[] => {
+      const found: DegreeEndpoint[] = [];
+      for (const id of [fromId, toId]) {
+        const end = endpoints.get(id);
+        if (end) found.push(end);
+      }
+      return found;
+    };
     for (const relation of input.relations) {
       const fromId = ids.get(relation.fromNorm);
       const toId = ids.get(relation.toNorm);
       if (!fromId || !toId || fromId === toId) continue;
-      await linkNeo4jEntities(
+      const linked = await linkNeo4jEntities(
         driver,
         database,
         {
@@ -1114,8 +1138,20 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
           time: relation.time,
         },
         signal,
+        {
+          allow: () => relationCreateCap(ends(fromId, toId), caps),
+          created: () => {
+            for (const id of [fromId, toId]) {
+              const end = endpoints.get(id);
+              if (end) end.degree += 1;
+            }
+          },
+        },
       );
+      if (linked === "event") eventDegreeCapped += 1;
+      if (linked === "tool") toolDegreeCapped += 1;
     }
+    return { eventDegreeCapped, toolDegreeCapped };
   }
 
   private async enqueueExtraction(input: {

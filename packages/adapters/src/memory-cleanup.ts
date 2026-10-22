@@ -3,7 +3,11 @@ import type { PrismaClient } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import { consolidationEntityFingerprint } from "./memory-consolidate.js";
 import type { DroppedNameOptions } from "./memory-extract.js";
-import { isFilesystemPathName, readDroppedNameOptions } from "./memory-extract.js";
+import {
+  isDroppedEntityName,
+  readDroppedNameOptions,
+  readExtractMaxEventDegree,
+} from "./memory-extract.js";
 import { toStringRecord } from "./memory-provider-factory.js";
 import type { Neo4jCleanupDeclined, Neo4jCleanupEntity } from "./neo4j-memory-client.js";
 import { createNeo4jProvider, Neo4jMemoryProvider } from "./neo4j-memory-provider.js";
@@ -16,6 +20,14 @@ export interface CleanupEntity {
   id: string;
   name: string;
   type: string;
+  degree?: number;
+}
+
+export type CleanupHubReason = "event-hub" | "object-hub";
+
+export interface CleanupHub extends CleanupEntity {
+  degree: number;
+  reason: CleanupHubReason;
 }
 
 export interface CleanupDeclined {
@@ -43,11 +55,24 @@ export interface CleanupGraphCounts {
   spaces: number;
   failed: number;
   entities: number;
+  eventHubs: number;
+  objectHubs: number;
   declinedStale: number;
   deleted: number;
   forgotten: number;
   dryRun: boolean;
   sample: string[];
+  hubSample: string[];
+}
+
+/** Objects at or above this RKZ_REL degree are edge-prune candidates. `0` lists none. */
+export function readCleanupObjectHubDegree(env: NodeJS.ProcessEnv = process.env): number {
+  const trimmed = env.MEMORY_CLEANUP_OBJECT_HUB_DEGREE?.trim() ?? "";
+  if (!trimmed) return 12;
+  if (!/^\d+$/.test(trimmed)) return 12;
+  const parsed = Number(trimmed);
+  if (parsed > 10_000) return 12;
+  return parsed;
 }
 
 const USAGE = "Usage: memory:cleanup-graph [--] [--apply] [--dry-run] [--space SPACE_ID]";
@@ -83,12 +108,37 @@ export function parseCleanupGraphArgs(argv: readonly string[]): {
   return { ...(spaceId ? { spaceId } : {}), dryRun: !apply };
 }
 
-/** Names the extractor would now refuse: paths, file names, snake-case ids, and extra patterns. */
+/** Names the extractor would now refuse: paths, file names, snake-case ids, operational traces, and extra patterns. */
 export function isCleanupEntityName(
   name: string,
   options: DroppedNameOptions = readDroppedNameOptions(),
 ): boolean {
-  return isFilesystemPathName(name, options);
+  return isDroppedEntityName(name, options);
+}
+
+/**
+ * Noise names are deletion candidates. An Event past the cumulative cap, or an
+ * Object past the hub degree, is an edge-prune candidate. The node stays.
+ * People, places, and organizations are not hubs here.
+ */
+export function classifyCleanupEntity(
+  entity: CleanupEntity,
+  options: {
+    names?: DroppedNameOptions;
+    eventDegree?: number;
+    objectHubDegree?: number;
+  } = {},
+): "delete" | CleanupHubReason | "keep" {
+  const names = options.names ?? readDroppedNameOptions();
+  if (isCleanupEntityName(entity.name, names)) return "delete";
+  const degree = entity.degree ?? 0;
+  const eventDegree = options.eventDegree ?? readExtractMaxEventDegree();
+  if (entity.type === "Event" && eventDegree > 0 && degree > eventDegree) return "event-hub";
+  const objectHubDegree = options.objectHubDegree ?? readCleanupObjectHubDegree();
+  if (entity.type === "Object" && objectHubDegree > 0 && degree >= objectHubDegree) {
+    return "object-hub";
+  }
+  return "keep";
 }
 
 export function staleDeclinedPairs(pairs: readonly CleanupDeclined[]): CleanupDeclined[] {
@@ -99,37 +149,50 @@ export function staleDeclinedPairs(pairs: readonly CleanupDeclined[]): CleanupDe
 }
 
 /**
- * List path-shaped entities and stale refusals. Writes only with `dryRun: false`,
- * which the CLI calls `--apply`. Dry-run is the default.
+ * List noise entities, event hubs, and object hubs, plus stale refusals.
+ * `--apply` deletes noise entities and stale refusals. Hubs are listed only:
+ * their edges are not rewritten.
  */
 export async function cleanupMemoryGraph(
   spaces: readonly CleanupSpace[],
   options: CleanupGraphOptions,
   nameOptions: DroppedNameOptions = readDroppedNameOptions(),
+  thresholds: { eventDegree?: number; objectHubDegree?: number } = {},
 ): Promise<CleanupGraphCounts> {
   const counts: CleanupGraphCounts = {
     spaces: spaces.length,
     failed: 0,
     entities: 0,
+    eventHubs: 0,
+    objectHubs: 0,
     declinedStale: 0,
     deleted: 0,
     forgotten: 0,
     dryRun: options.dryRun,
     sample: [],
+    hubSample: [],
   };
+  const eventDegree = thresholds.eventDegree ?? readExtractMaxEventDegree();
+  const objectHubDegree = thresholds.objectHubDegree ?? readCleanupObjectHubDegree();
   for (const space of spaces) {
     try {
-      const entities = await collectEntities(space, nameOptions);
-      counts.entities += entities.length;
-      for (const entity of entities) {
+      const found = await collectEntities(space, nameOptions, eventDegree, objectHubDegree);
+      counts.entities += found.noise.length;
+      counts.eventHubs += found.eventHubs.length;
+      counts.objectHubs += found.objectHubs.length;
+      for (const entity of found.noise) {
         if (counts.sample.length >= SAMPLE_LIMIT) break;
         counts.sample.push(entity.name);
+      }
+      for (const hub of [...found.eventHubs, ...found.objectHubs]) {
+        if (counts.hubSample.length >= SAMPLE_LIMIT) break;
+        counts.hubSample.push(`${hub.reason} ${hub.name} ${hub.degree}`);
       }
       const declined = staleDeclinedPairs(await space.listDeclined());
       counts.declinedStale += declined.length;
       if (options.dryRun) continue;
-      if (entities.length > 0) {
-        counts.deleted += await space.deleteEntities(entities.map((entity) => entity.id));
+      if (found.noise.length > 0) {
+        counts.deleted += await space.deleteEntities(found.noise.map((entity) => entity.id));
       }
       if (declined.length > 0) {
         counts.forgotten += await space.forgetDeclined(
@@ -138,7 +201,9 @@ export async function cleanupMemoryGraph(
       }
       getLogger().info("memory cleanup wrote a space", {
         "memory.space_id": space.spaceId,
-        "memory.entities": entities.length,
+        "memory.entities": found.noise.length,
+        "memory.event_hubs": found.eventHubs.length,
+        "memory.object_hubs": found.objectHubs.length,
         "memory.declined": declined.length,
       });
     } catch (error) {
@@ -153,20 +218,34 @@ export async function cleanupMemoryGraph(
 
 async function collectEntities(
   space: CleanupSpace,
-  options: DroppedNameOptions,
-): Promise<CleanupEntity[]> {
-  const matched: CleanupEntity[] = [];
+  names: DroppedNameOptions,
+  eventDegree: number,
+  objectHubDegree: number,
+): Promise<{ noise: CleanupEntity[]; eventHubs: CleanupHub[]; objectHubs: CleanupHub[] }> {
+  const noise: CleanupEntity[] = [];
+  const eventHubs: CleanupHub[] = [];
+  const objectHubs: CleanupHub[] = [];
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const entities = await space.listEntities({ skip: page * PAGE_SIZE, limit: PAGE_SIZE });
     for (const entity of entities) {
-      if (isCleanupEntityName(entity.name, options)) matched.push(entity);
+      const kind = classifyCleanupEntity(entity, { names, eventDegree, objectHubDegree });
+      if (kind === "delete") noise.push(entity);
+      else if (kind === "event-hub" || kind === "object-hub") {
+        const hub: CleanupHub = {
+          ...entity,
+          degree: entity.degree ?? 0,
+          reason: kind,
+        };
+        if (kind === "event-hub") eventHubs.push(hub);
+        else objectHubs.push(hub);
+      }
     }
-    if (entities.length < PAGE_SIZE) return matched;
+    if (entities.length < PAGE_SIZE) return { noise, eventHubs, objectHubs };
   }
   getLogger().warn("memory cleanup stopped at the entity page cap", {
     "memory.space_id": space.spaceId,
   });
-  return matched;
+  return { noise, eventHubs, objectHubs };
 }
 
 export function formatCleanupReport(
@@ -179,8 +258,11 @@ export function formatCleanupReport(
     ...failures.map((failure) => `space ${failure.spaceId} failed ${failure.reason}`),
     `failed ${counts.failed + failures.length}`,
     `entities ${counts.entities}`,
+    `event-hubs ${counts.eventHubs}`,
+    `object-hubs ${counts.objectHubs}`,
     `declined-stale ${counts.declinedStale}`,
     ...counts.sample.map((name) => `sample ${name}`),
+    ...counts.hubSample.map((line) => `sample-hub ${line}`),
     `deleted ${counts.dryRun ? "dry-run" : counts.deleted}`,
     `forgotten ${counts.dryRun ? "dry-run" : counts.forgotten}`,
   ];
@@ -207,7 +289,7 @@ export function cleanupDeclinedFromRow(row: Neo4jCleanupDeclined): CleanupDeclin
 }
 
 export function cleanupEntityFromRow(row: Neo4jCleanupEntity): CleanupEntity {
-  return { id: row.id, name: row.name, type: row.type };
+  return { id: row.id, name: row.name, type: row.type, degree: row.degree };
 }
 
 export async function loadNeo4jCleanupSpaces(
