@@ -3,6 +3,7 @@ import { ComposioConnector, IntegrationProviderSettings } from "@rakazo/adapters
 import { phoneCallSettings } from "@rakazo/core";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
 import { loadWorkerConfig } from "./config.js";
+import { readWorkerSchemaReady } from "./schema-ready.js";
 import { createWorkerSecretStore } from "./secret-store.js";
 
 loadRootEnv();
@@ -70,6 +71,7 @@ import {
   runAsSystem,
   securityEventRetentionDays,
   verifyContentKeys,
+  waitForRuntimeSchema,
 } from "@rakazo/db";
 import { SERVICE_NAMES } from "@rakazo/logging";
 import { createRootLogger } from "@rakazo/logging/axiom";
@@ -90,6 +92,19 @@ async function main() {
   });
   const { pool } = created;
   let { prisma } = created;
+  // db:deploy runs in the API process. A worker that starts during it otherwise
+  // exits on a missing table or a grant that does not exist yet, then restarts.
+  await waitForRuntimeSchema(pool, {
+    ...readWorkerSchemaReady(config.env),
+    onWaiting: ({ attempt, delayMs, reason }) => {
+      logger.info("waiting for database migrations", {
+        attempt,
+        "db.delay_ms": delayMs,
+        "db.reason": reason,
+      });
+    },
+    onReady: () => logger.info("database migrations are ready"),
+  });
   const rowSecurity = rowSecurityWarning(await describeRowSecurity(prisma));
   if (rowSecurity) logger.warn(rowSecurity);
   const realtime = new PostgresRealtimeFanout({

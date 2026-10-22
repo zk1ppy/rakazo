@@ -443,6 +443,9 @@ services:
     environment:
       <<: *app-environment
       GRAPHILE_WORKER_CONCURRENCY:
+      WORKER_SCHEMA_READY_TIMEOUT_MS:
+      WORKER_SCHEMA_READY_DELAY_MS:
+      WORKER_SCHEMA_READY_MAX_DELAY_MS:
     volumes:
       - appdata:/data
     networks:

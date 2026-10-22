@@ -1330,7 +1330,9 @@ GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env -f infra/compose/do
 
 `up --wait` does not report success until the new API is healthy and the worker and web containers
 are running. The API container runs the migration step (`db:deploy`) before it starts serving, so migration
-failure keeps health red. A failed CLI recreate does not auto-roll back; recover with the previous
+failure keeps health red. If the worker process starts while that step is still applying tables or
+runtime grants, it waits and retries (`WORKER_SCHEMA_READY_TIMEOUT_MS`, default 120000 ms) instead of
+exiting on a missing relation or a missing `graphile_worker` grant. A failed CLI recreate does not auto-roll back; recover with the previous
 `RAKAZO_IMAGE_TAG` (or rebuild `local`) and `up -d --wait --pull never`.
 
 The updater sidecar has its own image and tag so an update never recreates the process performing
