@@ -26,8 +26,12 @@ trap 'exit 130' INT
 export CONTENT_ENCRYPTION="${CONTENT_ENCRYPTION:-on}"
 export TRUSTED_PROXIES="${TRUSTED_PROXIES:-127.0.0.1}"
 export CLIENT_IP_HEADER="${CLIENT_IP_HEADER:-x-real-ip}"
-pnpm --filter @rakazo/api start &
-pnpm --filter @rakazo/worker start &
+# exec node, not `pnpm start`. pnpm 9 runs the script under `sh -c` and, on
+# SIGTERM, signals that shell and exits without waiting. The shell does not
+# signal node, so WORKER_SHUTDOWN_GRACE_MS never runs. exec keeps node's pid,
+# which this script waits on.
+(cd /app/apps/api && exec node --enable-source-maps dist/index.js) &
+(cd /app/apps/worker && exec node --enable-source-maps dist/index.js) &
 (
   node --input-type=module -e '
   for (let attempt = 0; attempt < 60; attempt++) {
@@ -37,8 +41,9 @@ pnpm --filter @rakazo/worker start &
   }
   throw new Error("API did not become ready");
 '
+  cd /app/apps/web
   exec env -u RAILWAY_API_TOKEN -u DATABASE_URL -u ENCRYPTION_KEY -u ENCRYPTION_MASTER_KEYS -u BETTER_AUTH_SECRET \
-    pnpm --filter @rakazo/web preview --host 0.0.0.0 --port 5173
+    ./node_modules/.bin/vite preview --host 0.0.0.0 --port 5173
 ) &
 wait -n
 exit 1

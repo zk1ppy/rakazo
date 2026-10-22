@@ -1,11 +1,17 @@
 import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
 import type { Pool } from "pg";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  clearGraphileWorkerIds,
+  DEFAULT_STALE_LOCK_INTERVAL_MS,
   DEFAULT_WORKER_SHUTDOWN_GRACE_MS,
+  graphileWorkerIds,
   readStaleLockAfterMs,
+  readStaleLockIntervalMs,
   readWorkerShutdownGraceMs,
   releaseOwnWorkerLocks,
+  rememberGraphileWorkerId,
+  startStaleLockSweep,
   unlockStaleWorkerLocks,
 } from "./worker-locks.js";
 
@@ -27,8 +33,18 @@ describe("worker lock settings", () => {
     expect(readStaleLockAfterMs("0")).toBeUndefined();
     expect(readStaleLockAfterMs("-1")).toBeUndefined();
     expect(readStaleLockAfterMs("15min")).toBeUndefined();
+    expect(readStaleLockAfterMs("1")).toBe(1);
+    expect(readStaleLockAfterMs("60000")).toBe(60_000);
     expect(readStaleLockAfterMs("900000")).toBe(900_000);
     expect(readStaleLockAfterMs("3600000")).toBe(3_600_000);
+
+    expect(readStaleLockIntervalMs(undefined, undefined)).toBeUndefined();
+    expect(readStaleLockIntervalMs("1000", undefined)).toBeUndefined();
+    expect(readStaleLockIntervalMs(undefined, 60_000)).toBe(DEFAULT_STALE_LOCK_INTERVAL_MS);
+    expect(readStaleLockIntervalMs("", 60_000)).toBe(DEFAULT_STALE_LOCK_INTERVAL_MS);
+    expect(readStaleLockIntervalMs("nope", 60_000)).toBe(DEFAULT_STALE_LOCK_INTERVAL_MS);
+    expect(readStaleLockIntervalMs("0", 60_000)).toBeUndefined();
+    expect(readStaleLockIntervalMs("15000", 60_000)).toBe(15_000);
   });
 });
 
@@ -50,8 +66,8 @@ describe("unlockStaleWorkerLocks", () => {
     } as unknown as Pool;
 
     await expect(unlockStaleWorkerLocks(pool, 900_000)).resolves.toBe(2);
-    expect(queries[0]?.params).toEqual([900_000, null]);
-    expect(queries[0]?.sql).toContain("locked_by is distinct from $2::text");
+    expect(queries[0]?.params).toEqual([900_000, []]);
+    expect(queries[0]?.sql).toContain("locked_by <> all($2::text[])");
     expect(queries[0]?.sql).toContain("_private_job_queues");
     const warnings = sink.events.filter((event) => event.level === "warn");
     expect(warnings).toEqual([
@@ -73,6 +89,59 @@ describe("unlockStaleWorkerLocks", () => {
   it("does not query when the threshold is disabled", async () => {
     const pool = { query: () => Promise.reject(new Error("should not query")) } as unknown as Pool;
     await expect(unlockStaleWorkerLocks(pool, 0)).resolves.toBe(0);
+  });
+
+  it("excludes every pool id from this process", async () => {
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const pool = {
+      query: async (sql: string, params?: unknown[]) => {
+        queries.push({ sql, params: params ?? [] });
+        return { rows: [] };
+      },
+    } as unknown as Pool;
+    await unlockStaleWorkerLocks(pool, 60_000, ["pool-a", "pool-a", "", "pool-b"]);
+    expect(queries[0]?.params).toEqual([60_000, ["pool-a", "pool-b"]]);
+    expect(queries[0]?.sql).toContain("locked_by <> all($2::text[])");
+  });
+});
+
+describe("startStaleLockSweep", () => {
+  it("repeats and reads pool ids on each pass", async () => {
+    const queries: unknown[][] = [];
+    const pool = {
+      query: async (_sql: string, params?: unknown[]) => {
+        queries.push(params ?? []);
+        return { rows: [] };
+      },
+    } as unknown as Pool;
+    let ids = ["pool-live", "pool-restarted"];
+    const sweep = startStaleLockSweep(pool, 60_000, 30, () => ids);
+    try {
+      await vi.waitFor(() => expect(queries[0]).toEqual([60_000, ["pool-live", "pool-restarted"]]));
+      ids = ["pool-live", "pool-restarted", "pool-next"];
+      await vi.waitFor(() =>
+        expect(queries.at(-1)).toEqual([60_000, ["pool-live", "pool-restarted", "pool-next"]]),
+      );
+      sweep.stop();
+      await sweep.finished();
+      const stopped = queries.length;
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(queries.length).toBe(stopped);
+    } finally {
+      sweep.stop();
+    }
+  });
+});
+
+describe("graphile worker ids", () => {
+  it("keeps every id registered in this process", () => {
+    clearGraphileWorkerIds();
+    rememberGraphileWorkerId("pool-a");
+    rememberGraphileWorkerId("");
+    rememberGraphileWorkerId("pool-a");
+    rememberGraphileWorkerId("pool-b");
+    expect(graphileWorkerIds()).toEqual(["pool-a", "pool-b"]);
+    clearGraphileWorkerIds();
   });
 });
 

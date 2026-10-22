@@ -462,6 +462,7 @@ services:
       WORKER_SCHEMA_READY_MAX_DELAY_MS:
       WORKER_SHUTDOWN_GRACE_MS:
       WORKER_UNLOCK_STALE_LOCKS_AFTER_MS:
+      WORKER_UNLOCK_STALE_LOCKS_INTERVAL_MS:
     volumes:
       - appdata:/data
     networks:

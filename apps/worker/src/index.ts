@@ -5,6 +5,7 @@ import { loadRootEnv } from "@rakazo/core/node/load-root-env";
 import { loadWorkerConfig } from "./config.js";
 import { readWorkerSchemaReady } from "./schema-ready.js";
 import { createWorkerSecretStore } from "./secret-store.js";
+import { installWorkerShutdownSignals } from "./shutdown-signals.js";
 
 loadRootEnv();
 
@@ -28,6 +29,7 @@ import {
   ExpoPushProvider,
   GraphileJobPublisher,
   GraphileJobWorkerHost,
+  graphileWorkerIds,
   InMemoryJobQueue,
   InstalledConnectorProvider,
   isComposioEnabled,
@@ -45,6 +47,7 @@ import {
   PostgresRealtimeFanout,
   pipedreamConfigFromEnv,
   readStaleLockAfterMs,
+  readStaleLockIntervalMs,
   readWorkerShutdownGraceMs,
   reconcileCloudAgents,
   reconcileComputerUpdates,
@@ -55,6 +58,7 @@ import {
   SpaceMemoryProviderResolver,
   sandboxProviderOptionsFromEnv,
   shutdownPiTelemetry,
+  startStaleLockSweep,
   unlockStaleWorkerLocks,
   withSecretPersistence,
 } from "@rakazo/adapters";
@@ -269,13 +273,18 @@ async function main() {
 
   const shutdownGraceMs = readWorkerShutdownGraceMs(process.env.WORKER_SHUTDOWN_GRACE_MS);
   const staleLockAfterMs = readStaleLockAfterMs(process.env.WORKER_UNLOCK_STALE_LOCKS_AFTER_MS);
+  const staleLockIntervalMs = readStaleLockIntervalMs(
+    process.env.WORKER_UNLOCK_STALE_LOCKS_INTERVAL_MS,
+    staleLockAfterMs,
+  );
   // Before the runner locks anything. Off unless WORKER_UNLOCK_STALE_LOCKS_AFTER_MS
-  // is set. The lock lasts for the whole job. A rolling update starts this
-  // process while the previous one is still running, so a short threshold
-  // unlocks a live job.
+  // is set. Repeats every WORKER_UNLOCK_STALE_LOCKS_INTERVAL_MS (default 5 minutes).
+  // Never a pool id this process has registered, including a runner started again
+  // after a connection failure. A rolling update is a different process, so a
+  // short age still unlocks that live job.
   if (!inMemoryJobs && staleLockAfterMs) {
     try {
-      await unlockStaleWorkerLocks(pool, staleLockAfterMs);
+      await unlockStaleWorkerLocks(pool, staleLockAfterMs, graphileWorkerIds());
     } catch (error) {
       logger.error("stale graphile lock release failed", error);
     }
@@ -343,11 +352,18 @@ async function main() {
   });
   reconciler.start();
 
+  const staleLockSweep =
+    !inMemoryJobs && staleLockAfterMs && staleLockIntervalMs
+      ? startStaleLockSweep(pool, staleLockAfterMs, staleLockIntervalMs, graphileWorkerIds)
+      : undefined;
+
   let stopping = false;
   const stop = async () => {
     if (stopping) return;
     stopping = true;
     try {
+      staleLockSweep?.stop();
+      await staleLockSweep?.finished();
       await reconciler.stop();
       await jobHost.stop();
       await jobs.close();
@@ -364,11 +380,9 @@ async function main() {
   };
   // Graphile's own handlers are off (noHandleSignals). Without an exit here the
   // listener swallows SIGTERM and the process stays up after the runner stops.
-  const exitAfterStop = (code: number) => {
-    void stop().finally(() => process.exit(code));
-  };
-  process.once("SIGTERM", () => exitAfterStop(0));
-  process.once("SIGINT", () => exitAfterStop(0));
+  // A second signal must not exit before stop() finishes: tini -g delivers
+  // SIGTERM to the group, then the shell trap signals the same process again.
+  installWorkerShutdownSignals(stop);
   // graphile-worker fires completeJob() without awaiting it. When pool.connect()
   // then hits Postgres 53300, that rejection is unhandled. Exiting here is the
   // crash loop: Docker restarts the process before Postgres has reaped the old

@@ -13,5 +13,7 @@ RUN install -d -m 750 -o node -g node /data /app/apps/web/node_modules/.vite-tem
 
 ENV NODE_ENV=production
 EXPOSE 3100 7091
+# pnpm start is `sh -c node …`. pnpm 9 signals that shell and exits, so node
+# never runs its shutdown handler. The script execs node, which becomes PID 1.
 USER node
-CMD ["pnpm", "--filter", "@rakazo/api", "start"]
+CMD ["/app/infra/compose/start-api.sh"]

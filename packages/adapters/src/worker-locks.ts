@@ -31,14 +31,16 @@ export function readWorkerShutdownGraceMs(value: string | undefined): number {
 }
 
 /**
- * Unset, blank, `0`, or not a whole number disables the startup unlock.
- * A positive value is how old another worker's lock must be before this
- * process releases it. The lock is held for the whole job, not one model call.
- * Do not enable this with more than one worker replica: a rolling update
- * starts the new process while the old one still holds the lock, and a short
- * threshold lets both run the job. A single replica can use 3600000 (60
- * minutes). That is safe with a Recreate strategy, which stops the old pod
- * before the new one starts, or when no job can run longer than the threshold.
+ * Unset, blank, `0`, or not a whole number disables the stale-lock release.
+ * Any other positive whole number of milliseconds is how old another process's
+ * lock must be before this process releases it. `1` and `60000` are both
+ * accepted: there is no higher minimum. The lock is held for the whole job.
+ * This process never releases a pool id it has registered, including a runner
+ * started again in the same process. Leave this unset when more than one worker
+ * uses the database: a rolling update starts the new process while the old one
+ * still holds the lock, and a short age lets both run the job. One replica with
+ * a Recreate strategy can set 60000. That stops the old pod before the new one
+ * starts, so a dead worker's lock is released once it is a minute old.
  */
 export function readStaleLockAfterMs(value: string | undefined): number | undefined {
   const trimmed = value?.trim() ?? "";
@@ -47,6 +49,44 @@ export function readStaleLockAfterMs(value: string | undefined): number | undefi
   const parsed = Number(trimmed);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) return undefined;
   return parsed;
+}
+
+/** Repeat the stale-lock release this often when the age threshold is set. */
+export const DEFAULT_STALE_LOCK_INTERVAL_MS = 300_000;
+
+/**
+ * Off when the age threshold is off. Unset uses 300000. `0` keeps the startup
+ * pass and does not repeat. Blank is unset. Anything else that is not a positive
+ * whole number uses 300000.
+ */
+export function readStaleLockIntervalMs(
+  value: string | undefined,
+  staleLockAfterMs: number | undefined,
+): number | undefined {
+  if (staleLockAfterMs === undefined) return undefined;
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return DEFAULT_STALE_LOCK_INTERVAL_MS;
+  if (trimmed === "0") return undefined;
+  if (!/^\d+$/.test(trimmed)) return DEFAULT_STALE_LOCK_INTERVAL_MS;
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return DEFAULT_STALE_LOCK_INTERVAL_MS;
+  return parsed;
+}
+
+const processGraphileWorkerIds = new Set<string>();
+
+/** Pool ids this process has registered. A relaunched runner stays in the set. */
+export function rememberGraphileWorkerId(id: string): void {
+  if (id.length > 0) processGraphileWorkerIds.add(id);
+}
+
+export function graphileWorkerIds(): readonly string[] {
+  return [...processGraphileWorkerIds];
+}
+
+/** Tests only. Production keeps every id so a sweep cannot unlock this process. */
+export function clearGraphileWorkerIds(): void {
+  processGraphileWorkerIds.clear();
 }
 
 interface LockRow {
@@ -58,7 +98,7 @@ interface LockRow {
 
 /**
  * Release job and queue locks older than `afterMs` held by a worker other than
- * `exceptWorkerId`. Attempts stay as graphile left them when it locked the row
+ * `exceptWorkerIds`. Attempts stay as graphile left them when it locked the row
  * (`resetLockedAt` does the same): a job already at `max_attempts` stays
  * failed, and the queue lock is what was blocking everyone else.
  * Graphile's own sweep waits 4 hours.
@@ -66,9 +106,10 @@ interface LockRow {
 export async function unlockStaleWorkerLocks(
   pool: Pool,
   afterMs: number,
-  exceptWorkerId?: string,
+  exceptWorkerIds?: readonly string[],
 ): Promise<number> {
   if (!Number.isSafeInteger(afterMs) || afterMs <= 0) return 0;
+  const exceptIds = [...new Set((exceptWorkerIds ?? []).filter((id) => id.length > 0))];
   const { rows } = await pool.query<LockRow>(
     `with released_jobs as (
        update graphile_worker._private_jobs as jobs
@@ -79,7 +120,7 @@ export async function unlockStaleWorkerLocks(
          select id, locked_by, job_queue_id
          from graphile_worker._private_jobs
          where locked_by is not null
-           and locked_by is distinct from $2::text
+           and locked_by <> all($2::text[])
            and locked_at < now() - ($1::bigint * interval '1 millisecond')
        ) as stale
        where jobs.id = stale.id
@@ -99,7 +140,7 @@ export async function unlockStaleWorkerLocks(
          select id, queue_name, locked_by
          from graphile_worker._private_job_queues
          where locked_by is not null
-           and locked_by is distinct from $2::text
+           and locked_by <> all($2::text[])
            and locked_at < now() - ($1::bigint * interval '1 millisecond')
        ) as stale
        where queues.id = stale.id
@@ -109,7 +150,7 @@ export async function unlockStaleWorkerLocks(
      select 'job'::text as kind, id, queue, worker_id from named_jobs
      union all
      select 'queue'::text as kind, id, queue, worker_id from released_queues`,
-    [afterMs, exceptWorkerId ?? null],
+    [afterMs, exceptIds],
   );
   for (const row of rows) {
     getLogger().warn("released stale graphile lock", {
@@ -119,6 +160,46 @@ export async function unlockStaleWorkerLocks(
     });
   }
   return rows.length;
+}
+
+/**
+ * Repeat `unlockStaleWorkerLocks`. `exceptWorkerIds` is read on each pass so a
+ * pool started again in this process is excluded as soon as it is registered.
+ * Stop before closing the pool. `finished` is the pass in flight.
+ */
+export function startStaleLockSweep(
+  pool: Pool,
+  afterMs: number,
+  intervalMs: number,
+  exceptWorkerIds: () => readonly string[],
+): { stop: () => void; finished: () => Promise<void> } {
+  if (!Number.isSafeInteger(intervalMs) || intervalMs <= 0) {
+    return { stop() {}, finished: () => Promise.resolve() };
+  }
+  let stopped = false;
+  let pending: Promise<void> = Promise.resolve();
+  const timer = setInterval(() => {
+    if (stopped) return;
+    const except = exceptWorkerIds();
+    pending = pending.then(() => {
+      if (stopped) return undefined;
+      return unlockStaleWorkerLocks(pool, afterMs, except)
+        .then(() => undefined)
+        .catch((error: unknown) => {
+          getLogger().error("stale graphile lock release failed", error);
+        });
+    });
+  }, intervalMs);
+  timer.unref?.();
+  return {
+    stop() {
+      stopped = true;
+      clearInterval(timer);
+    },
+    finished() {
+      return pending;
+    },
+  };
 }
 
 interface RefundedJob {

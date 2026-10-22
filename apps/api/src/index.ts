@@ -41,8 +41,11 @@ try {
     await stop();
     await logger.flush({ timeoutMs: 2_000 });
   };
-  process.once("SIGTERM", () => void shutdown());
-  process.once("SIGINT", () => void shutdown());
+  // `on`, not `once`. A supervisor can deliver the signal twice (an init that
+  // signals the process group, then the shell trap). The second delivery must
+  // not fall through to Node's default exit while shutdown is still running.
+  process.on("SIGTERM", () => void shutdown());
+  process.on("SIGINT", () => void shutdown());
 } catch (error) {
   logger.error("api startup failed", error);
   await logger.flush({ timeoutMs: 2_000 });
