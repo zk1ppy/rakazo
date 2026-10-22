@@ -112,6 +112,7 @@ export {
 export {
   assertNeo4jMaxChunkChars,
   assertOwnerAliases,
+  loadExtractPatternConfig,
   neo4jExtractionEnabled,
   neo4jMaxChunkChars,
 } from "./memory-extract.js";

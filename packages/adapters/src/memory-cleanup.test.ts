@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CleanupSpace } from "./memory-cleanup.js";
 import {
   classifyCleanupEntity,
@@ -59,6 +59,10 @@ function space(): CleanupSpace & {
 }
 
 describe("cleanupMemoryGraph", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("parses a dry-run by default and requires --apply to write", () => {
     expect(parseCleanupGraphArgs([])).toEqual({ dryRun: true });
     expect(parseCleanupGraphArgs(["--"])).toEqual({ dryRun: true });
@@ -162,6 +166,20 @@ describe("cleanupMemoryGraph", () => {
     expect(report).toContain("sample-hub event-hub Test HIIT 51");
     expect(report).toContain("sample-hub object-hub Týr 49");
     expect(report).toContain("deleted 1");
+  });
+
+  it("drops operational names with the configured patterns", async () => {
+    vi.stubEnv("MEMORY_EXTRACT_OPERATIONAL_PATTERNS", "^agenda\\b");
+    const graph = space();
+    graph.listEntities = async () => [
+      { id: "agenda", name: "Agenda du lundi", type: "Event", degree: 1 },
+      { id: "brief", name: "Brief 9h 2026-10-23", type: "Event", degree: 1 },
+    ];
+    const dry = await cleanupMemoryGraph([graph], { dryRun: true });
+    expect(dry.entities).toBe(1);
+    expect(dry.sample).toEqual(["Agenda du lundi"]);
+    expect(dry.eventHubs).toBe(0);
+    expect(graph.deleted).toEqual([]);
   });
 
   it("detaches matching entities and forgets stale refusals when applied", async () => {

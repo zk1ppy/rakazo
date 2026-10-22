@@ -60,6 +60,11 @@ const MAX_EXTRACT_MAX_RELATIONS_PER_ENTITY = 64;
 const DEFAULT_DROP_RELATION_TYPES = ["mentioned_in", "discussed_in"] as const;
 const MIN_EXTRACT_MAX_OUTPUT_TOKENS = 64;
 const MAX_EXTRACT_MAX_OUTPUT_TOKENS = 131_072;
+/**
+ * Visible JSON budget when thinking is off and no output cap is set.
+ * A real extraction has already reached about a thousand tokens.
+ */
+export const DEFAULT_EXTRACT_VISIBLE_OUTPUT_TOKENS = 4_096;
 const MIN_EXTRACT_MAX_TRUNCATED_ATTEMPTS = 1;
 const MAX_EXTRACT_MAX_TRUNCATED_ATTEMPTS = 8;
 const EXTRACT_EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -229,6 +234,8 @@ export interface DroppedNameOptions {
   patterns: readonly RegExp[];
   /** Briefs, routines, outages, and dated sync jobs. Unset means on. */
   dropOperational?: boolean;
+  /** When set, these replace the built-in operational patterns. */
+  operationalPatterns?: readonly RegExp[];
 }
 
 /** Defaults used when a caller does not pass an environment. Snake-case ids are dropped. */
@@ -289,23 +296,133 @@ function isSnakeCaseId(name: string): boolean {
   return /^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(name.trim());
 }
 
+/** Built-in work traces. A custom list replaces them; it does not extend them. */
+export const DEFAULT_OPERATIONAL_PATTERN_SOURCES = [
+  String.raw`^brief\b`,
+  String.raw`^routine\b`,
+  String.raw`^(?:outage|panne)\b`,
+  String.raw`\b(?:sync|outage|panne)\b.*\b20\d{2}-\d{2}|\b20\d{2}-\d{2}.*\b(?:sync|outage|panne)\b`,
+] as const;
+
+/** Built-in tool hubs. A proper name such as an agent does not match. */
+export const DEFAULT_TOOL_HUB_PATTERN_SOURCES = [
+  String.raw`\bmcp\b`,
+  String.raw`\bsandbox\b`,
+] as const;
+
+const warnedPatternValues = new Set<string>();
+
+function compilePattern(source: string): RegExp {
+  return new RegExp(source, "iu");
+}
+
+/**
+ * Comma-separated JavaScript regular expressions, or a JSON array of them.
+ * Matching is case-insensitive. A blank value keeps the defaults. An invalid
+ * value is ignored and the defaults stay. Invalid entries in a mixed list are
+ * skipped. The warning is once per value, so a bad environment does not crash
+ * the process and does not repeat on every fact.
+ */
+export function readConfiguredPatterns(
+  raw: string | undefined,
+  defaults: readonly string[],
+  envName: string,
+): RegExp[] {
+  const trimmed = raw?.trim() ?? "";
+  if (!trimmed) return defaults.map(compilePattern);
+  const sources = patternSources(trimmed);
+  if (!sources) {
+    warnIgnoredPatterns(envName, trimmed, "unparseable");
+    return defaults.map(compilePattern);
+  }
+  const compiled: RegExp[] = [];
+  let invalid = 0;
+  for (const source of sources) {
+    try {
+      compiled.push(compilePattern(source));
+    } catch {
+      invalid += 1;
+    }
+  }
+  if (invalid > 0) warnIgnoredPatterns(envName, trimmed, String(invalid));
+  if (compiled.length === 0 && invalid > 0) return defaults.map(compilePattern);
+  return compiled;
+}
+
+function patternSources(raw: string): string[] | null {
+  if (raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return null;
+      const sources: string[] = [];
+      for (const entry of parsed) {
+        if (typeof entry !== "string") return null;
+        const source = entry.trim();
+        if (source) sources.push(source);
+      }
+      return sources;
+    } catch {
+      return null;
+    }
+  }
+  return raw
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+function warnIgnoredPatterns(envName: string, raw: string, reason: string): void {
+  const key = `${envName}\0${raw}`;
+  if (warnedPatternValues.has(key)) return;
+  warnedPatternValues.add(key);
+  getLogger().warn("memory.extract ignored invalid patterns", {
+    "memory.pattern_env": envName,
+    "memory.patterns_ignored": reason,
+  });
+}
+
+export function readOperationalPatterns(env: NodeJS.ProcessEnv = process.env): RegExp[] {
+  return readConfiguredPatterns(
+    env.MEMORY_EXTRACT_OPERATIONAL_PATTERNS,
+    DEFAULT_OPERATIONAL_PATTERN_SOURCES,
+    "MEMORY_EXTRACT_OPERATIONAL_PATTERNS",
+  );
+}
+
+export function readToolHubPatterns(env: NodeJS.ProcessEnv = process.env): RegExp[] {
+  return readConfiguredPatterns(
+    env.MEMORY_EXTRACT_TOOL_HUB_PATTERNS,
+    DEFAULT_TOOL_HUB_PATTERN_SOURCES,
+    "MEMORY_EXTRACT_TOOL_HUB_PATTERNS",
+  );
+}
+
+/** Read both pattern lists so a bad value warns when the process starts. */
+export function loadExtractPatternConfig(env: NodeJS.ProcessEnv = process.env): void {
+  readOperationalPatterns(env);
+  readToolHubPatterns(env);
+}
+
 /**
  * Work traces: briefs, routines, outages, and dated sync jobs.
  * A tool the subject keeps using ("Garmin MCP server", "hugin-sandbox") is not
- * one of these; that node can stay, with a separate degree cap.
+ * one of these unless its name matches; that node can stay, with a degree cap.
  */
-export function isOperationalNoiseName(name: string): boolean {
+export function isOperationalNoiseName(
+  name: string,
+  patterns: readonly RegExp[] = readOperationalPatterns(),
+): boolean {
   const trimmed = name.trim();
   if (!trimmed) return false;
-  if (/^brief\b/iu.test(trimmed)) return true;
-  if (/^routine\b/iu.test(trimmed)) return true;
-  if (/^(?:outage|panne)\b/iu.test(trimmed)) return true;
-  return /\b(?:sync|outage|panne)\b/iu.test(trimmed) && /\b20\d{2}-\d{2}/u.test(trimmed);
+  return patterns.some((pattern) => pattern.test(trimmed));
 }
 
-/** An MCP server or a sandbox. Agents with a proper name do not match. */
-export function isToolHubName(name: string): boolean {
-  return /\bmcp\b/iu.test(name) || /\bsandbox\b/iu.test(name);
+/** An MCP server or a sandbox, unless the configured patterns say otherwise. */
+export function isToolHubName(
+  name: string,
+  patterns: readonly RegExp[] = readToolHubPatterns(),
+): boolean {
+  return patterns.some((pattern) => pattern.test(name));
 }
 
 /** Paths, file names, snake-case ids, configured patterns, and operational traces. */
@@ -314,7 +431,8 @@ export function isDroppedEntityName(
   options: DroppedNameOptions = defaultDroppedNameOptions(),
 ): boolean {
   if (isFilesystemPathName(name, options)) return true;
-  return options.dropOperational !== false && isOperationalNoiseName(name);
+  if (options.dropOperational === false) return false;
+  return isOperationalNoiseName(name, options.operationalPatterns ?? readOperationalPatterns());
 }
 
 export interface DegreeEndpoint {
@@ -330,14 +448,32 @@ export interface DegreeEndpoint {
 export function relationCreateCap(
   ends: readonly DegreeEndpoint[],
   caps: { event: number; tool: number },
+  toolPatterns: readonly RegExp[] = readToolHubPatterns(),
 ): "event" | "tool" | null {
   if (caps.event > 0 && ends.some((end) => end.type === "Event" && end.degree >= caps.event)) {
     return "event";
   }
-  if (caps.tool > 0 && ends.some((end) => isToolHubName(end.name) && end.degree >= caps.tool)) {
+  if (
+    caps.tool > 0 &&
+    ends.some((end) => isToolHubName(end.name, toolPatterns) && end.degree >= caps.tool)
+  ) {
     return "tool";
   }
   return null;
+}
+
+/**
+ * Tokens reserved for the JSON answer. Thinking that is off uses
+ * `MEMORY_EXTRACT_MAX_OUTPUT_TOKENS` when it is set, and 4096 otherwise.
+ * Thinking that is on keeps the smaller answer budget here; the env value is
+ * the shared completion cap on that path.
+ */
+export function extractVisibleOutputTokens(
+  thinkingLevel: string,
+  outputCap: number | undefined,
+): number {
+  if (thinkingLevel && thinkingLevel !== "off") return EXTRACT_ANSWER_TOKENS;
+  return outputCap ?? DEFAULT_EXTRACT_VISIBLE_OUTPUT_TOKENS;
 }
 
 /** Placeholders, option letters, and numbered plan steps. Dated names are kept. */
@@ -610,8 +746,9 @@ export function readExtractTimeoutMs(env: NodeJS.ProcessEnv = process.env): numb
 }
 
 /**
- * Shared completion cap for one extraction when reasoning is on. Unset keeps
- * the connection cap. A stored minimum effort still wins over this level.
+ * Output cap for one extraction, 64-131072. When reasoning is on this is the
+ * shared completion cap, and unset keeps the connection cap. When reasoning
+ * is off this is the visible answer budget, and unset uses 4096.
  */
 export function readExtractMaxOutputTokens(
   env: NodeJS.ProcessEnv = process.env,
@@ -726,6 +863,7 @@ export function readDroppedNameOptions(env: NodeJS.ProcessEnv = process.env): Dr
     dropSnakeCaseIds: readDropSnakeCaseIds(env),
     patterns: readDropNamePatterns(env),
     dropOperational: readDropOperational(env),
+    operationalPatterns: readOperationalPatterns(env),
   };
 }
 
@@ -1079,7 +1217,12 @@ function droppedNameKind(
   if (!parsed.success) return null;
   const name = parsed.data.name;
   if (isFilesystemPathName(name, dropNames)) return "file";
-  if (dropNames.dropOperational !== false && isOperationalNoiseName(name)) return "operational";
+  if (
+    dropNames.dropOperational !== false &&
+    isOperationalNoiseName(name, dropNames.operationalPatterns ?? readOperationalPatterns())
+  ) {
+    return "operational";
+  }
   return null;
 }
 
@@ -1186,13 +1329,14 @@ async function callExtractor(
   const timeoutMs = readExtractTimeoutMs();
   const thinkingLevel = resolveExtractThinkingLevel(model);
   const outputCap = readExtractMaxOutputTokens();
+  const answerTokens = extractVisibleOutputTokens(thinkingLevel, outputCap);
   const callModel: AgentRunRequest["model"] = { ...model, thinkingLevel };
   if (outputCap !== undefined && thinkingLevel !== "off") {
     const ceiling =
       typeof model.maxTokens === "number" && model.maxTokens >= 1 ? model.maxTokens : outputCap;
     callModel.maxTokens = Math.min(ceiling, outputCap);
   }
-  const maxOutput = extractionCompletionTokens(callModel, thinkingLevel, EXTRACT_ANSWER_TOKENS);
+  const maxOutput = extractionCompletionTokens(callModel, thinkingLevel, answerTokens);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   timer.unref?.();
@@ -1215,12 +1359,12 @@ async function callExtractor(
         tools: [],
         allowSilentEmpty: true,
         providerRetries: 0,
-        // One call. An explicit off, or a model that does not reason, keeps
-        // the visible budget. A requested effort — including the default when
-        // effort is unset — shares the completion cap, so the runtime uses
-        // that connection's max output. A second call would spend another
-        // quota unit.
-        visibleOutputTokens: EXTRACT_ANSWER_TOKENS,
+        // One call. Thinking off sends answerTokens as the visible budget:
+        // the configured cap, or 4096. A requested effort shares the
+        // completion cap, so the runtime uses that connection's max output,
+        // lowered when MEMORY_EXTRACT_MAX_OUTPUT_TOKENS is set. A second call
+        // would spend another quota unit.
+        visibleOutputTokens: answerTokens,
         model: callModel,
       },
       {

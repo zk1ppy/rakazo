@@ -14,6 +14,7 @@ import {
   assertOwnerAliases,
   capExtractedRelations,
   extractMemoryGraph,
+  extractVisibleOutputTokens,
   isDroppedEntityName,
   isFilesystemPathName,
   isNonReferentName,
@@ -37,7 +38,9 @@ import {
   readExtractMaxTruncatedAttempts,
   readExtractTimeoutMs,
   readNeo4jExtractionModel,
+  readOperationalPatterns,
   readOwnerAliases,
+  readToolHubPatterns,
   relationCreateCap,
   resolveExtractThinkingLevel,
 } from "./memory-extract.js";
@@ -604,6 +607,23 @@ describe("extraction role and measurement guards", () => {
     expect(readExtractMaxEventDegree({ MEMORY_EXTRACT_MAX_EVENT_DEGREE: "nope" })).toBe(8);
     expect(readExtractMaxToolDegree({})).toBe(4);
     expect(readExtractMaxToolDegree({ MEMORY_EXTRACT_MAX_TOOL_DEGREE: "0" })).toBe(0);
+    expect(extractVisibleOutputTokens("off", undefined)).toBe(4_096);
+    expect(extractVisibleOutputTokens("off", 4_096)).toBe(4_096);
+    expect(extractVisibleOutputTokens("off", 8_192)).toBe(8_192);
+    expect(extractVisibleOutputTokens("low", 8_192)).toBe(1_024);
+    const agenda = readOperationalPatterns({
+      MEMORY_EXTRACT_OPERATIONAL_PATTERNS: "^agenda\\b",
+    });
+    expect(isOperationalNoiseName("Agenda du lundi", agenda)).toBe(true);
+    expect(isOperationalNoiseName("Brief 9h 2026-10-23", agenda)).toBe(false);
+    const fromJson = readOperationalPatterns({
+      MEMORY_EXTRACT_OPERATIONAL_PATTERNS: '["^agenda\\\\b"]',
+    });
+    expect(isOperationalNoiseName("agenda du soir", fromJson)).toBe(true);
+    const gmail = readToolHubPatterns({ MEMORY_EXTRACT_TOOL_HUB_PATTERNS: "\\bgmail\\b" });
+    expect(isToolHubName("Gmail", gmail)).toBe(true);
+    expect(isToolHubName("Garmin MCP server", gmail)).toBe(false);
+    expect(isToolHubName("hugin-sandbox", gmail)).toBe(false);
     expect(
       relationCreateCap([{ type: "Event", name: "Test HIIT", degree: 51 }], { event: 8, tool: 4 }),
     ).toBe("event");
@@ -775,7 +795,7 @@ describe("extractMemoryGraph", () => {
       providerRetries: 0,
       tools: [],
       usageOperationKind: "retrieval",
-      visibleOutputTokens: 1_024,
+      visibleOutputTokens: 4_096,
       model: { thinkingLevel: "off", id: "gpt-test" },
     });
     expect(run.mock.calls[0]?.[0].model.maxTokens).toBeUndefined();
@@ -1108,7 +1128,7 @@ describe("extractMemoryGraph", () => {
       expect.objectContaining({
         message: "memory.extract truncated",
         "usage.output": 1_024,
-        max_output: 1_024,
+        max_output: 4_096,
         "memory.json_found": false,
       }),
     );
@@ -1134,7 +1154,7 @@ describe("extractMemoryGraph", () => {
     expect(truncated).toHaveLength(2);
     expect(truncated[0]).toMatchObject({ "job.outcome": "transient" });
     expect(truncated[1]).not.toHaveProperty("job.outcome");
-    expect(truncated[1]).toMatchObject({ "usage.output": 1_024, max_output: 1_024 });
+    expect(truncated[1]).toMatchObject({ "usage.output": 1_024, max_output: 4_096 });
   });
 
   it("keeps a finished chunk and retries only the truncated one", async () => {
@@ -1466,6 +1486,50 @@ describe("extractMemoryGraph", () => {
         "memory.entities_kept": 4,
       }),
     );
+  });
+
+  it("ignores an invalid pattern list and warns once", () => {
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "rakazo", sinks: [sink] }));
+    const broken = { MEMORY_EXTRACT_OPERATIONAL_PATTERNS: "[" };
+    const first = readOperationalPatterns(broken);
+    const second = readOperationalPatterns(broken);
+    expect(isOperationalNoiseName("routine horaire v2", first)).toBe(true);
+    expect(isOperationalNoiseName("routine horaire v2", second)).toBe(true);
+    const warnings = sink.events.filter(
+      (event) => event.message === "memory.extract ignored invalid patterns",
+    );
+    expect(warnings).toHaveLength(1);
+    const mixed = readToolHubPatterns({
+      MEMORY_EXTRACT_TOOL_HUB_PATTERNS: "(,\\bgmail\\b",
+    });
+    expect(isToolHubName("Gmail", mixed)).toBe(true);
+    expect(isToolHubName("hugin-sandbox", mixed)).toBe(false);
+    expect(
+      sink.events.filter((event) => event.message === "memory.extract ignored invalid patterns"),
+    ).toHaveLength(2);
+  });
+
+  it("uses the configured output cap as the visible budget when thinking is off", async () => {
+    vi.stubEnv("MEMORY_EXTRACT_THINKING_LEVEL", "off");
+    vi.stubEnv("MEMORY_EXTRACT_MAX_OUTPUT_TOKENS", "4096");
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done" as const, text: '{"entities":[],"relations":[]}' };
+    });
+    await extractMemoryGraph(
+      deps(run, jobs(), false, {
+        ...model,
+        reasoning: true,
+        thinkingLevel: "low",
+        maxTokens: 65_536,
+      }),
+      payload(),
+      store("Ada Lovelace founded the Analytical Society in London."),
+    );
+    expect(run.mock.calls[0]?.[0]).toMatchObject({
+      visibleOutputTokens: 4_096,
+      model: { thinkingLevel: "off", maxTokens: 65_536 },
+    });
   });
 
   it("uses the extraction timeout, effort, and output cap from the environment", async () => {

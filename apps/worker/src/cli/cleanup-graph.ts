@@ -2,7 +2,11 @@ import { loadRootEnv } from "@rakazo/core/node/load-root-env";
 
 loadRootEnv();
 
-import { closeNeo4jMemoryDrivers, parseCleanupGraphArgs } from "@rakazo/adapters";
+import {
+  closeNeo4jMemoryDrivers,
+  loadExtractPatternConfig,
+  parseCleanupGraphArgs,
+} from "@rakazo/adapters";
 import { createDb } from "@rakazo/db";
 import { SERVICE_NAMES } from "@rakazo/logging";
 import { createRootLogger } from "@rakazo/logging/axiom";
@@ -21,6 +25,7 @@ import { runCleanupGraph } from "./run-cleanup-graph.js";
 const options = parseCleanupGraphArgs(process.argv.slice(2));
 const config = loadWorkerConfig();
 const logger = createRootLogger(SERVICE_NAMES.worker);
+loadExtractPatternConfig(config.env);
 
 const { prisma, pool } = createDb(config.databaseUrl);
 const secrets = await createWorkerSecretStore(config.env);
