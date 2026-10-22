@@ -828,7 +828,13 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
   }
 
   async collapseParallelRelations(
-    input: { spaceId: string; ids: string[]; ns?: string },
+    input: {
+      spaceId: string;
+      ids: string[];
+      ns?: string;
+      scope?: "page" | "space";
+      dryRun?: boolean;
+    },
     signal?: AbortSignal,
   ) {
     return collapseNeo4jParallelRelations(

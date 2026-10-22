@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { MemoryConsolidateDeps, MemoryConsolidateStore } from "./memory-consolidate.js";
 import {
   assertConsolidateTimeoutMs,
+  chooseWinningType,
   classifyConsolidationPair,
   consolidateMemoryGraph,
   DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
@@ -23,6 +24,7 @@ import {
   parseConsolidationTypeDecision,
   planCanonicalEntity,
   planCanonicalRename,
+  previewMemoryConsolidation,
   readConsolidateModelSettings,
 } from "./memory-consolidate.js";
 import type {
@@ -83,11 +85,23 @@ function pageStore(
 ): MemoryConsolidateStore & {
   merges: Neo4jDuplicateMerge[];
   renames: Neo4jEntityRename[];
-  collapses: Array<{ spaceId: string; ids: string[]; ns?: string }>;
+  collapses: Array<{
+    spaceId: string;
+    ids: string[];
+    ns?: string;
+    scope?: "page" | "space";
+    dryRun?: boolean;
+  }>;
 } {
   const merges: Neo4jDuplicateMerge[] = [];
   const renames: Neo4jEntityRename[] = [];
-  const collapses: Array<{ spaceId: string; ids: string[]; ns?: string }> = [];
+  const collapses: Array<{
+    spaceId: string;
+    ids: string[];
+    ns?: string;
+    scope?: "page" | "space";
+    dryRun?: boolean;
+  }> = [];
   return {
     merges,
     renames,
@@ -381,8 +395,8 @@ describe("consolidateMemoryGraph", () => {
     await consolidateMemoryGraph(deps(), payload, store);
     expect(store.merges).toHaveLength(0);
     expect(store.collapses).toEqual([
-      { spaceId: "space-1", ids: ["ada"] },
-      { spaceId: "space-1", ids: ["ada"] },
+      { spaceId: "space-1", ids: ["ada"], scope: "space" },
+      { spaceId: "space-1", ids: ["ada"], scope: "page" },
     ]);
   });
 
@@ -437,6 +451,7 @@ describe("consolidateMemoryGraph", () => {
       ["ada-full", "ada-short"],
       ["ada-full", "ada-short"],
     ]);
+    expect(store.collapses.map((call) => call.scope)).toEqual(["space", "page"]);
   });
 
   it("merges Nicolas into Nicolas Tremblier after one confirmation", async () => {
@@ -701,6 +716,82 @@ describe("consolidateMemoryGraph", () => {
     expect(offPage.merges[0]).toMatchObject({ keepId: "ada", dropId: "runner" });
   });
 
+  it("merges a confirmed cross-type pair when the model omits the type", async () => {
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done" as const, text: '{"same":true}' };
+    });
+    const store = pageStore([
+      entity({
+        id: "vigie-object",
+        type: "Object",
+        name: "Vigierisc /ATRISC",
+        normName: "vigierisc atrisc",
+        factIds: ["fact-1"],
+      }),
+      entity({
+        id: "vigie-org",
+        type: "Organization",
+        name: "VigieRisc",
+        normName: "vigierisc",
+        degree: 6,
+        factIds: ["fact-2", "fact-3"],
+      }),
+    ]);
+    await consolidateMemoryGraph(deps(run), payload, store);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(store.merges).toEqual([
+      expect.objectContaining({
+        keepId: "vigie-org",
+        dropId: "vigie-object",
+        type: "Organization",
+        sourceTypes: ["Object", "Organization"],
+      }),
+    ]);
+    expect(store.merges[0]?.name).toBe("Vigierisc /ATRISC");
+    expect(store.merges[0]?.aliases).toContain("VigieRisc");
+    expect(store.merges[0]?.aliasNorms).toContain("vigierisc");
+  });
+
+  it("does not write during a dry run and is stable when repeated", async () => {
+    const run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done" as const, text: '{"same":true,"type":"Organization"}' };
+    });
+    const entities = [
+      entity({
+        id: "vigie-object",
+        type: "Object",
+        name: "Vigierisc /ATRISC",
+        normName: "vigierisc atrisc",
+      }),
+      entity({
+        id: "vigie-org",
+        type: "Organization",
+        name: "VigieRisc",
+        normName: "vigierisc",
+        factIds: ["fact-1"],
+      }),
+    ];
+    const store = pageStore(entities);
+    await consolidateMemoryGraph(deps(run), { ...payload, dryRun: true }, store);
+    await consolidateMemoryGraph(deps(run), { ...payload, dryRun: true }, store);
+    expect(run).not.toHaveBeenCalled();
+    expect(store.merges).toEqual([]);
+    expect(store.renames).toEqual([]);
+    expect(store.collapses.every((call) => call.dryRun && call.scope === "space")).toBe(true);
+    const preview = await previewMemoryConsolidation(store, { spaceId: "space-1" });
+    expect(preview.confirms).toEqual([
+      expect.objectContaining({
+        leftName: "Vigierisc /ATRISC",
+        rightName: "VigieRisc",
+        type: "Organization",
+        reason: "type-conflict",
+      }),
+    ]);
+    expect(preview.merges).toEqual([]);
+    const again = await previewMemoryConsolidation(store, { spaceId: "space-1" });
+    expect(again.confirms).toEqual(preview.confirms);
+  });
+
   it("relabels a same-name type conflict when the model picks a type", async () => {
     const run = vi.fn<AgentRuntime["run"]>(async function* () {
       yield { type: "done" as const, text: '{"same":true,"type":"Object"}' };
@@ -719,6 +810,71 @@ describe("consolidateMemoryGraph", () => {
         name: "Quill",
       }),
     ]);
+  });
+
+  it("confirms VigieRisc across types when a slash segment matches", () => {
+    const project = entity({
+      id: "vigie-object",
+      type: "Object",
+      name: "Vigierisc /ATRISC",
+      normName: "vigierisc atrisc",
+      degree: 2,
+      factIds: ["fact-1"],
+    });
+    const org = entity({
+      id: "vigie-org",
+      type: "Organization",
+      name: "VigieRisc",
+      normName: "vigierisc",
+      degree: 6,
+      factIds: ["fact-2", "fact-3"],
+    });
+    expect(classifyConsolidationPair(project, org)).toEqual({
+      action: "confirm",
+      reason: "type-conflict",
+    });
+    expect(classifyConsolidationPair({ ...project, type: "Organization" }, org)).toEqual({
+      action: "merge",
+      reason: "alias",
+    });
+    const accented = entity({
+      id: "school",
+      type: "Organization",
+      name: "École",
+      normName: "école",
+    });
+    const plain = entity({
+      id: "school-plain",
+      type: "Object",
+      name: "Ecole",
+      normName: "ecole",
+    });
+    expect(classifyConsolidationPair(accented, plain)).toEqual({
+      action: "confirm",
+      reason: "type-conflict",
+    });
+    expect(chooseWinningType(project, org, "Object")).toBe("Organization");
+    const plan = planCanonicalEntity(project, org, "Organization");
+    expect(plan.keep.id).toBe("vigie-org");
+    expect(plan.type).toBe("Organization");
+    expect(plan.name).toBe("Vigierisc /ATRISC");
+    expect(plan.aliases).toContain("VigieRisc");
+    expect(plan.aliasNorms).toContain("vigierisc");
+    expect(plan.aliasNorms).not.toContain("vigierisc atrisc");
+  });
+
+  it("does not treat a shared word as a cross-type name", () => {
+    expect(
+      classifyConsolidationPair(
+        entity({ id: "person", name: "Nicolas", normName: "nicolas" }),
+        entity({
+          id: "org",
+          type: "Organization",
+          name: "Nicolas Dupont",
+          normName: "nicolas dupont",
+        }),
+      ),
+    ).toEqual({ action: "skip", reason: "type" });
   });
 
   it("leaves a person and an organization split when the model says they differ", async () => {

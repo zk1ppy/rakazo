@@ -160,6 +160,17 @@ export function ownerResolution(
   return { subjectNorm: subject.normName, aliases: set };
 }
 
+/**
+ * Absolute and home-relative filesystem paths. A slash inside a proper name
+ * ("Vigierisc / ATRISC") is an alias separator, not a path.
+ */
+export function isFilesystemPathName(name: string): boolean {
+  const trimmed = name.trim();
+  if (!trimmed) return false;
+  if (/^(?:\/|\\|\.\/|\.\.\/|~\/)/.test(trimmed)) return true;
+  return /^[A-Za-z]:[\\/]/.test(trimmed);
+}
+
 /** Placeholders, option letters, and numbered plan steps. Dated names are kept. */
 export function isNonReferentName(name: string): boolean {
   const cleaned = name
@@ -299,6 +310,7 @@ export const MEMORY_EXTRACT_INSTRUCTIONS = [
   "One canonical proper name per real thing. Aliases are only other proper names, spellings, nicknames, or unique handles for that same thing. Put roles, jobs, titles, and generic nouns in attributes, never in aliases, and never as the entity name.",
   "Do not create an entity whose name is only a role, title, or generic reference. When that reference denotes a person named in the memory, attach relations to that person. Names in the owner-aliases block denote the subject: use the subject's name and do not create a person for them. When the person is not identified, omit the entity.",
   "Do not extract placeholders, option labels such as Option A, or numbered plan steps. Keep real events, including dated sessions.",
+  "Do not extract a filesystem path or a workspace directory as an entity. A proper name that contains a slash, such as a project alias, is not a path.",
   "Attributes are a few stable identity facts, such as a title or handle, not sentences. Dated measurements, scores, ratios, and statuses stay in the memory and must not be attributes.",
   "Relation source and target must name entities in this same object.",
   'Omit anything uncertain. If nothing is worth storing, return {"entities":[],"relations":[]}.',
@@ -777,7 +789,7 @@ function parseEntity(raw: unknown, spaceId: string, ns: string): ParsedEntity | 
   if (!parsed.success) return null;
   const name = parsed.data.name.trim();
   const normName = normalizeEntityName(name);
-  if (normName.length < 2 || isNonReferentName(name)) return null;
+  if (normName.length < 2 || isNonReferentName(name) || isFilesystemPathName(name)) return null;
   const attributes = parsed.data.attributes;
   const { stable, metricOnly } = partitionAttributes(attributes);
   const aliases = acceptedAliases(parsed.data.aliases ?? [], name, attributes);

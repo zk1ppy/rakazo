@@ -669,15 +669,46 @@ export interface ParallelRelationCollapse {
 export async function collapseNeo4jParallelRelations(
   driver: Neo4jMemoryDriver,
   database: string,
-  input: { spaceId: string; ids: string[]; ns?: string },
+  input: {
+    spaceId: string;
+    ids: string[];
+    ns?: string;
+    /** `space` ignores `ids` and scans every RKZ_REL in the space. */
+    scope?: "page" | "space";
+    /** Count duplicates without writing. */
+    dryRun?: boolean;
+  },
   signal?: AbortSignal,
 ): Promise<ParallelRelationCollapse> {
-  if (input.ids.length === 0) return { relations: 0, about: 0, from: 0 };
-  const options: Neo4jRunOptions = { database, access: "write", signal };
-  const params = { spaceId: input.spaceId, ids: input.ids, ns: input.ns ?? "" };
-  const relations = await driver.run(COLLAPSE_RELATIONS, params, options);
-  const about = await driver.run(COLLAPSE_ABOUT, params, options);
-  const fromEdges = await driver.run(COLLAPSE_FROM, params, options);
+  const scope = input.scope ?? "page";
+  if (scope === "page" && input.ids.length === 0) return { relations: 0, about: 0, from: 0 };
+  const options: Neo4jRunOptions = {
+    database,
+    access: input.dryRun ? "read" : "write",
+    signal,
+  };
+  const params = {
+    spaceId: input.spaceId,
+    ids: input.ids,
+    ns: input.ns ?? "",
+    scope,
+    types: [...NEO4J_ENTITY_TYPES],
+  };
+  const relations = await driver.run(
+    input.dryRun ? COLLAPSE_RELATIONS_PREVIEW : COLLAPSE_RELATIONS,
+    params,
+    options,
+  );
+  const about = await driver.run(
+    input.dryRun ? COLLAPSE_ABOUT_PREVIEW : COLLAPSE_ABOUT,
+    params,
+    options,
+  );
+  const fromEdges = await driver.run(
+    input.dryRun ? COLLAPSE_FROM_PREVIEW : COLLAPSE_FROM,
+    params,
+    options,
+  );
   return {
     relations: asNumber(relations.records[0]?.get("removed")),
     about: asNumber(about.records[0]?.get("removed")),
@@ -955,11 +986,16 @@ export interface Neo4jConsolidationList {
   ids?: string[];
 }
 
+/** A POLE+O node. :Entity is normal. A type label or entityType alone still counts. */
+const CONSOLIDATION_NODE = `(e:Entity OR e:Person OR e:Object OR e:Location OR e:Event OR e:Organization OR coalesce(e.entityType, '') IN ['Person','Object','Location','Event','Organization'])`;
+const CONSOLIDATION_NEIGHBOR = `(neighbor:Entity OR neighbor:Person OR neighbor:Object OR neighbor:Location OR neighbor:Event OR neighbor:Organization OR coalesce(neighbor.entityType, '') IN ['Person','Object','Location','Event','Organization'])`;
+
 const CONSOLIDATION_ENTITY_QUERY = `
 WITH e
 ORDER BY e.id
 LIMIT $limit
-OPTIONAL MATCH (e)-[:${NEO4J_ENTITY_RELATIONSHIP}]-(neighbor:Rkz:Entity {spaceId: e.spaceId, ns: e.ns})
+OPTIONAL MATCH (e)-[:${NEO4J_ENTITY_RELATIONSHIP}]-(neighbor:Rkz {spaceId: e.spaceId, ns: e.ns})
+WHERE ${CONSOLIDATION_NEIGHBOR}
 WITH e, [id IN collect(DISTINCT neighbor.id) WHERE id IS NOT NULL AND id <> e.id][0..24] AS neighborIds
 OPTIONAL MATCH (fact:Rkz:Fact {spaceId: e.spaceId})-[:ABOUT]->(e)
 WITH e, neighborIds, [id IN collect(DISTINCT fact.id) WHERE id IS NOT NULL][0..16] AS factIds
@@ -1022,11 +1058,13 @@ export async function listNeo4jConsolidationEntities(
   const byIds = Boolean(input.ids);
   const result = await driver.run(
     byIds
-      ? `MATCH (e:Rkz:Entity {spaceId: $spaceId})
+      ? `MATCH (e:Rkz {spaceId: $spaceId})
          WHERE e.id IN $ids AND ($ns = '' OR e.ns = $ns)
+           AND ${CONSOLIDATION_NODE}
          ${CONSOLIDATION_ENTITY_QUERY}`
-      : `MATCH (e:Rkz:Entity {spaceId: $spaceId})
+      : `MATCH (e:Rkz {spaceId: $spaceId})
          WHERE ($ns = '' OR e.ns = $ns) AND ($afterId = '' OR e.id > $afterId)
+           AND ${CONSOLIDATION_NODE}
          ${CONSOLIDATION_ENTITY_QUERY}`,
     {
       spaceId: input.spaceId,
@@ -1116,23 +1154,18 @@ export async function mergeNeo4jDuplicateEntity(
     crossType,
   };
   const guard = await driver.run(
-    `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
-     MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})
+    `MATCH (keep:Rkz {id: $keepId, spaceId: $spaceId})
+     MATCH (drop:Rkz {id: $dropId, spaceId: $spaceId})
      WHERE keep.id <> drop.id
        AND keep.ns = drop.ns
        AND keep.ns IS NOT NULL
        AND (
          (
            $crossType = false
-           AND (
-             ($type IN labels(keep) AND $type IN labels(drop))
-             OR (
-               keep.entityType = $type
-               AND drop.entityType = $type
-               AND none(label IN labels(keep) WHERE label IN $types AND label <> $type)
-               AND none(label IN labels(drop) WHERE label IN $types AND label <> $type)
-             )
-           )
+           AND ($type IN labels(keep) OR keep.entityType = $type)
+           AND ($type IN labels(drop) OR drop.entityType = $type)
+           AND none(label IN labels(keep) WHERE label IN $types AND label <> $type)
+           AND none(label IN labels(drop) WHERE label IN $types AND label <> $type)
          )
          OR (
            $crossType = true
@@ -1155,7 +1188,7 @@ export async function mergeNeo4jDuplicateEntity(
   if (!guard.records[0]) return { merged: false, reason: "guard" };
 
   const foreign = await driver.run(
-    `MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})-[rel]-(other)
+    `MATCH (drop:Rkz {id: $dropId, spaceId: $spaceId})-[rel]-(other)
      WHERE other.spaceId IS NULL OR other.spaceId <> $spaceId
      RETURN count(rel) AS foreign`,
     scope,
@@ -1166,7 +1199,7 @@ export async function mergeNeo4jDuplicateEntity(
   }
 
   const typed = await driver.run(
-    `MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})-[rel]-()
+    `MATCH (drop:Rkz {id: $dropId, spaceId: $spaceId})-[rel]-()
      RETURN DISTINCT type(rel) AS relType`,
     scope,
     read,
@@ -1179,8 +1212,8 @@ export async function mergeNeo4jDuplicateEntity(
   }
 
   await driver.run(
-    `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
-     MATCH (src)-[rel:ABOUT]->(drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})
+    `MATCH (keep:Rkz {id: $keepId, spaceId: $spaceId})
+     MATCH (src)-[rel:ABOUT]->(drop:Rkz {id: $dropId, spaceId: $spaceId})
      WHERE src.spaceId = $spaceId AND src <> keep AND src <> drop
      MERGE (src)-[:ABOUT]->(keep)
      DELETE rel`,
@@ -1189,6 +1222,8 @@ export async function mergeNeo4jDuplicateEntity(
   );
   await driver.run(rewireEntityRelation("out"), scope, write);
   await driver.run(rewireEntityRelation("in"), scope, write);
+  await driver.run(rewireUntypedEntityRelation("out"), scope, write);
+  await driver.run(rewireUntypedEntityRelation("in"), scope, write);
   await driver.run(rewireFrom("out"), scope, write);
   await driver.run(rewireFrom("in"), scope, write);
   for (const relType of relTypes) {
@@ -1197,22 +1232,23 @@ export async function mergeNeo4jDuplicateEntity(
     await driver.run(rewireCopiedRelationship(relType, "in"), scope, write);
   }
   await driver.run(
-    `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})-[rel]-(drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})
+    `MATCH (keep:Rkz {id: $keepId, spaceId: $spaceId})-[rel]-(drop:Rkz {id: $dropId, spaceId: $spaceId})
      DELETE rel`,
     scope,
     write,
   );
   await driver.run(
-    `MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})-[rel]-(drop)
+    `MATCH (drop:Rkz {id: $dropId, spaceId: $spaceId})-[rel]-(drop)
      DELETE rel`,
     scope,
     write,
   );
   const committed = await driver.run(
-    `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
-     MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})
+    `MATCH (keep:Rkz {id: $keepId, spaceId: $spaceId})
+     MATCH (drop:Rkz {id: $dropId, spaceId: $spaceId})
      WHERE keep.ns = drop.ns AND keep.id <> drop.id AND NOT (drop)--()
-     SET keep:${label},
+     SET keep:Entity,
+         keep:${label},
          keep.entityType = $type,
          keep.name = $name,
          keep.normName = $normName,
@@ -1301,8 +1337,8 @@ export async function renameNeo4jEntity(
 function rewireEntityRelation(direction: "in" | "out"): string {
   const match =
     direction === "out"
-      ? `MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})-[rel:${NEO4J_ENTITY_RELATIONSHIP}]->(other)`
-      : `MATCH (other)-[rel:${NEO4J_ENTITY_RELATIONSHIP}]->(drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})`;
+      ? `MATCH (drop:Rkz {id: $dropId, spaceId: $spaceId})-[rel:${NEO4J_ENTITY_RELATIONSHIP}]->(other)`
+      : `MATCH (other)-[rel:${NEO4J_ENTITY_RELATIONSHIP}]->(drop:Rkz {id: $dropId, spaceId: $spaceId})`;
   const existing =
     direction === "out"
       ? `OPTIONAL MATCH (keep)-[existing:${NEO4J_ENTITY_RELATIONSHIP}]->(other)`
@@ -1328,7 +1364,7 @@ function rewireEntityRelation(direction: "in" | "out"): string {
     "nextSources",
     "nextSource",
   );
-  return `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
+  return `MATCH (keep:Rkz {id: $keepId, spaceId: $spaceId})
      ${match}
      WHERE other.spaceId = $spaceId AND other <> keep AND other <> drop
      WITH keep, drop, other, rel, ${cypherRelationType("rel.type")} AS relType
@@ -1372,17 +1408,40 @@ function rewireEntityRelation(direction: "in" | "out"): string {
      DELETE rel`;
 }
 
+/**
+ * Move edges that have no business type onto the survivor, one for one.
+ * They are not folded into a typed edge. Leaving them on the duplicate makes
+ * `NOT (drop)--()` fail and the confirmed merge returns merged=0.
+ */
+function rewireUntypedEntityRelation(direction: "in" | "out"): string {
+  const match =
+    direction === "out"
+      ? `MATCH (drop:Rkz {id: $dropId, spaceId: $spaceId})-[rel:${NEO4J_ENTITY_RELATIONSHIP}]->(other)`
+      : `MATCH (other)-[rel:${NEO4J_ENTITY_RELATIONSHIP}]->(drop:Rkz {id: $dropId, spaceId: $spaceId})`;
+  const create =
+    direction === "out"
+      ? `CREATE (keep)-[moved:${NEO4J_ENTITY_RELATIONSHIP}]->(other)`
+      : `CREATE (other)-[moved:${NEO4J_ENTITY_RELATIONSHIP}]->(keep)`;
+  return `MATCH (keep:Rkz {id: $keepId, spaceId: $spaceId})
+     ${match}
+     WHERE other.spaceId = $spaceId AND other <> keep AND other <> drop
+       AND ${cypherRelationType("rel.type")} = ''
+     ${create}
+     SET moved = properties(rel)
+     DELETE rel`;
+}
+
 function rewireFrom(direction: "in" | "out"): string {
   if (direction === "out") {
-    return `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
-     MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})-[rel:FROM]->(other)
+    return `MATCH (keep:Rkz {id: $keepId, spaceId: $spaceId})
+     MATCH (drop:Rkz {id: $dropId, spaceId: $spaceId})-[rel:FROM]->(other)
      WHERE other.spaceId = $spaceId AND other <> keep AND other <> drop
      MERGE (keep)-[moved:FROM]->(other)
      ON CREATE SET moved = properties(rel)
      DELETE rel`;
   }
-  return `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
-     MATCH (other)-[rel:FROM]->(drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})
+  return `MATCH (keep:Rkz {id: $keepId, spaceId: $spaceId})
+     MATCH (other)-[rel:FROM]->(drop:Rkz {id: $dropId, spaceId: $spaceId})
      WHERE other.spaceId = $spaceId AND other <> keep AND other <> drop
      MERGE (other)-[moved:FROM]->(keep)
      ON CREATE SET moved = properties(rel)
@@ -1394,15 +1453,15 @@ function rewireCopiedRelationship(relType: string, direction: "in" | "out"): str
     throw new Error("relationship type is not safe to rewire");
   }
   if (direction === "out") {
-    return `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
-     MATCH (drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})-[rel:${relType}]->(other)
+    return `MATCH (keep:Rkz {id: $keepId, spaceId: $spaceId})
+     MATCH (drop:Rkz {id: $dropId, spaceId: $spaceId})-[rel:${relType}]->(other)
      WHERE other <> keep AND other <> drop
      MERGE (keep)-[moved:${relType}]->(other)
      ON CREATE SET moved = properties(rel)
      DELETE rel`;
   }
-  return `MATCH (keep:Rkz:Entity {id: $keepId, spaceId: $spaceId})
-     MATCH (other)-[rel:${relType}]->(drop:Rkz:Entity {id: $dropId, spaceId: $spaceId})
+  return `MATCH (keep:Rkz {id: $keepId, spaceId: $spaceId})
+     MATCH (other)-[rel:${relType}]->(drop:Rkz {id: $dropId, spaceId: $spaceId})
      WHERE other <> keep AND other <> drop
      MERGE (other)-[moved:${relType}]->(keep)
      ON CREATE SET moved = properties(rel)
@@ -1548,18 +1607,26 @@ SET r.factIds = [$factId],
 RETURN a.id AS id
 `;
 
-const COLLAPSE_RELATIONS = `
-MATCH (a:Rkz:Entity)-[r:${NEO4J_ENTITY_RELATIONSHIP}]->(b:Rkz:Entity)
+const RELATION_ENDPOINT = `(node:Entity OR node:Person OR node:Object OR node:Location OR node:Event OR node:Organization OR coalesce(node.entityType, '') IN $types)`;
+
+/** Directed pairs. An empty business type is its own bucket and is not mixed with a named type. */
+const COLLAPSE_RELATION_GROUPS = `
+MATCH (a:Rkz)-[r:${NEO4J_ENTITY_RELATIONSHIP}]->(b:Rkz)
 WHERE a.spaceId = $spaceId AND b.spaceId = $spaceId
   AND a.id <> b.id
-  AND (a.id IN $ids OR b.id IN $ids)
+  AND ${RELATION_ENDPOINT.replaceAll("node", "a")}
+  AND ${RELATION_ENDPOINT.replaceAll("node", "b")}
+  AND ($scope = 'space' OR a.id IN $ids OR b.id IN $ids)
   AND ($ns = '' OR (a.ns = $ns AND b.ns = $ns))
 WITH a, b, ${cypherRelationType("r.type")} AS relType, r
-WHERE relType <> ''
 ORDER BY coalesce(r.createdAt, '9999'), elementId(r)
 WITH a, b, relType, collect(r) AS rels
+`;
+
+const COLLAPSE_RELATIONS = `
+${COLLAPSE_RELATION_GROUPS}
 WHERE size(rels) > 1
-   OR any(edge IN rels WHERE coalesce(edge.type, '') <> relType OR edge.factIds IS NULL)
+   OR any(edge IN rels WHERE coalesce(edge.type, '') <> relType OR edge.factIds IS NULL OR edge.mentions IS NULL)
 WITH a, b, relType, rels, head(rels) AS keeper
 WHERE keeper IS NOT NULL
 WITH keeper, rels, relType,
@@ -1568,18 +1635,19 @@ WITH keeper, rels, relType,
      ${cypherReduceEarlier("rels")} AS firstSeen,
      ${cypherReduceLater("rels")} AS lastSeen,
      ${cypherReduceTime("rels")} AS priorTime,
-     any(edge IN rels WHERE edge.validTo IS NULL) AS active
+     any(edge IN rels WHERE edge.validTo IS NULL) AS active,
+     reduce(weight = 0, edge IN rels | weight + CASE WHEN edge.mentions IS NULL OR edge.mentions < 1 THEN 1 ELSE edge.mentions END) AS weight
 OPTIONAL MATCH (f:Rkz:Fact)-[:FROM]->(src:Rkz)
 WHERE f.spaceId = $spaceId AND src.spaceId = $spaceId AND f.id IN factIds
-WITH keeper, rels, relType, factIds, edgeSources, firstSeen, lastSeen, priorTime, active,
+WITH keeper, rels, relType, factIds, edgeSources, firstSeen, lastSeen, priorTime, active, weight,
      collect(DISTINCT src.id) AS lookedUp
-WITH keeper, rels, relType, factIds, firstSeen, lastSeen, priorTime, active,
+WITH keeper, rels, relType, factIds, firstSeen, lastSeen, priorTime, active, weight,
      ${cypherUnionIds("[id IN lookedUp WHERE id IS NOT NULL]", "edgeSources", "joinedSources", "joinedSource")} AS sourceIds
 SET keeper.type = relType,
     keeper.factIds = factIds,
     keeper.factId = head(factIds),
     keeper.sourceIds = sourceIds,
-    keeper.mentions = size(factIds),
+    keeper.mentions = CASE WHEN size(factIds) > 0 THEN size(factIds) ELSE weight END,
     keeper.firstSeen = coalesce(firstSeen, keeper.firstSeen),
     keeper.validFrom = coalesce(firstSeen, keeper.validFrom),
     keeper.lastSeen = coalesce(lastSeen, keeper.lastSeen),
@@ -1594,11 +1662,19 @@ WITH sum(size(extras)) AS removed
 RETURN removed
 `;
 
-const COLLAPSE_ABOUT = `
+const COLLAPSE_RELATIONS_PREVIEW = `
+${COLLAPSE_RELATION_GROUPS}
+WHERE size(rels) > 1
+WITH sum(size(rels) - 1) AS removed
+RETURN removed
+`;
+
+const COLLAPSE_ABOUT_GROUPS = `
 MATCH (a:Rkz)-[r:ABOUT]->(b:Rkz)
 WHERE a.spaceId = $spaceId AND b.spaceId = $spaceId
   AND (
-    a.id IN $ids OR b.id IN $ids
+    $scope = 'space'
+    OR a.id IN $ids OR b.id IN $ids
     OR EXISTS {
       MATCH (a)-[:ABOUT]->(mentioned:Rkz)
       WHERE mentioned.id IN $ids AND mentioned.spaceId = $spaceId
@@ -1608,6 +1684,10 @@ WHERE a.spaceId = $spaceId AND b.spaceId = $spaceId
 WITH a, b, r
 ORDER BY elementId(r)
 WITH a, b, collect(r) AS rels
+`;
+
+const COLLAPSE_ABOUT = `
+${COLLAPSE_ABOUT_GROUPS}
 WHERE size(rels) > 1
 WITH tail(rels) AS extras
 FOREACH (extra IN extras | DELETE extra)
@@ -1615,11 +1695,19 @@ WITH sum(size(extras)) AS removed
 RETURN removed
 `;
 
-const COLLAPSE_FROM = `
+const COLLAPSE_ABOUT_PREVIEW = `
+${COLLAPSE_ABOUT_GROUPS}
+WHERE size(rels) > 1
+WITH sum(size(rels) - 1) AS removed
+RETURN removed
+`;
+
+const COLLAPSE_FROM_GROUPS = `
 MATCH (a:Rkz)-[r:FROM]->(b:Rkz)
 WHERE a.spaceId = $spaceId AND b.spaceId = $spaceId
   AND (
-    a.id IN $ids OR b.id IN $ids
+    $scope = 'space'
+    OR a.id IN $ids OR b.id IN $ids
     OR EXISTS {
       MATCH (a)-[:ABOUT]->(mentioned:Rkz)
       WHERE mentioned.id IN $ids AND mentioned.spaceId = $spaceId
@@ -1629,6 +1717,10 @@ WHERE a.spaceId = $spaceId AND b.spaceId = $spaceId
 WITH a, b, r
 ORDER BY elementId(r)
 WITH a, b, collect(r) AS rels
+`;
+
+const COLLAPSE_FROM = `
+${COLLAPSE_FROM_GROUPS}
 WHERE size(rels) > 1
 WITH head(rels) AS keeper, rels, tail(rels) AS extras
 SET keeper.provenance = coalesce(
@@ -1638,6 +1730,13 @@ SET keeper.provenance = coalesce(
 WITH extras
 FOREACH (extra IN extras | DELETE extra)
 WITH sum(size(extras)) AS removed
+RETURN removed
+`;
+
+const COLLAPSE_FROM_PREVIEW = `
+${COLLAPSE_FROM_GROUPS}
+WHERE size(rels) > 1
+WITH sum(size(rels) - 1) AS removed
 RETURN removed
 `;
 

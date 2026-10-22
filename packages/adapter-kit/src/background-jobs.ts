@@ -44,6 +44,7 @@ const payloadSchemas = {
     attempt: z.number().int().min(0).max(8),
     scheduleGeneration: z.number().int().min(0).max(400),
     automatic: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
   }),
   // Graphile cron merges `{ _cron: { ts, backfilled } }` into the payload.
   "memory.dream": z.preprocess((value) => {
