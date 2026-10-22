@@ -9,6 +9,7 @@ import { DesktopSandboxProvider } from "./desktop-sandbox.js";
 import { DockerSandboxProvider } from "./docker-sandbox.js";
 import { FakeSandboxProvider } from "./fake-sandbox.js";
 import { createRunSandbox, HostAwareSandbox, sandboxKindForBot } from "./host-aware-sandbox.js";
+import { HostComputerSandbox } from "./host-computer-sandbox.js";
 
 const ctx = {
   operationId: "1",
@@ -26,6 +27,37 @@ describe("host-aware sandbox", () => {
   });
 
   afterEach(() => vi.restoreAllMocks());
+
+  it("never falls back to backend execution when the native connection is missing", async () => {
+    const provision = vi.spyOn(DesktopSandboxProvider.prototype, "provision");
+    const sandbox = createRunSandbox("docker", {
+      prisma: {
+        deploymentSettings: { findUnique: vi.fn(async () => ({ computerHost: "this-mac" })) },
+      } as unknown as PrismaClient,
+    });
+    await expect(sandbox.provision({ botId: "host", homePath: "/unused" }, ctx)).rejects.toThrow(
+      "requires the desktop app",
+    );
+    expect(provision).not.toHaveBeenCalled();
+  });
+
+  it("refuses an old host reference once the deployment switches back to Docker", async () => {
+    const host = new DesktopSandboxProvider();
+    const execute = vi.spyOn(host, "execute");
+    const sandbox = new HostAwareSandbox(new FakeSandboxProvider(), host, async () => false);
+    const computer: ComputerRef = {
+      id: "old-host",
+      botId: "host",
+      kind: "desktop",
+      providerRef: "old-host",
+    };
+    const attempt = async () => {
+      for await (const _event of sandbox.execute(computer, { argv: ["echo", "no"] }, ctx)) {
+      }
+    };
+    await expect(attempt()).rejects.toThrow("disabled");
+    expect(execute).not.toHaveBeenCalled();
+  });
 
   it("exposes and routes page commands through the production Docker wrapper", async () => {
     const result = {
@@ -171,6 +203,25 @@ describe("host-aware sandbox", () => {
     }
     expect(code).toBe(0);
     await desktop.destroy(computer, ctx);
+  });
+
+  it("never runs bot commands on a production backend host", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    try {
+      expect(() => createRunSandbox("desktop", {})).toThrow(
+        "SANDBOX_PROVIDER=desktop runs bot commands directly on this host",
+      );
+      // The desktop app's backend reaches this computer only through the authenticated bridge.
+      const bridged = new HostAwareSandbox(
+        new FakeSandboxProvider(),
+        new HostComputerSandbox("", ""),
+        async () => true,
+      );
+      expect(bridged.describe().id).toBe("fake");
+      expect(new HostComputerSandbox("", "").describe().id).toBe("desktop");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("only switches docker deployments onto this Mac", () => {

@@ -1,6 +1,7 @@
-import type { MouseEvent, ReactNode } from "react";
+import type { CSSProperties, MouseEvent, ReactNode } from "react";
 import { createContext, memo, useCallback, useContext, useRef, useState } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import type { Components } from "react-markdown";
+import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { HastNode } from "./table-utils";
 import "./markdown.web.css";
@@ -36,6 +37,8 @@ import {
 } from "./markdown";
 import { useMarkdownLinkCopy } from "./markdown-link-prompt";
 import { MarkdownTable, MarkdownTableSourceContext } from "./markdown-table";
+import { isMermaidFence, mermaidSvgImage } from "./mermaid";
+import { useMermaidSvg } from "./mermaid.web";
 
 function preserveSkippedTableText() {
   return (tree: HastNode) => {
@@ -55,37 +58,127 @@ function preserveSkippedTableText() {
   };
 }
 
-function CodeBlock(props: React.ComponentPropsWithoutRef<"pre">) {
-  const preRef = useRef<HTMLPreElement>(null);
+function CopyButton({ read, label }: { read: () => string; label: string }) {
   const resetTimerRef = useRef<number | undefined>(undefined);
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(() => {
     if (!navigator.clipboard) return;
-    const text = preRef.current?.textContent ?? "";
     navigator.clipboard
-      .writeText(text)
+      .writeText(read())
       .then(() => {
         setCopied(true);
         window.clearTimeout(resetTimerRef.current);
         resetTimerRef.current = window.setTimeout(() => setCopied(false), 1500);
       })
       .catch(() => {});
-  }, []);
+  }, [read]);
+
+  return (
+    <button
+      type="button"
+      className="rk-chat-markdown-copy"
+      onClick={handleCopy}
+      aria-label={copied ? "Copied" : label}
+    >
+      {copied ? <CheckIcon /> : <CopyIcon />}
+    </button>
+  );
+}
+
+function CodeBlock({
+  copyable,
+  ...props
+}: React.ComponentPropsWithoutRef<"pre"> & { copyable: boolean }) {
+  const preRef = useRef<HTMLPreElement>(null);
+  // The parser ends a fence's code with a newline the author didn't write.
+  const readCode = useCallback(() => (preRef.current?.textContent ?? "").replace(/\n$/, ""), []);
 
   return (
     <div className="rk-chat-markdown-pre-wrap">
       <pre {...props} ref={preRef} />
-      <button
-        type="button"
-        className="rk-chat-markdown-copy"
-        onClick={handleCopy}
-        aria-label={copied ? "Copied" : "Copy code"}
-      >
-        {copied ? <CheckIcon /> : <CopyIcon />}
-      </button>
+      {copyable ? <CopyButton read={readCode} label="Copy code" /> : null}
     </div>
   );
+}
+
+/** Original markdown while streaming, before any display-only closing fence is appended. */
+const StreamingSourceContext = createContext<string | undefined>(undefined);
+
+function codeElement(node: MarkdownHast | undefined) {
+  return node?.children?.find((child) => child.tagName === "code");
+}
+
+function codeText(code: MarkdownHast | undefined) {
+  return (code?.children ?? []).map((child) => child.value ?? "").join("");
+}
+
+/** The source of a ```mermaid fence, or undefined for any other block. */
+function mermaidFenceSource(node: MarkdownHast | undefined): string | undefined {
+  const code = codeElement(node);
+  const classNames = code?.properties?.className;
+  const language = Array.isArray(classNames)
+    ? classNames.find((name) => typeof name === "string" && name.startsWith("language-"))
+    : undefined;
+  if (typeof language !== "string" || !isMermaidFence(language.slice("language-".length))) {
+    return undefined;
+  }
+  const source = codeText(code);
+  return source.trim() ? source.trimEnd() : undefined;
+}
+
+function MermaidDiagram({ source, fallback }: { source: string; fallback: ReactNode }) {
+  const svg = useMermaidSvg(source);
+  const readSource = useCallback(() => source, [source]);
+  const image = svg ? mermaidSvgImage(svg) : undefined;
+  // Rendering, or source Mermaid cannot draw: the code block keeps the content readable.
+  if (!image) return fallback;
+  return (
+    <div className="rk-chat-markdown-pre-wrap">
+      <figure className="rk-chat-markdown-diagram" data-testid="chat-diagram">
+        {/* An image, not inline SVG: nothing in a diagram can script or style the page. */}
+        <img
+          src={image.src}
+          width={image.width}
+          height={image.height}
+          alt={image.alt}
+          style={{ "--rk-diagram-width": `${image.width}px` } as CSSProperties}
+        />
+      </figure>
+      <CopyButton read={readSource} label="Copy diagram source" />
+    </div>
+  );
+}
+
+function MarkdownPre({
+  node,
+  ...props
+}: React.ComponentPropsWithoutRef<"pre"> & { node?: MarkdownHast }) {
+  const streamingSource = useContext(StreamingSourceContext);
+  const diagram = mermaidFenceSource(node);
+  // An empty fence has nothing to copy.
+  const codeBlock = <CodeBlock {...props} copyable={/\S/.test(codeText(codeElement(node)))} />;
+  if (diagram === undefined) return codeBlock;
+  // Parser offsets identify the fence inside quotes and lists too. Inspect the original source,
+  // since a display-only closing fence must never trigger a diagram render.
+  if (streamingSource !== undefined) {
+    const start = node?.position?.start?.offset;
+    const end = node?.position?.end?.offset;
+    const fence = start === undefined ? "" : streamingSource.slice(start, end);
+    const opening = fence.match(/^(`{3,}|~{3,})/);
+    const lastLine = fence.slice(fence.lastIndexOf("\n") + 1);
+    const closing = lastLine.match(/^(?:[ \t]*>[ \t]?)*[ \t]*(`{3,}|~{3,})[ \t]*$/);
+    if (
+      !fence.includes("\n") ||
+      !opening?.[1] ||
+      !closing?.[1] ||
+      opening[1][0] !== closing[1][0] ||
+      closing[1].length < opening[1].length
+    ) {
+      return codeBlock;
+    }
+  }
+  return <MermaidDiagram source={diagram} fallback={codeBlock} />;
 }
 
 type EnclosingLink = false | "open" | "rejected";
@@ -181,6 +274,7 @@ type MarkdownHast = {
   value?: string;
   properties?: Record<string, unknown>;
   children?: MarkdownHast[];
+  position?: { start?: { offset?: number }; end?: { offset?: number } };
 };
 
 function hastString(value: unknown): string | undefined {
@@ -358,10 +452,15 @@ function LinkFavicon({ href }: { href: string }) {
 function WebsiteLink({
   href,
   children,
+  className,
   ...props
 }: React.ComponentPropsWithoutRef<"a"> & { href: string; children: ReactNode }) {
   return (
-    <ConfirmableAnchor {...props} href={href} className="rk-chat-link">
+    <ConfirmableAnchor
+      {...props}
+      href={href}
+      className={className ? `rk-chat-link ${className}` : "rk-chat-link"}
+    >
       <LinkFavicon href={href} />
       {/* bdi: direction characters in a label cannot reorder the text around the link. */}
       <bdi className="rk-chat-link-label">{children}</bdi>
@@ -406,9 +505,7 @@ const components: Components = {
       <MarkdownImage src={typeof src === "string" ? src : undefined} alt={alt} title={title} />
     );
   },
-  pre({ node: _node, ...props }) {
-    return <CodeBlock {...props} />;
-  },
+  pre: MarkdownPre,
   table({ node, children, ...props }) {
     return (
       <MarkdownTable node={node} tableProps={props}>
@@ -426,11 +523,11 @@ export function LinkifiedText({ children }: { children: string }) {
         part.type === "text" ? (
           part.value
         ) : linkFaviconOrigin(part.href) ? (
-          <WebsiteLink key={index} href={part.href}>
+          <WebsiteLink key={index} href={part.href} className="rk-chat-link-in-bubble">
             {linkLabel(part.value, part.href)}
           </WebsiteLink>
         ) : (
-          <ConfirmableAnchor key={index} href={part.href} className="text-link underline">
+          <ConfirmableAnchor key={index} href={part.href} className="underline">
             {part.value}
           </ConfirmableAnchor>
         ),
@@ -453,20 +550,22 @@ export const ChatMarkdown = memo(function ChatMarkdown({
         className={streaming ? "rk-chat-markdown rk-chat-markdown-streaming" : "rk-chat-markdown"}
       >
         <LinkFaviconsPausedContext.Provider value={streaming}>
-          <MarkdownTableSourceContext.Provider value={source}>
-            <ReactMarkdown
-              components={components}
-              remarkPlugins={[remarkGfm]}
-              rehypePlugins={[preserveSkippedTableText]}
-              skipHtml
-              // MarkdownImage decides what an image source may do, so it receives the source as written.
-              urlTransform={(url, key) =>
-                key === "src" ? url : (sanitizeMarkdownUrl(url, true) ?? "")
-              }
-            >
-              {source}
-            </ReactMarkdown>
-          </MarkdownTableSourceContext.Provider>
+          <StreamingSourceContext.Provider value={streaming ? children : undefined}>
+            <MarkdownTableSourceContext.Provider value={source}>
+              <ReactMarkdown
+                components={components}
+                remarkPlugins={[remarkGfm]}
+                rehypePlugins={[preserveSkippedTableText]}
+                skipHtml
+                // MarkdownImage decides what an image source may do, so it receives the source as written.
+                urlTransform={(url, key) =>
+                  key === "src" ? url : (sanitizeMarkdownUrl(url, true) ?? "")
+                }
+              >
+                {source}
+              </ReactMarkdown>
+            </MarkdownTableSourceContext.Provider>
+          </StreamingSourceContext.Provider>
         </LinkFaviconsPausedContext.Provider>
         {streaming ? <span aria-hidden="true" className="rk-chat-markdown-cursor" /> : null}
       </div>

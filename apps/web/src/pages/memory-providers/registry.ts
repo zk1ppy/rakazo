@@ -1,5 +1,6 @@
 import type { SpaceMemoryConfig } from "@rakazo/contracts";
 import type { ComponentType } from "react";
+import { HonchoSettingsForm } from "./HonchoSettingsForm";
 import { Neo4jExtractionSettings, Neo4jSettingsForm } from "./Neo4jSettingsForm";
 import { neo4jConnectedHost } from "./neo4j-settings";
 import { SerenitySettingsForm } from "./SerenitySettingsForm";
@@ -61,6 +62,17 @@ export const MEMORY_PROVIDER_SETTINGS: readonly MemoryProviderSettingsRegistrati
       const endpoint = config.settings.endpoint ?? "Serenity";
       const mode = config.settings.allowWrites === "true" ? "read/write" : "recall only";
       return label ? `Serenity · ${label} · ${mode}` : `Serenity · ${endpoint} · ${mode}`;
+    },
+  },
+  {
+    id: "honcho",
+    name: "Honcho",
+    description: "Hosted or self-hosted Honcho for long-term memory.",
+    SettingsForm: HonchoSettingsForm,
+    connectedLabel: (config) => {
+      const { mode, baseUrl, workspaceId } = config.settings;
+      if (mode === "local") return [`Local · ${baseUrl}`, workspaceId].filter(Boolean).join(" · ");
+      return workspaceId ? `Honcho · ${workspaceId}` : "Honcho Cloud";
     },
   },
   {

@@ -1,17 +1,35 @@
 import { Trans, useLingui } from "@lingui/react/macro";
 import type { AccountSecurity, AvatarStyle } from "@rakazo/contracts";
-import { BotAvatar, Button, Field, FieldLabel, Input, Label, Switch, Toggle } from "@rakazo/ui-web";
-import { ChevronDown } from "lucide-react";
-import type { KeyboardEvent as ReactKeyboardEvent, RefObject } from "react";
-import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
+import { accountDisplay, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "@rakazo/core";
+import {
+  BotAvatar,
+  Button,
+  buttonVariants,
+  Field,
+  FieldLabel,
+  Input,
+  Label,
+  NativeSelect,
+  NativeSelectOption,
+  OptionSelect,
+  Switch,
+  Toggle,
+  ToggleGroup,
+  ToggleGroupItem,
+} from "@rakazo/ui-web";
+import { Disclosure } from "@rakazo/ui-web/components/ui/disclosure";
+import type { RefObject } from "react";
+import { useId, useRef, useState, useSyncExternalStore } from "react";
 import { Link } from "react-router-dom";
 import { AccountAccess } from "../components/AccountAccess";
-import { ApprovalRulesSettings } from "../components/ApprovalRulesSettings";
 import { SuccessPop } from "../components/ai/primitives";
 import { ComputersUnavailableHint } from "../components/ComputersUnavailableHint";
 import { DesktopUpdateSection } from "../components/DesktopUpdates";
-import { SoftwareUpdateSection } from "../components/SoftwareUpdateSection";
+import { PasskeySettings } from "../components/PasskeySettings";
+import type { ServerUpdateLoad } from "../components/SoftwareUpdateSection";
+import { hasServerUpdates, SoftwareUpdateSection } from "../components/SoftwareUpdateSection";
 import { authClient } from "../lib/auth";
+import type { BotsSidebarDensity } from "../lib/bots-sidebar-density-pref";
 import {
   getBotsSidebarDensity,
   setBotsSidebarDensity,
@@ -23,6 +41,7 @@ import {
   subscribeComposerEnterToSend,
 } from "../lib/composer-enter-to-send-pref";
 import { getActiveUiLocale, setUiLocale } from "../lib/i18n";
+import { localTimezone, sameTimeZone, timezoneOptions } from "../lib/local-timezone";
 import {
   getRemoteImagesPreference,
   setRemoteImagesPreference,
@@ -46,6 +65,9 @@ export type SettingsGeneralProps = {
   name: string;
   avatarStyle: AvatarStyle;
   onAvatarStyleChange: (style: AvatarStyle) => Promise<void>;
+  /** The user's saved IANA timezone, or null before one is set. */
+  timezone?: string | null;
+  onTimezoneChange?: (timezone: string) => Promise<void>;
   messagingEnabled?: boolean;
   onOpenMessaging?: () => void;
   isDeploymentOwner?: boolean;
@@ -56,11 +78,14 @@ export function GeneralSettingsPanels({
   name,
   avatarStyle,
   onAvatarStyleChange,
+  timezone = null,
+  onTimezoneChange,
   messagingEnabled = false,
   onOpenMessaging,
   isDeploymentOwner = false,
 }: SettingsGeneralProps) {
   const { t } = useLingui();
+  const account = accountDisplay({ name, email }, t`You`);
   const [accountSecurity, setAccountSecurity] = useState<AccountSecurity | null>(null);
   const [locale, setLocale] = useState<UiLocale>(() => getActiveUiLocale());
   const localeRequestRef = useRef(0);
@@ -93,6 +118,10 @@ export function GeneralSettingsPanels({
   const loadRemoteImagesId = useId();
   const [avatarPending, setAvatarPending] = useState(false);
   const [avatarError, setAvatarError] = useState<string | null>(null);
+  const timezoneId = useId();
+  const [timezonePending, setTimezonePending] = useState(false);
+  const [timezoneError, setTimezoneError] = useState<string | null>(null);
+  const deviceTimezone = localTimezone();
 
   function chooseLocale(next: UiLocale) {
     if (next === locale) return;
@@ -117,29 +146,42 @@ export function GeneralSettingsPanels({
     }
   }
 
+  async function chooseTimezone(next: string) {
+    if (!onTimezoneChange || timezonePending || next === timezone) return;
+    setTimezonePending(true);
+    setTimezoneError(null);
+    try {
+      await onTimezoneChange(next);
+    } catch {
+      setTimezoneError(t`Couldn't update your timezone`);
+    } finally {
+      setTimezonePending(false);
+    }
+  }
+
   return (
     <div className="space-y-5">
       <section className="rounded-xl border border-border px-4 py-4">
         <h3 className="text-[15px] font-medium text-foreground">
           <Trans>Account</Trans>
         </h3>
-        <p className="mt-3 text-[14px] text-foreground/75">{name}</p>
-        {email ? <p className="mt-1 text-[13px] text-muted-foreground/70">{email}</p> : null}
-        <AccountAccess onSecurity={setAccountSecurity} />
+        <p className="mt-3 text-[14px] text-foreground/75">{account.label}</p>
+        {email && account.label !== email ? (
+          <p className="mt-1 text-[13px] text-muted-foreground/70">{email}</p>
+        ) : null}
       </section>
 
       {accountSecurity?.hasPassword && accountSecurity.passwordChangeEnabled !== false ? (
         <ChangePasswordSection email={email} />
       ) : null}
 
+      <PasskeySettings />
+
       {messagingEnabled && onOpenMessaging ? (
         <section className="rounded-xl border border-border px-4 py-4">
           <h3 className="text-[15px] font-medium text-foreground">
             <Trans>Messaging</Trans>
           </h3>
-          <p className="mt-3 text-[13px] text-muted-foreground/70">
-            <Trans>Chat apps, group channels, and agent connections.</Trans>
-          </p>
           <Button variant="secondary" className="mt-3 rounded-full" onClick={onOpenMessaging}>
             <Trans>Manage messaging settings</Trans>
           </Button>
@@ -161,28 +203,31 @@ export function GeneralSettingsPanels({
           <span id={sidebarDensityLabelId} className="text-[13px] text-foreground/75">
             <Trans>Sidebar density</Trans>
           </span>
-          <fieldset
+          <ToggleGroup
             aria-labelledby={sidebarDensityLabelId}
             data-testid="bots-sidebar-density-select"
-            className="grid min-w-0 grid-cols-2 gap-1 rounded-lg bg-muted p-1"
+            value={[sidebarDensity]}
+            onValueChange={([next]) => {
+              if (next) setBotsSidebarDensity(next as BotsSidebarDensity);
+            }}
+            spacing={1}
+            className="grid min-w-0 grid-cols-2 rounded-lg bg-muted p-1"
           >
-            <Toggle
+            <ToggleGroupItem
+              value="comfortable"
               data-testid="bots-sidebar-density-comfortable"
-              pressed={sidebarDensity === "comfortable"}
-              onPressedChange={() => setBotsSidebarDensity("comfortable")}
               className="text-[13px] aria-pressed:bg-background aria-pressed:shadow-sm"
             >
               <Trans>Comfortable</Trans>
-            </Toggle>
-            <Toggle
+            </ToggleGroupItem>
+            <ToggleGroupItem
+              value="compact"
               data-testid="bots-sidebar-density-compact"
-              pressed={sidebarDensity === "compact"}
-              onPressedChange={() => setBotsSidebarDensity("compact")}
               className="text-[13px] aria-pressed:bg-background aria-pressed:shadow-sm"
             >
               <Trans>Compact</Trans>
-            </Toggle>
-          </fieldset>
+            </ToggleGroupItem>
+          </ToggleGroup>
         </div>
       </section>
 
@@ -192,6 +237,50 @@ export function GeneralSettingsPanels({
         </h3>
         <UiLocalePicker value={locale} onChange={chooseLocale} />
       </section>
+
+      {onTimezoneChange ? (
+        <section
+          className="rounded-xl border border-border px-4 py-4"
+          data-testid="timezone-settings"
+        >
+          <h3 id={timezoneId} className="text-[15px] font-medium text-foreground">
+            <Trans>Timezone</Trans>
+          </h3>
+          <NativeSelect
+            aria-labelledby={timezoneId}
+            data-testid="timezone-select"
+            value={timezone ?? deviceTimezone}
+            disabled={timezonePending}
+            onChange={(event) => void chooseTimezone(event.target.value)}
+            className="mt-3 w-full"
+          >
+            {timezoneOptions(timezone ?? deviceTimezone).map((zone) => (
+              <NativeSelectOption key={zone} value={zone}>
+                {zone.replaceAll("_", " ")}
+              </NativeSelectOption>
+            ))}
+          </NativeSelect>
+          {!timezone || !sameTimeZone(timezone, deviceTimezone) ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-3 h-auto max-w-full py-1.5 text-left whitespace-normal"
+              disabled={timezonePending}
+              data-testid="timezone-use-device"
+              onClick={() => void chooseTimezone(deviceTimezone)}
+            >
+              <Trans comment="Switches the saved timezone to this device's, e.g. 'Use Pacific/Auckland'">
+                Use {deviceTimezone.replaceAll("_", " ")}
+              </Trans>
+            </Button>
+          ) : null}
+          {timezoneError ? (
+            <p role="alert" className="mt-3 text-[12.5px] text-destructive">
+              {timezoneError}
+            </p>
+          ) : null}
+        </section>
+      ) : null}
 
       <section
         className="rounded-xl border border-border px-4 py-4"
@@ -229,20 +318,17 @@ export function GeneralSettingsPanels({
       </section>
 
       {isDeploymentOwner ? (
-        <Button variant="outline" render={<Link to="/integrations/setup" />}>
+        <Link to="/integrations/setup" className={buttonVariants({ variant: "outline" })}>
           <Trans>Server integrations</Trans>
-        </Button>
+        </Link>
       ) : null}
 
-      <details data-testid="advanced-settings" className="group rounded-xl border border-border">
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-4 text-[14px] text-foreground/75">
-          <span className="block text-[15px] text-foreground">
-            <Trans>Advanced</Trans>
-          </span>
-          <span aria-hidden="true" className="transition-transform group-open:rotate-90">
-            ›
-          </span>
-        </summary>
+      <Disclosure
+        data-testid="advanced-settings"
+        className="group rounded-xl border border-border"
+        summary={<Trans>Advanced</Trans>}
+        summaryClassName="w-full flex items-center justify-between gap-4 px-4 py-4 text-[14px] text-foreground/75"
+      >
         <div className="border-t border-border px-4 pb-5">
           <div className="flex items-start gap-3 pt-5">
             <Switch
@@ -307,9 +393,10 @@ export function GeneralSettingsPanels({
               <Trans>Load web images automatically</Trans>
             </Label>
           </div>
-          <ApprovalRulesSettings />
         </div>
-      </details>
+      </Disclosure>
+
+      <AccountAccess onSecurity={setAccountSecurity} />
     </div>
   );
 }
@@ -377,15 +464,11 @@ export function ComputerSettingsPanel({
   );
 }
 
-export function UpdatesSettingsPanel({
-  isDeploymentOwner = false,
-}: {
-  isDeploymentOwner?: boolean;
-}) {
+export function UpdatesSettingsPanel({ serverUpdate }: { serverUpdate: ServerUpdateLoad }) {
   return (
     <div className="space-y-5">
       <DesktopUpdateSection />
-      <SoftwareUpdateSection isDeploymentOwner={isDeploymentOwner} />
+      {hasServerUpdates(serverUpdate) ? <SoftwareUpdateSection load={serverUpdate} /> : null}
     </div>
   );
 }
@@ -472,7 +555,7 @@ function ChangePasswordSection({ email }: { email?: string | null }) {
       <div className="mt-4 flex items-center gap-3">
         <Button
           className="rounded-full"
-          disabled={pending || currentPassword.length < 8 || newPassword.length < 8}
+          disabled={pending || !currentPassword || !newPassword}
           onClick={() => void changePassword()}
         >
           {pending ? <Trans>Changing…</Trans> : <Trans>Change password</Trans>}
@@ -502,7 +585,8 @@ function SettingsPasswordInput({
         id={id}
         type="password"
         autoComplete={autoComplete}
-        minLength={8}
+        minLength={autoComplete === "new-password" ? MIN_PASSWORD_LENGTH : undefined}
+        maxLength={MAX_PASSWORD_LENGTH}
         value={value}
         onChange={(event) => onChange(event.target.value)}
       />
@@ -525,23 +609,27 @@ function AppearancePicker({
   ];
 
   return (
-    <fieldset
+    <ToggleGroup
       aria-label={t`Appearance`}
       data-testid="ui-appearance-select"
-      className="mt-3 grid min-w-0 grid-cols-3 gap-1 rounded-lg bg-muted p-1"
+      value={[value]}
+      onValueChange={([next]) => {
+        if (next) onChange(next as AppearancePreference);
+      }}
+      spacing={1}
+      className="mt-3 grid w-full min-w-0 grid-cols-3 rounded-lg bg-muted p-1"
     >
       {options.map((option) => (
-        <Toggle
+        <ToggleGroupItem
           key={option.value}
+          value={option.value}
           data-testid={`ui-appearance-${option.value}`}
-          pressed={option.value === value}
-          onPressedChange={() => onChange(option.value)}
           className="text-[13px] aria-pressed:bg-background aria-pressed:shadow-sm"
         >
           {option.label}
-        </Toggle>
+        </ToggleGroupItem>
       ))}
-    </fieldset>
+    </ToggleGroup>
   );
 }
 
@@ -553,136 +641,14 @@ function UiLocalePicker({
   onChange: (locale: UiLocale) => void;
 }) {
   const { t } = useLingui();
-  const rootRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const listboxId = useId();
-  const selectedIndex = Math.max(0, UI_LOCALES.indexOf(value));
-  const [open, setOpen] = useState(false);
-  const [highlightedIndex, setHighlightedIndex] = useState(selectedIndex);
-
-  useEffect(() => {
-    setHighlightedIndex(selectedIndex);
-    setOpen(false);
-  }, [selectedIndex, value]);
-
-  useEffect(() => {
-    if (!open) return;
-    optionRefs.current[highlightedIndex]?.focus();
-  }, [highlightedIndex, open]);
-
-  useEffect(() => {
-    if (!open) return;
-    function closeOnOutsidePointer(event: PointerEvent) {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    }
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
-  }, [open]);
-
-  function choose(index: number) {
-    const next = UI_LOCALES[index];
-    if (!next) return;
-    onChange(next);
-    setOpen(false);
-    triggerRef.current?.focus();
-  }
-
-  function moveHighlight(index: number) {
-    setHighlightedIndex((index + UI_LOCALES.length) % UI_LOCALES.length);
-  }
-
-  function onTriggerKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
-    if (event.key === "Escape" && open) {
-      event.preventDefault();
-      event.stopPropagation();
-      setOpen(false);
-      return;
-    }
-    if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      setOpen(true);
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setOpen(true);
-      setHighlightedIndex(UI_LOCALES.length - 1);
-    }
-  }
-
-  function onOptionKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, index: number) {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      moveHighlight(index + 1);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      moveHighlight(index - 1);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      setHighlightedIndex(0);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      setHighlightedIndex(UI_LOCALES.length - 1);
-    } else if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      choose(index);
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      setOpen(false);
-      triggerRef.current?.focus();
-    }
-  }
-
   return (
-    <div ref={rootRef} className="relative mt-3">
-      <button
-        ref={triggerRef}
-        type="button"
-        role="combobox"
-        data-testid="ui-locale-select"
-        aria-label={t`Language`}
-        aria-controls={listboxId}
-        aria-expanded={open}
-        aria-haspopup="listbox"
-        className="flex h-9 w-full items-center justify-between rounded-lg border border-input bg-transparent px-3 text-start text-sm text-foreground outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
-        onClick={() => setOpen((current) => !current)}
-        onKeyDown={onTriggerKeyDown}
-      >
-        <span className="min-w-0 truncate">{UI_LOCALE_LABELS[value]}</span>
-        <span className="ml-3 shrink-0 text-muted-foreground" aria-hidden="true">
-          <ChevronDown size={16} strokeWidth={1.8} />
-        </span>
-      </button>
-      {open ? (
-        <div
-          id={listboxId}
-          role="listbox"
-          aria-label={t`Language`}
-          className="rk-scroll absolute left-0 right-0 top-full z-20 mt-1 overflow-y-auto rounded-lg bg-popover p-1 text-popover-foreground shadow-md ring-1 ring-foreground/10"
-        >
-          {UI_LOCALES.map((code, index) => (
-            <button
-              key={code}
-              ref={(element) => {
-                optionRefs.current[index] = element;
-              }}
-              type="button"
-              role="option"
-              aria-selected={code === value}
-              tabIndex={index === highlightedIndex ? 0 : -1}
-              className={`w-full rounded-md px-2 py-1.5 text-start text-sm outline-none hover:bg-accent focus-visible:bg-accent ${
-                code === value ? "bg-accent" : ""
-              }`}
-              onClick={() => choose(index)}
-              onKeyDown={(event) => onOptionKeyDown(event, index)}
-            >
-              {UI_LOCALE_LABELS[code]}
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
+    <OptionSelect
+      className="mt-3"
+      data-testid="ui-locale-select"
+      aria-label={t`Language`}
+      options={UI_LOCALES.map((code) => ({ value: code, label: UI_LOCALE_LABELS[code] }))}
+      value={value}
+      onValueChange={onChange}
+    />
   );
 }

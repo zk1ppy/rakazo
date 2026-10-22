@@ -76,7 +76,12 @@ describe("Neo4j memory integration", () => {
         await recall(provider, "metric", { ...here, botId: "bot-2" }, "isolated", "bot-2"),
       ).toEqual([]);
 
-      expect(await provider.forget({ id: hit!.id!, reason: "cleanup" }, here)).toEqual({
+      expect(
+        await provider.forget(
+          { id: hit!.id!, scope: "isolated", botId: "bot-1", reason: "cleanup" },
+          here,
+        ),
+      ).toEqual({
         ok: true,
         value: { id: hit!.id, expired: true, reason: "cleanup" },
       });

@@ -42,6 +42,7 @@ import type {
   MemoryCommitRequest,
   MemoryExportRequest,
   MemoryReadRequest,
+  MemoryRemoveRequest,
   MemoryRevision,
   MemorySearchRequest,
   MemorySearchResult,
@@ -85,12 +86,24 @@ import type {
   WebSearchCapabilities,
   WebSearchHit,
   WebSearchRequest,
+  WorkspaceDirectoryRequest,
 } from "./types.js";
 
 export interface SandboxProvider {
   /** True when every running minute is billed, so the active-lifetime cap applies. */
   billsWhileRunning?(computer: ComputerRef): boolean;
   describe(): AdapterDescriptor<SandboxCapabilities>;
+  /** Workspace directory operations for hosts without the standard Unix command tools. */
+  workspaceDirectories?(
+    computer: ComputerRef,
+    request: WorkspaceDirectoryRequest,
+    context: AdapterContext,
+  ): Promise<string[]>;
+  /** Native command environment; omitted for providers with a fixed container environment. */
+  environment?(
+    computer: ComputerRef,
+    context: AdapterContext,
+  ): Promise<{ platform: string; home: string; shell: string } | undefined>;
   /** Optional live browser on the same leased screen as observe/act. */
   pageBrowser?(
     computer: ComputerRef,
@@ -121,6 +134,13 @@ export interface SandboxProvider {
     request: CommandRequest,
     context: AdapterContext,
   ): AsyncIterable<ProcessEvent>;
+  /** Cancel only this run’s native commands; other providers may use a sandbox-scoped fallback. */
+  cancelRunWork?(
+    computer: ComputerRef,
+    computerId: string,
+    runId: string,
+    context: AdapterContext,
+  ): Promise<void>;
   inspectBackgroundWork?(
     computer: ComputerRef,
     markerId: string,
@@ -211,6 +231,8 @@ export interface ManagedConnectorProvider
     Omit<ConnectionAuthProvider, "describe"> {
   catalog(context: AdapterContext, query?: string): Promise<ConnectorCatalogItem[]>;
   listConnectedExternalIds(context: AdapterContext): Promise<string[]>;
+  /** Connection refs the provider reports as dead until the user reconnects them. */
+  listReconnectRefs?(context: AdapterContext): Promise<string[]>;
   connectionReady(context: AdapterContext, externalId: string): Promise<boolean>;
   warmDirectory?(): Promise<void>;
 }
@@ -220,6 +242,8 @@ export interface MemoryStore {
   read(request: MemoryReadRequest, context: AdapterContext): Promise<MemorySnapshot>;
   search(request: MemorySearchRequest, context: AdapterContext): Promise<MemorySearchResult[]>;
   commit(request: MemoryCommitRequest, context: AdapterContext): Promise<MemoryRevision>;
+  /** Delete one document and its history; `removed` is false when nothing matched. */
+  remove(request: MemoryRemoveRequest, context: AdapterContext): Promise<{ removed: boolean }>;
   exportMarkdown(
     request: MemoryExportRequest,
     context: AdapterContext,
@@ -305,6 +329,30 @@ export interface AgentHomeStore {
   ): Promise<Array<{ path: string; kind: "file" | "dir"; size: number }>>;
 }
 
+/** Identifies the data key being wrapped; implementations bind it into the wrap. */
+export interface KeyWrapContext {
+  spaceId: string;
+  version: number;
+}
+
+export interface WrappedDataKey {
+  masterKeyId: string;
+  wrappedKey: string;
+}
+
+/**
+ * Wraps per-space data keys under master keys it never reveals. The local
+ * implementation reads master keys from the environment; a KMS or secret
+ * manager adapter implements the same contract.
+ */
+export interface KeyProvider {
+  describe(): AdapterDescriptor<{ rotate: boolean }>;
+  /** Master key that new wraps use. Older ids stay valid for unwrap. */
+  activeKeyId(): string;
+  wrap(dataKey: Uint8Array, context: KeyWrapContext): Promise<WrappedDataKey>;
+  unwrap(wrapped: WrappedDataKey, context: KeyWrapContext): Promise<Uint8Array>;
+}
+
 export interface ArtifactStore {
   describe(): AdapterDescriptor<{ stream: boolean }>;
   put(artifact: ArtifactPut, context: AdapterContext): Promise<{ id: string; hash: string }>;
@@ -360,7 +408,8 @@ export interface BillingProvider {
   createPortal(input: { customerId: string; returnUrl: string }): Promise<{ url: string }>;
   /** Current subscription for the customer, preferring one that grants access. */
   getCustomerSubscription(customerId: string): Promise<BillingSubscriptionSnapshot | null>;
-  updateSeats(subscriptionItemId: string, seats: number): Promise<void>;
+  /** Sets seats on the customer's subscription; a no-op when none can still take updates. */
+  updateSeats(customerId: string, seats: number): Promise<void>;
   cancelCustomerSubscriptions(customerId: string): Promise<void>;
   /** Verifies the signature. `null` means the request is not authentic. */
   parseWebhook(rawBody: string, headers: Headers): { customerId: string } | "ignored" | null;

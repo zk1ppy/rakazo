@@ -1,3 +1,4 @@
+import type { Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 import { activeBotId, captureScreenshot, completeOnboarding, rpc, signup } from "./helpers";
 
@@ -104,4 +105,242 @@ test("shows peer chips in transcript and opens view-only peer chat", async ({ pa
     )
     .toBe(true);
   await captureScreenshot(page, testInfo, "peer-view-only");
+});
+
+const foldedReplyText = "on it. i will work this in the background";
+
+/** Chief messages Researcher; Researcher's reply comes back to Chief folded under its marker. */
+async function openFoldedPeerReply(page: Page, name: string) {
+  await signup(page, `${name}-${Date.now()}@rakazo.test`, "password12", "Peer Fold");
+  await completeOnboarding(page);
+  await page.goto("/app");
+  await page.waitForURL(/\/app\/[^/]+$/);
+
+  const researcher = await rpc<{ id: string }>(page, "bots/create", {
+    name: "Researcher",
+    title: "",
+    description: "",
+    instructions: "",
+    notifyOnFinish: true,
+  });
+  await page.reload();
+  const composer = page.getByRole("combobox", { name: "Message Chief" });
+  await composer.fill("message the bot named Researcher saying peer-fold-alpha");
+  await composer.press("Enter");
+
+  // Researcher's reply comes back to Chief as a peer run: marker plus the woken run's text.
+  const transcript = page.getByTestId("transcript");
+  const marker = transcript
+    .getByTestId("peer-receipt-chip")
+    .filter({ hasText: "Message from Researcher" });
+  await expect(marker).toBeVisible({ timeout: 60_000 });
+  await expect(transcript.getByText("messaging that bot now.")).toBeVisible();
+  const reply = transcript.getByText(foldedReplyText);
+  await expect(reply).toHaveCount(0);
+  return { researcher, composer, transcript, reply };
+}
+
+test("folds a peer run's reply under its marker and keeps its ask inline", async ({
+  page,
+}, testInfo) => {
+  const { researcher, composer, transcript, reply } = await openFoldedPeerReply(page, "peer-fold");
+
+  const toggle = transcript.getByRole("button", { name: "Expand Message from Researcher" });
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await captureScreenshot(page, testInfo, "peer-replies-folded");
+  await toggle.click();
+  await expect(reply).toBeVisible();
+  // The toggle only folds; the label alone opens the peer chat.
+  await expect(page.getByTestId("peer-conversation-view")).toHaveCount(0);
+  const collapse = transcript.getByRole("button", { name: "Collapse Message from Researcher" });
+  await expect(collapse).toHaveAttribute("aria-expanded", "true");
+  await captureScreenshot(page, testInfo, "peer-replies-expanded");
+  await collapse.focus();
+  await collapse.press("Enter");
+  await expect(reply).toHaveCount(0);
+  await toggle.press(" ");
+  await expect(reply).toBeVisible();
+
+  // A search hit on a folded reply expands its marker and scrolls to it.
+  await expect(page.getByRole("button", { name: "Send" })).toBeVisible({ timeout: 60_000 });
+  await collapse.click();
+  await expect(reply).toHaveCount(0);
+  const search = page.getByTestId("sidebar-search").getByRole("textbox");
+  await search.fill(foldedReplyText);
+  await page
+    .getByRole("button")
+    .filter({ hasText: `Chief · ${foldedReplyText}` })
+    .first()
+    .click();
+  await expect(collapse).toHaveAttribute("aria-expanded", "true");
+  await expect(reply).toBeInViewport();
+  await captureScreenshot(page, testInfo, "peer-reply-search-jump");
+  await search.fill("");
+  await collapse.click();
+  await expect(reply).toHaveCount(0);
+
+  // A keyboard-expanded marker stays in view. Short enough that the expanded reply is taller
+  // than the space below the marker.
+  const viewport = page.viewportSize();
+  await page.setViewportSize({ width: 390, height: 360 });
+  await transcript.evaluate((element) => element.scrollTo({ top: element.scrollHeight }));
+  await toggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(reply).toBeAttached();
+  await expect(collapse).toHaveAttribute("aria-expanded", "true");
+  await expect(collapse).toBeFocused();
+  await expect(collapse).toBeInViewport();
+  await captureScreenshot(page, testInfo, "peer-replies-keyboard-expanded");
+  if (viewport) await page.setViewportSize(viewport);
+
+  // Later scripted replies repeat the folded reply's text, so it goes by id.
+  const replyId = await transcript
+    .locator("[data-message-id]")
+    .filter({ hasText: foldedReplyText })
+    .getAttribute("data-message-id");
+  const replyRow = transcript.locator(`[data-message-id="${replyId}"]`);
+
+  // A reaction stays with its folded reply.
+  await replyRow.hover();
+  await replyRow.getByRole("button", { name: "React" }).click();
+  await page.getByRole("button", { name: "👍", exact: true }).click();
+  await expect(replyRow.getByTestId("message-reactions")).toHaveText("👍");
+  // Folded: no stray reaction bubble. Expanded again: the count is back on the reply.
+  await collapse.click();
+  await expect(replyRow).toHaveCount(0);
+  await expect(transcript.getByText("👍", { exact: true })).toHaveCount(0);
+  await captureScreenshot(page, testInfo, "peer-reply-reaction-folded");
+  await toggle.click();
+  const reactions = replyRow.getByTestId("message-reactions");
+  await expect(reactions).toHaveText("👍");
+  await reactions.scrollIntoViewIfNeeded();
+  await expect(reactions).toBeInViewport();
+  await captureScreenshot(page, testInfo, "peer-reply-reaction-expanded");
+
+  // A reply quote opens its folded parent.
+  await replyRow.hover();
+  await replyRow.getByRole("button", { name: "Reply", exact: true }).click();
+  await composer.fill("peer-fold-quote");
+  await composer.press("Enter");
+  const quote = transcript
+    .locator("[data-message-id]")
+    .filter({ hasText: "peer-fold-quote" })
+    .getByTestId("reply-parent-preview");
+  await expect(quote).toBeVisible({ timeout: 20_000 });
+  await collapse.click();
+  await expect(replyRow).toHaveCount(0);
+  await quote.click();
+  await expect(collapse).toHaveAttribute("aria-expanded", "true");
+  await expect(replyRow).toBeInViewport();
+  await captureScreenshot(page, testInfo, "peer-reply-quote-jump");
+
+  // An ask from the woken run stays inline in the recipient's thread; its text folds.
+  await expect(page.getByRole("button", { name: "Send" })).toBeVisible({ timeout: 60_000 });
+  await composer.fill("message the bot named Researcher saying which city peer-fold-beta");
+  await composer.press("Enter");
+  await expect(page.getByRole("button", { name: "Send" })).toBeVisible({ timeout: 60_000 });
+  await page.goto(`/app/${researcher.id}`);
+  const researcherTranscript = page.getByTestId("transcript");
+  await expect(
+    researcherTranscript.locator("p").filter({ hasText: /^Which city should I use\?$/ }),
+  ).toBeVisible({ timeout: 60_000 });
+  await expect(
+    researcherTranscript.getByTestId("peer-receipt-chip").filter({ hasText: "Message from Chief" }),
+  ).toHaveCount(2);
+  await expect(researcherTranscript.getByText("i need a decision before i continue.")).toHaveCount(
+    0,
+  );
+
+  // The user's answer joins the peer run but is not a bot reply, so it stays out of the fold.
+  await page.getByRole("combobox", { name: "Message Researcher" }).fill("Paris");
+  await page.getByRole("combobox", { name: "Message Researcher" }).press("Enter");
+  await expect(
+    researcherTranscript.getByTestId("message-user-bubble").filter({ hasText: /^Paris$/ }),
+  ).toBeVisible({ timeout: 30_000 });
+  await expect(
+    researcherTranscript.getByRole("button", { name: "Expand Message from Chief" }),
+  ).toHaveCount(2);
+  await captureScreenshot(page, testInfo, "peer-run-answer-inline");
+});
+
+test("answers a message sent while the bot works on another bot's request", async ({
+  page,
+}, testInfo) => {
+  await signup(page, `peer-busy-${Date.now()}@rakazo.test`, "password12", "Peer Busy");
+  await completeOnboarding(page);
+  await page.goto("/app");
+  await page.waitForURL(/\/app\/[^/]+$/);
+  const researcher = await rpc<{ id: string }>(page, "bots/create", {
+    name: "Researcher",
+    title: "",
+    description: "",
+    instructions: "",
+    notifyOnFinish: true,
+  });
+  await page.reload();
+  const chief = page.getByRole("combobox", { name: "Message Chief" });
+  await chief.fill("message the bot named Researcher saying work for 8 seconds");
+  await chief.press("Enter");
+
+  // Researcher is busy with Chief's request when the user writes to it.
+  await expect
+    .poll(
+      async () => {
+        const history = await rpc<{ messages: Array<{ blocks: Array<{ kind: string }> }> }>(
+          page,
+          "threads/messages",
+          { botId: researcher.id, includePeerRuns: true },
+        );
+        return history.messages.some((message) =>
+          message.blocks.some((block) => block.kind === "bot_message_received"),
+        );
+      },
+      { timeout: 30_000 },
+    )
+    .toBe(true);
+  await page.goto(`/app/${researcher.id}`);
+  const composer = page.getByRole("combobox", { name: "Message Researcher" });
+  await composer.fill("remember peer-busy-alpha");
+  await composer.press("Enter");
+
+  const transcript = page.getByTestId("transcript");
+  await expect(
+    transcript.getByTestId("message-user-bubble").filter({ hasText: "peer-busy-alpha" }),
+  ).toBeVisible({ timeout: 30_000 });
+  // The message landed while Chief's request was still running, so it was held behind it.
+  const held = await rpc<{
+    messages: Array<{
+      role: string;
+      runId?: string;
+      blocks: Array<{ kind: string; text?: string }>;
+    }>;
+  }>(page, "threads/messages", { botId: researcher.id, includePeerRuns: true });
+  const peerRunId = held.messages.find((message) =>
+    message.blocks.some((block) => block.kind === "bot_message_received"),
+  )?.runId;
+  const sent = held.messages.find((message) =>
+    message.blocks.some((block) => block.text === "remember peer-busy-alpha"),
+  );
+  expect(peerRunId).toBeTruthy();
+  expect(sent?.runId).toBe(peerRunId);
+  // The answer is the user's own: inline in the chat, never folded under Chief's request.
+  const answer = transcript.getByText("i will keep that in memory.");
+  await expect(answer).toBeVisible({ timeout: 60_000 });
+  await captureScreenshot(page, testInfo, "peer-busy-answer-inline");
+
+  // Only Chief's request goes back to Chief, not the answer to the user.
+  await page.goto("/app");
+  await page.waitForURL(/\/app\/[^/]+$/);
+  await expect(
+    page.getByTestId("transcript").getByTestId("peer-receipt-chip").filter({
+      hasText: "Message from Researcher",
+    }),
+  ).toBeVisible({ timeout: 30_000 });
+  const returned = await rpc<{
+    messages: Array<{ blocks: Array<{ kind: string; text?: string }> }>;
+  }>(page, "threads/messages", { botId: researcher.id, includePeerRuns: true });
+  const sentToChief = returned.messages.flatMap((message) =>
+    message.blocks.filter((block) => block.kind === "bot_message_sent").map((b) => b.text ?? ""),
+  );
+  expect(sentToChief.some((text) => text.includes("keep that in memory"))).toBe(false);
 });

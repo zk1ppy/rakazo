@@ -8,7 +8,12 @@ import type {
   SandboxProvider,
 } from "@rakazo/adapter-kit";
 import { routineJobKey, runContinueJob, runJobKey } from "@rakazo/adapter-kit";
-import { type Actor, type Bot, type ComputerMode, GROUP_MEMBER_MIN } from "@rakazo/contracts";
+import type { Actor, Bot, ComputerMode } from "@rakazo/contracts";
+import {
+  BOT_DESCRIPTION_MAX_LENGTH,
+  BOT_INSTRUCTIONS_MAX_LENGTH,
+  GROUP_MEMBER_MIN,
+} from "@rakazo/contracts";
 import { ACTIVE_RUN_STATUSES } from "@rakazo/core";
 import {
   cancelRunsInTransaction,
@@ -59,6 +64,7 @@ export async function spawnBot(
     spawnKey: string;
     name: string;
     title?: string;
+    description?: string;
     instructions?: string;
     prompt?: string;
     computerMode?: ComputerMode;
@@ -79,8 +85,8 @@ export async function spawnBot(
     created = await createRepos(deps.prisma).createBot(actor, {
       name,
       title: (input.title ?? "").trim(),
-      description: "",
-      instructions: (input.instructions ?? "").trim(),
+      description: (input.description ?? "").trim().slice(0, BOT_DESCRIPTION_MAX_LENGTH),
+      instructions: (input.instructions ?? "").trim().slice(0, BOT_INSTRUCTIONS_MAX_LENGTH),
       notifyOnFinish: true,
       parentBotId: input.spawnedBy.id,
       spawnKey: input.spawnKey,
@@ -211,11 +217,20 @@ type LifecycleBot = {
   id: string;
   spaceId: string;
   name: string;
-  userId?: string;
+  userId: string;
   archivedAt: Date | null;
   computerId?: string | null;
   webhookSecretId?: string | null;
 };
+
+/** Bots the caller created. No `archivedAt` filter: a retry on an archived child must still reconcile. */
+export function createdByWhere(caller: {
+  botId: string;
+  userId: string;
+  spaceId: string;
+}): Prisma.BotWhereInput {
+  return { parentBotId: caller.botId, userId: caller.userId, spaceId: caller.spaceId };
+}
 
 export async function archiveSpawnedBot(
   deps: BotLifecycleDeps,
@@ -234,11 +249,11 @@ export async function archiveSpawnedBot(
   }
 
   const spawned = await deps.prisma.bot.findMany({
-    where: {
-      parentBotId: input.spawnedByBotId,
+    where: createdByWhere({
+      botId: input.spawnedByBotId,
       userId: input.userId,
       spaceId: input.spaceId,
-    },
+    }),
   });
   const matches = input.botId
     ? spawned.filter((bot) => bot.id === input.botId)
@@ -274,7 +289,14 @@ export async function archiveBot(
 ) {
   const [dedicated, activeRuns, activeRoutines] = await Promise.all([
     deps.prisma.computer.findUnique({
-      where: { scopeKey: computerScopeKey("dedicated", bot.spaceId, bot.id) },
+      where: {
+        scopeKey: computerScopeKey({
+          mode: "dedicated",
+          spaceId: bot.spaceId,
+          userId: bot.userId,
+          botId: bot.id,
+        }),
+      },
     }),
     deps.prisma.run.findMany({
       where: { botId: bot.id, status: { in: [...ACTIVE_RUN_STATUSES] } },
@@ -349,7 +371,14 @@ export async function destroyBot(
 ) {
   const [dedicated, activeRuns, routines] = await Promise.all([
     deps.prisma.computer.findUnique({
-      where: { scopeKey: computerScopeKey("dedicated", bot.spaceId, bot.id) },
+      where: {
+        scopeKey: computerScopeKey({
+          mode: "dedicated",
+          spaceId: bot.spaceId,
+          userId: bot.userId,
+          botId: bot.id,
+        }),
+      },
     }),
     deps.prisma.run.findMany({
       where: { botId: bot.id, status: { in: [...ACTIVE_RUN_STATUSES] } },
@@ -632,7 +661,7 @@ async function sharedTeamComputer(
   return computer;
 }
 
-const REMOTE_TEAM_SANDBOX_KINDS = new Set(["e2b", "daytona", "box", "createos"]);
+const REMOTE_TEAM_SANDBOX_KINDS = new Set(["e2b", "daytona", "boat", "createos"]);
 // The bot is already deleted; whatever this misses is removed when the computer next boots.
 const LIVE_CLEANUP_BUDGET_MS = 10_000;
 
@@ -682,9 +711,12 @@ async function removeTeamBotWorkspace(
   context: AdapterContext,
 ) {
   if (!isTeamBotFolderName(bot.id)) return;
-  // Look the computer up by space: a bot moved to its own computer can still have a folder here.
+  // Look the owner's Team Computer up by scope: a bot moved to its own computer can still have
+  // a folder there. Any other team computer in the space drops it on boot (botDeletion).
   const computer = await deps.prisma.computer.findUnique({
-    where: { scopeKey: computerScopeKey("team", bot.spaceId) },
+    where: {
+      scopeKey: computerScopeKey({ mode: "team", spaceId: bot.spaceId, userId: bot.userId }),
+    },
   });
   if (!computer) return;
   // Remote providers keep a stored copy that only the server writes, and replacement computers

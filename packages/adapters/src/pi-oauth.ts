@@ -19,6 +19,7 @@ import type {
   ThinkingLevel,
 } from "@rakazo/contracts";
 import {
+  canonicalPiProviderId,
   MAX_MODEL_CONTEXT_WINDOW,
   MAX_MODEL_MAX_TOKENS,
   MinReasoningEffortSchema,
@@ -285,6 +286,7 @@ export type StoredModelSecret =
       maxTokens?: number;
       contextWindow?: number;
       visionModelIds?: string[];
+      enabledModelIds?: string[];
       maxImagesPerPrompt?: number;
     } & StoredModelLimits);
 
@@ -376,6 +378,14 @@ function parsedMaxTokens(value: unknown): number | undefined {
     : undefined;
 }
 
+function parsedModelIds(value: unknown): string[] | undefined {
+  return Array.isArray(value)
+    ? value.filter(
+        (modelId): modelId is string => typeof modelId === "string" && modelId.trim().length > 0,
+      )
+    : undefined;
+}
+
 export function parseModelSecret(plaintext: string): StoredModelSecret {
   const trimmed = plaintext.trim();
   if (!trimmed.startsWith("{")) return { kind: "api_key", key: plaintext };
@@ -403,11 +413,8 @@ export function parseModelSecret(plaintext: string): StoredModelSecret {
       parsed.contextWindow <= MAX_MODEL_CONTEXT_WINDOW
         ? parsed.contextWindow
         : undefined;
-    const visionModelIds = Array.isArray(parsed.visionModelIds)
-      ? parsed.visionModelIds.filter(
-          (modelId): modelId is string => typeof modelId === "string" && modelId.trim().length > 0,
-        )
-      : undefined;
+    const visionModelIds = parsedModelIds(parsed.visionModelIds);
+    const enabledModelIds = parsedModelIds(parsed.enabledModelIds);
     const maxImagesPerPrompt =
       typeof parsed.maxImagesPerPrompt === "number" &&
       Number.isInteger(parsed.maxImagesPerPrompt) &&
@@ -425,6 +432,7 @@ export function parseModelSecret(plaintext: string): StoredModelSecret {
       ...(maxTokens !== undefined ? { maxTokens } : {}),
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(visionModelIds ? { visionModelIds } : {}),
+      ...(enabledModelIds ? { enabledModelIds } : {}),
       ...(maxImagesPerPrompt !== undefined ? { maxImagesPerPrompt } : {}),
       ...modelLimits(parsed),
     };
@@ -487,6 +495,7 @@ export function serializeModelSecret(secret: StoredModelSecret): string {
       ...(secret.maxTokens !== undefined ? { maxTokens: secret.maxTokens } : {}),
       ...(secret.contextWindow !== undefined ? { contextWindow: secret.contextWindow } : {}),
       ...(secret.visionModelIds !== undefined ? { visionModelIds: secret.visionModelIds } : {}),
+      ...(secret.enabledModelIds !== undefined ? { enabledModelIds: secret.enabledModelIds } : {}),
       ...(secret.maxImagesPerPrompt !== undefined
         ? { maxImagesPerPrompt: secret.maxImagesPerPrompt }
         : {}),
@@ -566,7 +575,9 @@ export function codexComputeResidency(accessToken: string | undefined): string |
 }
 
 export function loadProviderOAuth(providerId: string): OAuthAuth | undefined {
-  return providerCatalog().getProvider(providerId)?.auth.oauth;
+  // pi 1.3 adds ChatGPT OAuth to OpenAI; keep subscription sign-in on Codex.
+  if (providerId === "openai") return undefined;
+  return providerCatalog().getProvider(canonicalPiProviderId(providerId))?.auth.oauth;
 }
 
 let cachedProviderCatalog: ReturnType<typeof builtinModels> | undefined;

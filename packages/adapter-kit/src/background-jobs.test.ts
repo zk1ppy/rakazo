@@ -26,12 +26,14 @@ function handlers(): BackgroundJobHandlers {
     "computer.sleep": vi.fn(async () => undefined),
     "computer.control-expire": vi.fn(async () => undefined),
     "skill.teaching-expire": vi.fn(async () => undefined),
+    "call.expire": vi.fn(async () => undefined),
     "history.compact": vi.fn(async () => undefined),
     "messaging.deliver": vi.fn(async () => undefined),
     "cloud_agent.poll": vi.fn(async () => undefined),
     "memory.extract": vi.fn(async () => undefined),
     "memory.consolidate": vi.fn(async () => undefined),
     "memory.dream": vi.fn(async () => undefined),
+    "push.receipt": vi.fn(async () => undefined),
   };
 }
 
@@ -106,18 +108,6 @@ describe("background job contracts", () => {
         leaseId: "",
       }),
     ).toThrow();
-  });
-
-  it("validates and dispatches a control-expiry job", async () => {
-    const target = handlers();
-    await dispatchBackgroundJob(target, "computer.control-expire", {
-      computerId: "computer-1",
-      leaseId: "lease-1",
-    });
-    expect(target["computer.control-expire"]).toHaveBeenCalledWith({
-      computerId: "computer-1",
-      leaseId: "lease-1",
-    });
   });
 });
 

@@ -1,4 +1,44 @@
 export const RU_MESSAGES: Record<string, string> = {
+  "Add an AI model to keep chatting": "Добавьте ИИ-модель, чтобы продолжить общение",
+  "Not Now": "Не сейчас",
+  "Add Model": "Добавить модель",
+  "Not sent · No model": "Не отправлено · Нет модели",
+  "Update required": "Требуется обновление",
+  Update: "Обновить",
+  Provider: "Провайдер",
+  "No matching providers": "Подходящие провайдеры не найдены",
+  "To:": "Кому:",
+  Next: "Далее",
+  "Ex: Project Falcon": "Например: проект «Сокол»",
+  "Search bots": "Поиск ботов",
+  "About {label}": "О настройке «{label}»",
+  "Manage the bots it creates": "Управлять созданными им ботами",
+  "Organize the sidebar and edit bots. Instruction, model, routine and group edits need approval.":
+    "Упорядочивайте боковую панель и редактируйте ботов. Изменения групп, инструкций, моделей и процедур требуют вашего одобрения.",
+
+  Resets: "Сброс",
+  Limit: "Лимит",
+  "Provider message": "Сообщение провайдера",
+  Status: "Статус",
+  "Set your own key": "Добавить свой ключ",
+  "Add your own key or pick another model.": "Добавьте свой ключ или выберите другую модель.",
+  "Choose another model to keep chatting.": "Выберите другую модель, чтобы продолжить общение.",
+  "Resets {date}.": "Сброс {date}.",
+
+  "Model provider": "Провайдер модели",
+  "Change model": "Сменить модель",
+  "Technical details": "Технические сведения",
+  Member: "Участник",
+  Owner: "Владелец",
+  Chats: "Чаты",
+  "Message from another agent": "Сообщение от другого агента",
+  "Another agent": "Другой агент",
+  "Update from {name}: {text}": "Обновление от {name}: {text}",
+  "Update from {name}": "Обновление от {name}",
+  "{name} asked: {text}": "{name} спрашивает: {text}",
+  "{name} asked": "{name} спрашивает",
+  Close: "Закрыть",
+  Link: "Ссылка",
   "Too many attempts. Try again in a few minutes.":
     "Слишком много попыток. Попробуйте снова через несколько минут.",
   "The server had a problem. Try again in a moment.":
@@ -115,6 +155,7 @@ export const RU_MESSAGES: Record<string, string> = {
   finished: "завершено",
   failed: "ошибка",
   cancelled: "отменено",
+  expired: "истёк срок",
   Saved: "Сохранено",
   " (unread)": " (непрочитано)",
   Appearance: "Внешний вид",
@@ -155,7 +196,6 @@ export const RU_MESSAGES: Record<string, string> = {
   "Add thumbs-up": "Поставить отметку «Нравится»",
   "Add Treg": "Добавить Treg",
   "Agent messages": "Сообщения агента",
-  "Alerts from routines": "Уведомления от задач",
   "Allowed once": "Разрешено один раз",
   "Allow once": "Разрешить один раз",
   "Already have an account?": "У вас уже есть аккаунт?",
@@ -201,6 +241,10 @@ export const RU_MESSAGES: Record<string, string> = {
   Checking: "Проверка",
   "Checking…": "Проверка…",
   "Check your email": "Проверьте свою электронную почту",
+  "Use password": "Войти с паролем",
+  "Use email code": "Войти по коду из письма",
+  "Invalid code": "Неверный код",
+  "Request a new code": "Запросите новый код",
   Clear: "Очистить",
   "Clear conversation": "Очистить диалог",
   "Clear conversation?": "Очистить диалог?",
@@ -241,7 +285,6 @@ export const RU_MESSAGES: Record<string, string> = {
   "Connect MCP server {name}": "Подключение MCP-сервера {name}",
   "Connect Treg": "Подключить Treg",
   Connected: "Подключено",
-  "Connected · {label}": "Подключено · {label}",
   "Connected. Its tools are available from your next message.":
     "Подключено. Его инструменты доступны со следующего сообщения.",
   "Connected and using {label}.": "Подключено и используется {label}.",
@@ -279,6 +322,9 @@ export const RU_MESSAGES: Record<string, string> = {
   "Could not load integrations": "Не удалось загрузить интеграции",
   "Could not load model settings": "Не удалось загрузить настройки модели.",
   "Could not load routine": "Не удалось загрузить программу",
+  "Could not load routines": "Не удалось загрузить задачи",
+  "Get notified when this Bot finishes or needs input":
+    "Получать уведомления, когда этот бот завершает работу или ждёт ввода",
   "Could not load the desktop. This device cannot reach the screen URL.":
     "Не удалось загрузить рабочий стол. Это устройство не может получить доступ к URL-адресу экрана.",
   "Could not load this file.": "Не удалось загрузить этот файл.",
@@ -296,6 +342,7 @@ export const RU_MESSAGES: Record<string, string> = {
   "Could not play a sample": "Не удалось воспроизвести сэмпл",
   "Could not play that clip.": "Не удалось воспроизвести этот клип.",
   "Could not reach the server": "Не удалось связаться с сервером",
+  "Request timed out": "Время ожидания запроса истекло",
   "Enter a password": "Введите пароль",
   "Enter a valid email": "Введите корректный адрес электронной почты",
   "Something went wrong. Try again.": "Что-то пошло не так. Попробуйте ещё раз.",
@@ -326,7 +373,6 @@ export const RU_MESSAGES: Record<string, string> = {
   "Could not update reaction": "Не удалось обновить реакцию",
   "Couldn't update avatars": "Не удалось обновить аватары",
   Create: "Создать",
-  "Create group": "Создать группу",
   "Create section": "Создать раздел",
   "Create space": "Создать пространство",
   Creating: "Создание",
@@ -380,6 +426,7 @@ export const RU_MESSAGES: Record<string, string> = {
   "Git event": "Git-событие",
   "Slack message": "Сообщение Slack",
   "Message event": "Событие сообщения",
+  "When something changes": "Когда что-то меняется",
   "Teams not enabled": "Teams не настроен",
   "Slack not enabled": "Slack не включен",
   "Teams message": "Сообщение Teams",
@@ -419,7 +466,6 @@ export const RU_MESSAGES: Record<string, string> = {
     "Нажмите и удерживайте, чтобы закрепить или переместить в раздел",
   "Long press to pin, move, or silence notifications":
     "Длительное нажатие, чтобы закрепить, переместить или отключить уведомления",
-  "Enter your Rakazo server address.": "Введите адрес вашего сервера Rakazo.",
   "Show less": "Свернуть",
   Members: "Участники",
   "Members ({min}–{max})": "Участники ({min}–{max})",
@@ -433,7 +479,6 @@ export const RU_MESSAGES: Record<string, string> = {
   "Move to": "Переместить в",
   Name: "Имя",
   "Name this bot": "Назовите этого бота",
-  "Name this group": "Назовите эту группу",
   "Needs attention": "Требует внимания",
   "Needs input": "Требуется ввод данных",
   "Needs takeover": "Ожидает передачи управления",
@@ -442,6 +487,11 @@ export const RU_MESSAGES: Record<string, string> = {
   "New group": "Новая группа",
   "New section": "Новый раздел",
   "Rename section": "Переименовать раздел",
+  "Section actions for {name}": "Действия с разделом {name}",
+  "Could not delete section": "Не удалось удалить раздел",
+  "Delete section": "Удалить раздел",
+  "Its bots and groups are kept and leave the section.":
+    "Боты и группы из него сохранятся и выйдут из раздела.",
   "Save section name": "Сохранить название раздела",
   "New space": "Новое пространство",
   "No apps match your search.": "Нет приложений, соответствующих вашему запросу.",
@@ -482,6 +532,7 @@ export const RU_MESSAGES: Record<string, string> = {
   "Point this app at your self-hosted Rakazo origin, the same HTTPS URL you open in a browser.":
     "Направьте это приложение на свой собственный источник Rakazo, тот же URL-адрес HTTPS, который вы открываете в браузере.",
   Private: "Личный",
+  Profile: "Профиль",
   Providers: "Провайдеры",
   "Public servers need https://. HTTP only works on your local network.":
     "Публичным серверам требуется https://. HTTP работает только в вашей локальной сети.",
@@ -519,6 +570,7 @@ export const RU_MESSAGES: Record<string, string> = {
   Robot: "Робот",
   Routine: "Задача",
   "Routine link is incomplete": "Ссылка на задачу неполная",
+  Routines: "Задачи",
   Running: "Выполняется",
   Save: "Сохранить",
   "Saved.": "Сохранено.",
@@ -566,6 +618,8 @@ export const RU_MESSAGES: Record<string, string> = {
   Speak: "Озвучить",
   "Speak only": "Только озвучить",
   "Speech model": "Речевая модель",
+  "Transcription model": "Модель транскрипции",
+  Reconnect: "Переподключить",
   Starting: "Запуск",
   "Starting…": "Запуск…",
   Stop: "Остановить",
@@ -587,6 +641,7 @@ export const RU_MESSAGES: Record<string, string> = {
   "Try again.": "Попробуйте еще раз.",
   "Treg token": "Токен Treg",
   "Type your answer": "Введите ответ",
+  Pinned: "Закреплённые",
   Unassigned: "Без раздела",
   Unpin: "Открепить",
   unread: "непрочитано",
@@ -604,7 +659,6 @@ export const RU_MESSAGES: Record<string, string> = {
   "Waiting for this bot’s response.": "Ожидание ответа этого бота.",
   "Waiting…": "Ожидание…",
   "What this bot is for": "Для чего нужен этот бот",
-  "While agents are working": "Пока агенты работают",
   Working: "Выполняется",
   "Working…": "Выполняется…",
   "Work stopped, but the thread could not refresh: {detail}":
@@ -636,7 +690,6 @@ export const RU_MESSAGES: Record<string, string> = {
   archived: "в архиве",
   Attachment: "Вложение",
   "Bearer authentication": "Аутентификация Bearer",
-  "Booting {label}": "Загрузка {label}",
   bot: "бот",
   "{from} messaged {to}": "{from} отправил сообщение {to}",
   "Bring your own key. ElevenLabs, OpenAI, and Cartesia all plug into the same speak buttons.":
@@ -656,6 +709,7 @@ export const RU_MESSAGES: Record<string, string> = {
   "https://example.com/mcp": "https://example.com/mcp",
   "https://example.com/openapi.json": "https://example.com/openapi.json",
   "https://executor.example/mcp": "https://executor.example/mcp",
+  Diagram: "Диаграмма",
   Image: "Изображение",
   "Markdown file": "Файл Markdown",
   "Message from {peer}": "Сообщение от {peer}",
@@ -715,19 +769,14 @@ export const RU_MESSAGES: Record<string, string> = {
   "Could not save that preference": "Не удалось сохранить эту настройку",
   Username: "Имя пользователя",
   // app/(settings)/models.tsx
-  "Add connected model": "Добавить подключённую модель",
-  "Add connected models to use them as backups.":
-    "Добавьте подключённые модели, чтобы использовать их как резервные.",
+  "Add backup model": "Добавить резервную модель",
+  "Move down": "Переместить ниже",
+  "Move up": "Переместить выше",
+  "Tried in order if the active model fails.":
+    "Используются по порядку, если активная модель не отвечает.",
   "Backup models": "Резервные модели",
-  "Backup models saved.": "Резервные модели сохранены.",
-  "Connect a provider to add backups.": "Подключите провайдера, чтобы добавить резервные модели.",
   "Could not load backup models": "Не удалось загрузить резервные модели.",
   "Could not save backup models": "Не удалось сохранить резервные модели.",
-  "Maximum of 10 backup models.": "Можно добавить не более 10 резервных моделей.",
-  "Move {model} down": "Переместить {model} ниже",
-  "Move {model} up": "Переместить {model} выше",
-  "Remove {model}": "Удалить {model}",
-  "Save backups": "Сохранить резервные модели",
   "Space changed. Reload Models to refresh backup models.":
     "Пространство изменилось. Перезагрузите раздел «Модели», чтобы обновить резервные модели.",
   "Space changed. Reload Models before saving backups.":
@@ -736,10 +785,10 @@ export const RU_MESSAGES: Record<string, string> = {
     "Открылась страница входа — введите там этот код:",
   "All providers": "Все провайдеры",
   Copied: "Скопировано",
+  "Copy code": "Копировать код",
   "Could not disconnect this provider": "Не удалось отключить этого провайдера",
   "Default ({level})": "По умолчанию ({level})",
   "Disconnected {provider}.": "{provider} отключён.",
-  "Save limits": "Сохранить лимиты",
   "Sign in again": "Войти снова",
   "Thinking: {level}": "Рассуждение: {level}",
   "Waiting for sign-in — the code expires in about {minutes} minutes.":
@@ -833,6 +882,12 @@ export const RU_MESSAGES: Record<string, string> = {
   "Sign in to your existing account to link SSO":
     "Войдите в существующий аккаунт, чтобы привязать SSO",
   "SSO is temporarily unavailable. Try again.": "SSO временно недоступен. Попробуйте снова.",
+  "Members ({count})": "Участники ({count})",
+  "Show all": "Показать всех",
+  "Show selected": "Показать выбранных",
+  "Filter bots": "Фильтровать ботов",
+  "Pick {min}–{max}": "Выберите {min}–{max}",
+  "No members yet": "Пока нет участников",
   Applied: "Применено",
   Apply: "Применить",
   Dismissed: "Отклонено",
@@ -845,4 +900,47 @@ export const RU_MESSAGES: Record<string, string> = {
   Undo: "Отменить",
   "Update instructions?": "Обновить инструкции?",
   "Could not restore instructions": "Не удалось восстановить инструкции",
+  "Hide chats": "Скрыть чаты",
+  "Show chats": "Показать чаты",
+  "Remove photo": "Удалить фото",
+  Shape: "Форма",
+  "Shape {number}": "Форма {number}",
+  "Try again": "Повторить",
+  "Your session expired": "Сеанс истёк",
+  "The server had a problem": "На сервере произошла ошибка",
+  "The bot couldn't reply because its provider's daily limit was reached.":
+    "Бот не смог ответить, потому что достигнут дневной лимит его провайдера.",
+  "The bot couldn't reply because its provider's weekly limit was reached.":
+    "Бот не смог ответить, потому что достигнут недельный лимит его провайдера.",
+  "The bot couldn't reply because its provider's monthly limit was reached.":
+    "Бот не смог ответить, потому что достигнут месячный лимит его провайдера.",
+  "The bot couldn't reply because its provider's usage limit was reached.":
+    "Бот не смог ответить, потому что достигнут лимит использования его провайдера.",
+  "The provider received too many requests to answer this bot.":
+    "Провайдер получил слишком много запросов и не смог ответить этому боту.",
+  "The provider refused the key this bot used for its reply.":
+    "Провайдер отклонил ключ, который бот использовал для ответа.",
+  "The provider couldn't serve the model selected for this bot.":
+    "Провайдер не смог предоставить модель, выбранную для этого бота.",
+  "The bot couldn't finish its reply. Technical details includes the reported error.":
+    "Бот не смог завершить ответ. В технических деталях указана полученная ошибка.",
+  "This bot's reply stopped at its key's daily limit. Your own key has its own limits.":
+    "Ответ бота остановился из-за дневного лимита его ключа. У вашего ключа свои лимиты.",
+  "This bot's reply stopped at its key's weekly limit. Your own key has its own limits.":
+    "Ответ бота остановился из-за недельного лимита его ключа. У вашего ключа свои лимиты.",
+  "This bot's reply stopped at its key's monthly limit. Your own key has its own limits.":
+    "Ответ бота остановился из-за месячного лимита его ключа. У вашего ключа свои лимиты.",
+  "This bot's reply stopped at its key's usage limit. Your own key has its own limits.":
+    "Ответ бота остановился из-за лимита использования его ключа. У вашего ключа свои лимиты.",
+  "Sign in with passkey": "Войти с ключом доступа",
+  Passkeys: "Ключи доступа",
+  Passkey: "Ключ доступа",
+  "Add passkey": "Добавить ключ доступа",
+  Rename: "Переименовать",
+  "Add a passkey for faster sign-in?": "Добавить ключ доступа для быстрого входа?",
+  "Couldn't start the computer": "Не удалось запустить компьютер",
+  "Something went wrong while it was starting. Try again in a moment.":
+    "При запуске что-то пошло не так. Попробуйте ещё раз чуть позже.",
+  "Your voice provider is out of credit.": "У вашего голосового провайдера закончились кредиты.",
+  "Your voice provider key was rejected.": "Ваш голосовой провайдер отклонил ключ.",
 };

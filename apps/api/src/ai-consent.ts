@@ -16,6 +16,7 @@ import {
 } from "@rakazo/db";
 import type { RouterDeps } from "./router.js";
 import { resolveThreadTarget } from "./thread-target.js";
+import { voiceCredentialServer } from "./voice.js";
 
 export async function aiConsentStatus(
   deps: RouterDeps,
@@ -216,8 +217,17 @@ export async function aiConsentStatus(
       );
     }
   }
-  for (const voice of voices)
-    add(aiRecipient({ provider: voice.credential.provider, use: "voice" }));
+  for (const voice of voices) {
+    // A self-hosted server is disclosed by its own origin, like a custom model endpoint.
+    const endpoint = (await voiceCredentialServer(deps, actor, voice.credential))?.endpoint;
+    add(
+      aiRecipient({
+        provider: voice.credential.provider,
+        use: "voice",
+        ...(endpoint ? { baseUrl: endpoint } : {}),
+      }),
+    );
+  }
   if (memory)
     add(
       aiRecipient({
@@ -258,9 +268,10 @@ export async function allowAiConsent(
   ) {
     throw new ORPCError("CONFLICT", { message: "AI data sharing changed. Review it again." });
   }
-  await deps.prisma.$transaction(
-    input.keys.map((recipientKey) =>
-      deps.prisma.aiDataConsent.upsert({
+  // Interactive rather than a batch: a batch cannot carry the request's database context.
+  await deps.prisma.$transaction(async (tx) => {
+    for (const recipientKey of input.keys)
+      await tx.aiDataConsent.upsert({
         where: {
           userId_spaceId_recipientKey: {
             userId: actor.userId,
@@ -275,9 +286,8 @@ export async function allowAiConsent(
           version: current.version,
         },
         update: { version: current.version, grantedAt: new Date() },
-      }),
-    ),
-  );
+      });
+  });
   return {
     ...current,
     recipients: current.recipients.map((recipient) =>

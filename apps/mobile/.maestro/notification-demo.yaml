@@ -18,8 +18,12 @@ name: Android live working status demonstration
     visible: "Sign up for Rakazo"
     timeout: 30000
 - tapOn: "Sign in"
+- runFlow: helpers/server.yaml
 - tapOn: "Email"
 - inputText: ${RAKAZO_SCREENSHOT_EMAIL}
+- tapOn:
+    text: "Use password"
+    optional: true
 - tapOn: "Password"
 - inputText: ${RAKAZO_SCREENSHOT_PASSWORD}
 - hideKeyboard
@@ -85,3 +89,5 @@ name: Android live working status demonstration
 - assertNotVisible: "Researcher is working"
 - takeScreenshot: "31-live-working-stopped"
 - stopRecording
+# Leave the next flow an unobscured app window.
+- back

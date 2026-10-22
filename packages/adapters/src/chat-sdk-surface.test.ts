@@ -32,7 +32,8 @@ function createPlatform(
   adapterOverrides: Partial<Adapter> = {},
 ) {
   let chat: ChatInstance | undefined;
-  const adapter: Adapter = createMockAdapter(overrides.provider ?? "mock", {
+  const adapterName = overrides.adapterName ?? overrides.provider ?? "mock";
+  const adapter: Adapter = createMockAdapter(adapterName, {
     initialize: vi.fn(async (instance: ChatInstance) => {
       chat = instance;
     }),
@@ -450,6 +451,29 @@ describe("ChatSdkMessagingSurface webhook waitUntil drain", () => {
 
     expect(response?.status).toBe(500);
   });
+
+  it("processes the vendor's retry of a message the sink failed on, exactly once", async () => {
+    const { platform } = createPlatform();
+    const surface = new ChatSdkMessagingSurface([platform]);
+    const processed: string[] = [];
+    let failNext = true;
+    surface.onInbound(async (event) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error("provision failed");
+      }
+      if (event.type === "message") processed.push(event.handle);
+    });
+    const delivery = { threadId: "mock:Duser:1", id: "m-retry", text: "hello" };
+
+    // Chat marks the message seen before the sink runs; without clearing
+    // that mark the retry would ACK 200 and the message would be lost.
+    expect((await surface.handleWebhook("mock", webhookRequest(delivery)))?.status).toBe(500);
+    expect((await surface.handleWebhook("mock", webhookRequest(delivery)))?.status).toBe(200);
+    expect((await surface.handleWebhook("mock", webhookRequest(delivery)))?.status).toBe(200);
+
+    expect(processed).toEqual(["m-retry"]);
+  });
 });
 
 describe("ChatSdkMessagingSurface webhook plumbing", () => {
@@ -473,11 +497,12 @@ describe("ChatSdkMessagingSurface webhook plumbing", () => {
   });
 
   it("peeks status payloads only after the adapter accepted the request", async () => {
-    const peekStatus = () =>
-      ({ type: "status", provider: "mock", handle: "h-1", status: "SENT" }) as const;
+    const peekStatuses = () => [
+      { type: "status", provider: "mock", handle: "h-1", status: "SENT" } as const,
+    ];
 
     const accepted = createSurface(
-      { peekStatus },
+      { peekStatuses },
       { handleWebhook: vi.fn(async () => new Response("ok")) },
     );
     await accepted.surface.handleWebhook("mock", webhookRequest({ is_outbound: true }));
@@ -487,7 +512,7 @@ describe("ChatSdkMessagingSurface webhook plumbing", () => {
 
     // A forged webhook the adapter rejects must not flip outbox rows.
     const rejected = createSurface(
-      { peekStatus },
+      { peekStatuses },
       { handleWebhook: vi.fn(async () => new Response("no", { status: 401 })) },
     );
     const response = await rejected.surface.handleWebhook(
@@ -533,6 +558,32 @@ describe("ChatSdkMessagingSurface outbound", () => {
     expect((adapter.postMessage as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toBe("mock:C1:9");
   });
 
+  it.each([
+    ["a transient failure", new Error("socket hang up"), false, null],
+    [
+      "a rate limit",
+      Object.assign(new Error("rate limited"), { name: "AdapterRateLimitError", retryAfter: 30 }),
+      false,
+      30_000,
+    ],
+    ["a permanent failure", new Error("channel_not_found"), true, null],
+  ] as const)("classifies %s for the outbox", async (_label, error, permanent, retryAfterMs) => {
+    const { surface } = createSurface(
+      { isPermanentSendError: (candidate) => candidate === error && permanent },
+      { postMessage: vi.fn(async () => Promise.reject(error)) },
+    );
+
+    await expect(
+      surface.sendToThread({ threadId: "mock:C1:9", body: "hi" }, context),
+    ).rejects.toMatchObject({
+      name: "MessagingSendError",
+      message: error.message,
+      cause: error,
+      permanent,
+      retryAfterMs,
+    });
+  });
+
   it("prefers the platform's deterministic direct thread id", async () => {
     const { surface, adapter } = createSurface({
       directThreadId: (address) => `mock:D${address}:pinned`,
@@ -551,6 +602,18 @@ describe("ChatSdkMessagingSurface outbound", () => {
     expect(adapter.openDM).toHaveBeenCalledWith("+15551234567");
   });
 
+  it("classifies a failed openDM like a failed send", async () => {
+    const error = new Error("invalid_auth");
+    const { surface } = createSurface(
+      { isPermanentSendError: (candidate) => candidate === error },
+      { openDM: vi.fn(async () => Promise.reject(error)) },
+    );
+    await expect(surface.openDirectThread("mock", "U1", context)).rejects.toMatchObject({
+      name: "MessagingSendError",
+      permanent: true,
+    });
+  });
+
   it("throws when the platform cannot open direct conversations", async () => {
     const { surface } = createSurface({}, { openDM: undefined });
     await expect(surface.openDirectThread("mock", "+15551234567", context)).rejects.toThrow(
@@ -567,29 +630,39 @@ describe("ChatSdkMessagingSurface outbound", () => {
 });
 
 describe("ChatSdkMessagingSurface thread history", () => {
-  it("returns the messages before the asking one, oldest first, without the bot's own", async () => {
-    const message = (id: string, isMe = false) =>
-      createTestMessage(id, `text ${id}`, {
-        threadId: "mock:C1:100",
-        author: { userId: "U1", userName: "ada", fullName: "Ada", isBot: false, isMe },
+  it.each(["mock", "mock-work"])(
+    "returns history with provider %s, oldest first, without the bot's own",
+    async (provider) => {
+      const message = (id: string, isMe = false) =>
+        createTestMessage(id, `text ${id}`, {
+          threadId: "mock:C1:100",
+          author: { userId: "U1", userName: "ada", fullName: "Ada", isBot: false, isMe },
+        });
+      const fetchMessages = vi.fn(async () => ({
+        messages: [message("100"), message("101", true), message("102"), message("103")],
+      }));
+      const { surface } = createSurface({ provider, adapterName: "mock" }, { fetchMessages });
+
+      const history = await surface.fetchThreadHistory(
+        `${provider}:C1:100`,
+        { before: "103", limit: 50 },
+        context,
+      );
+
+      expect(fetchMessages).toHaveBeenCalledWith("mock:C1:100", {
+        limit: 51,
+        direction: "backward",
       });
-    const fetchMessages = vi.fn(async () => ({
-      messages: [message("100"), message("101", true), message("102"), message("103")],
-    }));
-    const { surface } = createSurface({}, { fetchMessages });
-
-    const history = await surface.fetchThreadHistory(
-      "mock:C1:100",
-      { before: "103", limit: 50 },
-      context,
-    );
-
-    expect(fetchMessages).toHaveBeenCalledWith("mock:C1:100", { limit: 51, direction: "backward" });
-    expect(history.map((event) => [event.handle, event.content, event.isDirect])).toEqual([
-      ["100", "text 100", false],
-      ["102", "text 102", false],
-    ]);
-  });
+      expect(history.map((event) => [event.provider, event.threadId])).toEqual([
+        [provider, `${provider}:C1:100`],
+        [provider, `${provider}:C1:100`],
+      ]);
+      expect(history.map((event) => [event.handle, event.content, event.isDirect])).toEqual([
+        ["100", "text 100", false],
+        ["102", "text 102", false],
+      ]);
+    },
+  );
 
   it("returns nothing when the asking message is outside the fetched page", async () => {
     const fetchMessages = vi.fn(async () => ({
@@ -604,11 +677,13 @@ describe("ChatSdkMessagingSurface thread history", () => {
 });
 
 describe("ChatSdkMessagingSurface acknowledge", () => {
-  it("reacts with eyes on reaction platforms", async () => {
+  it.each(["mock", "mock-work"])("reacts with eyes on provider %s", async (provider) => {
     const { surface, adapter } = createSurface({
+      provider,
+      adapterName: "mock",
       capabilities: { direct: true, groups: true, receipt: "reaction" },
     });
-    await surface.acknowledge("mock:Duser:1", "1700000000.000100", context);
+    await surface.acknowledge(`${provider}:Duser:1`, "1700000000.000100", context);
     expect(adapter.addReaction).toHaveBeenCalledWith("mock:Duser:1", "1700000000.000100", "eyes");
     expect(adapter.startTyping).not.toHaveBeenCalled();
   });

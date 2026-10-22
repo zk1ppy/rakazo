@@ -204,6 +204,11 @@ export class DockerSandboxProvider implements SandboxProvider {
       signal: context.signal,
     });
     if (!res.ok) {
+      cancelResponseBody(res);
+      // A stopped container cannot run anything; report it gone so the computer is booted again.
+      if ((await this.containerRunning(computer, context)) === false) {
+        throw sandboxGoneError(computer);
+      }
       yield { type: "stderr", data: `exec failed: ${res.status}` };
       yield { type: "exit", code: 1 };
       return;
@@ -223,6 +228,10 @@ export class DockerSandboxProvider implements SandboxProvider {
       res,
       context.signal,
     );
+    // The supervisor answers a missing container with Docker's 404 as the command's stderr.
+    if (body.code !== 0 && /no such container/i.test(body.stderr)) {
+      throw sandboxGoneError(computer);
+    }
     if (body.stdout) yield { type: "stdout", data: body.stdout };
     if (body.stderr) yield { type: "stderr", data: body.stderr };
     yield { type: "exit", code: body.code };
@@ -249,6 +258,9 @@ export class DockerSandboxProvider implements SandboxProvider {
     request: ScreenRequest,
     context: AdapterContext,
   ): Promise<ScreenSession> {
+    if (request.interactive && !request.controlToken) {
+      throw new Error("interactive screen requires a control token");
+    }
     const res = await fetch(this.url(`/computers/${computer.id}/screen-mode`), {
       method: "POST",
       headers: { ...this.headers(context, computer.botId), "content-type": "application/json" },
@@ -269,9 +281,15 @@ export class DockerSandboxProvider implements SandboxProvider {
       if ((await this.containerRunning(computer, context)) === false) {
         throw sandboxGoneError(computer);
       }
+      if (request.interactive) {
+        throw new Error(`sandbox screen mode failed: ${res.status} ${detail}`.trim());
+      }
       return { url: null, mimeType: "text/html", close: async () => undefined };
     }
     const body = await readSandboxJson<{ screenUrl?: string }>(res, context.signal);
+    if (request.interactive && !body.screenUrl) {
+      throw new Error("control screen failed to start");
+    }
     return {
       url: body.screenUrl ?? this.url(`/computers/${computer.id}/screen`),
       mimeType: "text/html",

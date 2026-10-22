@@ -100,6 +100,7 @@ async function capture(options: {
           provider: "openai-compatible",
           id: modelId,
           baseUrl: `http://127.0.0.1:${address.port}/v1`,
+          allowPrivateEndpoint: true,
           reasoning: true,
           thinkingLevel: options.thinkingLevel,
           maxTokens: 65_536,

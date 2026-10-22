@@ -20,6 +20,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.os.SystemClock
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -36,6 +38,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlin.random.Random
 
 private data class RunRecord(
   val runId: String,
@@ -60,6 +63,8 @@ class RakazoNotificationService : Service() {
   private val knownCompleted = mutableSetOf<String>()
   private val alertedAttention = mutableSetOf<String>()
   private var historySpaceId: String? = null
+  private val tokenCache = PollTokenCache()
+  private val historyWrites = PollHistoryWrites()
 
   override fun onCreate() {
     super.onCreate()
@@ -74,6 +79,7 @@ class RakazoNotificationService : Service() {
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     val generation = synchronized(sessionLock) {
+      if (intent?.getBooleanExtra(EXTRA_RESET_TOKEN, false) == true) tokenCache.reset()
       sessionGeneration.incrementAndGet().also {
         if (intent?.action == ACTION_THREAD_CHANGED && (openBotId != null || openThreadId != null)) {
           clearLive()
@@ -88,36 +94,50 @@ class RakazoNotificationService : Service() {
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onDestroy() {
+    tokenCache.reset()
     scope.cancel()
     super.onDestroy()
   }
 
   private suspend fun poll(generation: Long) {
     var selectedAvatarStyle: String? = null
+    val startedAt = SystemClock.elapsedRealtime()
+    val cadence = PollCadence()
     while (scope.isActive) {
       val storage = NotificationStorage(this)
       val settings = storage.settings
       if (
         !settings.liveConnection ||
         storage.endpoint.isBlank() ||
-        storage.token.isBlank() ||
         storage.spaceId.isBlank() ||
         !isAllowedNotificationEndpoint(storage.endpoint)
       ) {
         stopIfCurrent(generation)
         return
       }
+      val token = tokenCache.getOrLoad({ storage.token }) { cache ->
+        runIfCurrent(generation, cache)
+      } ?: return
+      if (token.isBlank()) {
+        stopIfCurrent(generation)
+        return
+      }
       val seeded = prepareHistorySpace(generation, storage.spaceId) ?: return
+      var recentPageBusy = true
       try {
+        if (generation != sessionGeneration.get()) return
         val avatarStyle = selectedAvatarStyle
-          ?: avatarStyle(storage.endpoint, storage.token, storage.spaceId)
+          ?: avatarStyle(storage.endpoint, token, storage.spaceId)
             .also { selectedAvatarStyle = it }
-        val active = runs(storage.endpoint, storage.token, storage.spaceId, "active")
+        if (generation != sessionGeneration.get()) return
+        val active = runs(storage.endpoint, token, storage.spaceId, "active")
         val working = active.filter(::isWorking).filter { it.notificationsEnabled }
-        val recent = runs(storage.endpoint, storage.token, storage.spaceId, "recent")
+        if (generation != sessionGeneration.get()) return
+        val recent = runs(storage.endpoint, token, storage.spaceId, "recent")
         val replyLookups = mutableListOf<Pair<RunRecord, Boolean>>()
         val immediate = mutableListOf<Pair<RunRecord, NotificationCopy>>()
         if (!runIfCurrent(generation) {
+            recentPageBusy = recent.size >= RECENT_LIMIT && recent.any { it.runId !in knownCompleted }
             val visibleWorking = working.filterNot(::isOpenThread)
             if (visibleWorking.isEmpty()) clearLive() else showLive(visibleWorking, avatarStyle)
             if (!seeded) {
@@ -137,10 +157,13 @@ class RakazoNotificationService : Service() {
               }
             }
             knownCompleted.retainAll(recent.map { it.runId }.toSet())
-            getSharedPreferences(STATE_PREFERENCES, MODE_PRIVATE).edit()
-              .putStringSet(SEEN_RUNS, knownCompleted.toSet())
-              .putBoolean(SEEN_RUNS_SEEDED, true)
-              .apply()
+            val nextSeen = knownCompleted.toSet()
+            historyWrites.persistIfChanged(seeded, nextSeen) { seen ->
+              getSharedPreferences(STATE_PREFERENCES, MODE_PRIVATE).edit()
+                .putStringSet(SEEN_RUNS, seen)
+                .putBoolean(SEEN_RUNS_SEEDED, true)
+                .apply()
+            }
             if (settings.needsAttention) {
               active.filter { it.status == "waiting_input" || it.status == "waiting_takeover" }
                 .filter { it.notificationsEnabled }
@@ -154,8 +177,9 @@ class RakazoNotificationService : Service() {
           return
         }
         for ((run, scheduled) in replyLookups) {
+          if (generation != sessionGeneration.get()) return
           val reply = runCatching {
-            latestReply(storage.endpoint, storage.token, storage.spaceId, run)
+            latestReply(storage.endpoint, token, storage.spaceId, run)
           }.getOrDefault("")
           if (reply == null) continue
           if (!runIfCurrent(generation) {
@@ -182,15 +206,24 @@ class RakazoNotificationService : Service() {
           stopIfCurrent(generation)
           return
         }
+        cadence.success()
       } catch (error: ApiException) {
         if (error.status == 401) {
           stopIfCurrent(generation)
           return
         }
+        cadence.failure()
       } catch (_: IOException) {
+        cadence.failure()
       } catch (_: RuntimeException) {
+        cadence.failure()
       }
-      delay(POLL_INTERVAL_MS)
+      val delayMs = cadence.delayMs(
+        SystemClock.elapsedRealtime() - startedAt,
+        recentPageBusy,
+        if (cadence.hasFailures) Random.nextLong(0, 1_000) else 0,
+      )
+      delay(delayMs)
     }
   }
 
@@ -209,6 +242,7 @@ class RakazoNotificationService : Service() {
       if (historySpaceId != spaceId) {
         knownCompleted.clear()
         alertedAttention.clear()
+        historyWrites.reset()
         if (state.getString(SEEN_RUNS_SPACE_ID, null) == spaceId) {
           knownCompleted += state.getStringSet(SEEN_RUNS, emptySet()).orEmpty()
         } else {
@@ -361,10 +395,12 @@ class RakazoNotificationService : Service() {
   }
 
   companion object {
+    private const val TAG = "RakazoNotifications"
     private const val LIVE_NOTIFICATION_ID = 1101
     private const val ACTION_THREAD_CHANGED = "com.rakazo.notifications.THREAD_CHANGED"
     private const val PROMOTED_ONGOING_EXTRA = "android.requestPromotedOngoing"
-    private const val POLL_INTERVAL_MS = 8_000L
+    private const val RECENT_LIMIT = 20 // Keep in sync with apps/api/src/runs.ts.
+    private const val EXTRA_RESET_TOKEN = "com.rakazo.notifications.RESET_TOKEN"
     private const val STATE_PREFERENCES = "com.rakazo.notification_state"
     private const val SEEN_RUNS = "seen_runs"
     private const val SEEN_RUNS_SEEDED = "seen_runs_seeded"
@@ -375,9 +411,12 @@ class RakazoNotificationService : Service() {
     private var openBotId: String? = null
     private var openThreadId: String? = null
 
-    fun start(context: Context) {
+    fun start(context: Context, resetToken: Boolean = true, action: String? = null) {
       val intent = Intent(context, RakazoNotificationService::class.java)
-      context.startService(intent)
+        .putExtra(EXTRA_RESET_TOKEN, resetToken)
+      if (action != null) intent.action = action
+      runCatching { context.startService(intent) }
+        .onFailure { error -> Log.w(TAG, "Could not start notification poller", error) }
     }
 
     fun stop(context: Context) {
@@ -392,9 +431,7 @@ class RakazoNotificationService : Service() {
       if (threadId != null) {
         context.getSystemService(NotificationManager::class.java).cancel(threadId.hashCode())
       }
-      context.startService(
-        Intent(context, RakazoNotificationService::class.java).setAction(ACTION_THREAD_CHANGED),
-      )
+      start(context, resetToken = false, action = ACTION_THREAD_CHANGED)
     }
 
     fun clearSession(context: Context) {
@@ -882,7 +919,7 @@ private fun flattenTableRows(text: String): String {
  * `plainTextFromMarkdown`; intentionally lossy — the body is a preview,
  * not the message.
  */
-private fun markdownToPreview(markdown: String): String {
+internal fun markdownToPreview(markdown: String): String {
   // Payloads use a fixed one-char token alphabet: literal mark characters in
   // the source are stashed first so tokens can never collide, token length is
   // constant regardless of input, and payload count is bounded by input size —

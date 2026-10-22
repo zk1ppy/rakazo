@@ -10,13 +10,16 @@ import type {
   VoiceInfo,
 } from "@rakazo/contracts";
 import {
+  BOT_COMPUTER_MODES,
   BOT_DESCRIPTION_MAX_LENGTH,
   BOT_NAME_MAX_LENGTH,
   BOT_TITLE_MAX_LENGTH,
   isBuiltinToolName,
 } from "@rakazo/contracts";
 import {
+  chatModelChoices,
   connectedModelChoices,
+  credentialForModel,
   modelOptionKey,
   parseModelOptionKey,
   resolveSelectableModelId,
@@ -30,26 +33,31 @@ import {
   Textarea,
   Toggle,
 } from "@rakazo/ui-web";
+import { Disclosure } from "@rakazo/ui-web/components/ui/disclosure";
 import { X } from "lucide-react";
-import { lazy, Suspense, useEffect, useId, useRef, useState } from "react";
+import { Suspense, useEffect, useId, useRef, useState } from "react";
 import { ErrorBoundary, SectionLoadFailed } from "../../components/ErrorBoundary";
+import { InfoTooltip } from "../../components/InfoTooltip";
 import { InstructionSettings } from "../../components/InstructionSettings";
 import { botProfilePatch } from "../../lib/bot-profile-patch";
 import { thinkingLevelLabel } from "../../lib/model-catalog";
+import { lazyComponent } from "../../lib/preload-recovery";
 import { rpc } from "../../lib/rpc";
 import { errorText } from "../../lib/user-error";
 import { AvatarStudioPopover } from "./avatar-studio-popover";
 import { BotCredentialsSection } from "./bot-credentials";
+import { ChatModelPicker } from "./chat-model-picker";
 
-const ScratchpadSection = lazy(() =>
-  import("../ScratchpadSection").then((module) => ({ default: module.ScratchpadSection })),
+const ScratchpadSection = lazyComponent(() =>
+  import("../ScratchpadSection").then((module) => module.ScratchpadSection),
 );
 
-const KnowledgeSection = lazy(() =>
-  import("../KnowledgeSection").then((module) => ({ default: module.KnowledgeSection })),
+const KnowledgeSection = lazyComponent(() =>
+  import("../KnowledgeSection").then((module) => module.KnowledgeSection),
 );
 
-const fieldLabelClass = "mt-4 block text-[14px] text-muted-foreground";
+const rowLabelClass = "text-[14px] text-muted-foreground";
+const fieldLabelClass = `mt-4 block ${rowLabelClass}`;
 
 function ComputerModePicker({
   value,
@@ -68,7 +76,7 @@ function ComputerModePicker({
         <Trans>Computer</Trans>
       </div>
       <div className="mt-2 grid grid-cols-2 gap-2">
-        {(["team", "dedicated"] as const).map((mode) => (
+        {BOT_COMPUTER_MODES.map((mode) => (
           <Toggle
             key={mode}
             variant="outline"
@@ -216,9 +224,10 @@ export function BotSettings({
     instructions?: string;
     color?: string;
     notifyOnFinish?: boolean;
-    computerMode: ComputerMode;
+    computerMode?: ComputerMode;
     memoryScope?: "isolated" | "shared" | null;
     autoSpeak?: boolean;
+    fleetManagement?: boolean;
     voiceId?: string | null;
     modelProvider?: string | null;
     modelId?: string | null;
@@ -233,6 +242,8 @@ export function BotSettings({
   const ids = useId();
   const [name, setName] = useState(bot.name);
   const [title, setTitle] = useState(bot.title);
+  const savedNameRef = useRef(bot.name);
+  const savedTitleRef = useRef(bot.title);
   const [description, setDescription] = useState(bot.description);
   // A roster refresh can skip replacing bots while a reorder is in flight, so
   // this prop keeps the description from when the panel opened. Later saves
@@ -244,6 +255,8 @@ export function BotSettings({
   const [computerMode, setComputerMode] = useState(bot.computerMode);
   const [memoryScope, setMemoryScope] = useState(bot.memoryScope);
   const [autoSpeak, setAutoSpeak] = useState(bot.autoSpeak);
+  const [fleetManagement, setFleetManagement] = useState(bot.fleetManagement);
+  useEffect(() => setFleetManagement(bot.fleetManagement), [bot.fleetManagement]);
   const [voiceId, setVoiceId] = useState(bot.voiceId ?? "");
   const [voices, setVoices] = useState<VoiceInfo[]>([]);
   const [modelKey, setModelKey] = useState(
@@ -280,6 +293,7 @@ export function BotSettings({
       description?: string;
       color?: string;
       notifyOnFinish?: boolean;
+      fleetManagement?: boolean;
       disabledBuiltinTools?: string[];
       baseDisabledBuiltinTools?: string[];
     }) => Promise<void>
@@ -313,6 +327,14 @@ export function BotSettings({
     ? modelOptionKey(selectedModel.provider, selectedModel.modelId)
     : "";
 
+  const modelChoices = chatModelChoices(
+    connectedOptions,
+    selectedModelKey,
+    me?.defaultModel
+      ? `${t`Space default`} (${catalogLabel(catalog, me.defaultProvider, me.defaultModel) ?? me.defaultModel})`
+      : t`Space default`,
+  );
+
   const effectiveProvider = selectedModel?.provider ?? me?.defaultProvider ?? null;
   const effectiveModelId = selectedModel?.modelId ?? me?.defaultModel ?? null;
   const effectiveEntry =
@@ -323,9 +345,7 @@ export function BotSettings({
             resolveSelectableModelId(catalog, entry.provider, entry.id) === effectiveModelId,
         )
       : undefined;
-  const effectiveCredential = credentials.find(
-    (entry) => entry.provider === effectiveProvider && entry.modelId === effectiveModelId,
-  );
+  const effectiveCredential = credentialForModel(credentials, effectiveProvider, effectiveModelId);
   const thinkingOptions = (
     effectiveCredential?.thinkingLevels ??
     effectiveEntry?.thinkingLevels ??
@@ -339,29 +359,35 @@ export function BotSettings({
     description?: string;
     color?: string;
     notifyOnFinish?: boolean;
+    fleetManagement?: boolean;
     disabledBuiltinTools?: string[];
     baseDisabledBuiltinTools?: string[];
   }) {
-    const selected = selectedModel;
-    const nextName = (patchOverrides?.name !== undefined ? patchOverrides.name : name).trim();
-    const nextTitle = (patchOverrides?.title !== undefined ? patchOverrides.title : title).trim();
-    const nextDescription = (
-      patchOverrides?.description !== undefined ? patchOverrides.description : description
-    ).trim();
-    const nextColor = patchOverrides?.color !== undefined ? patchOverrides.color : color;
-    const nextNotify =
-      patchOverrides?.notifyOnFinish !== undefined ? patchOverrides.notifyOnFinish : notifyOnFinish;
-
-    if (nextName) setName(nextName);
-    setTitle(nextTitle);
-    setDescription(nextDescription);
-
     try {
       setSaving(true);
       setError(null);
+      if (patchOverrides?.fleetManagement !== undefined) {
+        await onSave({ fleetManagement: patchOverrides.fleetManagement });
+        return;
+      }
+      const selected = selectedModel;
+      const nextName = (patchOverrides?.name !== undefined ? patchOverrides.name : name).trim();
+      const nextTitle = (patchOverrides?.title !== undefined ? patchOverrides.title : title).trim();
+      const nextDescription = (
+        patchOverrides?.description !== undefined ? patchOverrides.description : description
+      ).trim();
+      const nextColor = patchOverrides?.color !== undefined ? patchOverrides.color : color;
+      const nextNotify =
+        patchOverrides?.notifyOnFinish !== undefined
+          ? patchOverrides.notifyOnFinish
+          : notifyOnFinish;
+
+      if (nextName) setName(nextName);
+      setTitle(nextTitle);
+      setDescription(nextDescription);
       const patch = {
-        name: nextName || bot.name,
-        title: nextTitle,
+        ...(nextName && nextName !== savedNameRef.current.trim() ? { name: nextName } : {}),
+        ...(nextTitle !== savedTitleRef.current.trim() ? { title: nextTitle } : {}),
         // Keep untouched profile fields off the wire.
         ...botProfilePatch(savedDescriptionRef.current, nextDescription),
         // Unchanged color stays off the wire so a legacy named value cannot fail a name save.
@@ -373,7 +399,10 @@ export function BotSettings({
         voiceId: voiceId || null,
         modelProvider: selected?.provider ?? null,
         modelId: selected?.modelId ?? null,
-        ...(modelMetaReady
+        ...(modelMetaReady &&
+        (thinkingOptions.length > 0 ||
+          (selected?.provider ?? null) !== bot.modelProvider ||
+          (selected?.modelId ?? null) !== bot.modelId)
           ? {
               thinkingLevel: thinkingOptions.length
                 ? ((thinkingLevel || null) as ThinkingLevel | null)
@@ -413,8 +442,12 @@ export function BotSettings({
         persistedDisabledToolsRef.current = nextTools;
         break;
       }
+      if (nextName) savedNameRef.current = nextName;
+      savedTitleRef.current = nextTitle;
       savedDescriptionRef.current = nextDescription;
     } catch (err) {
+      if (patchOverrides?.fleetManagement !== undefined)
+        setFleetManagement(!patchOverrides.fleetManagement);
       setError(errorText(err, t`Could not save`));
     } finally {
       pendingSavesRef.current -= 1;
@@ -447,6 +480,7 @@ export function BotSettings({
     description?: string;
     color?: string;
     notifyOnFinish?: boolean;
+    fleetManagement?: boolean;
     disabledBuiltinTools?: string[];
   }) {
     // Serialize full-object auto-saves so an older in-flight request cannot
@@ -480,7 +514,7 @@ export function BotSettings({
           }}
         />
       </div>
-      <label htmlFor={`${ids}-name`} className="mt-4 block text-[13.5px] text-muted-foreground/80">
+      <label htmlFor={`${ids}-name`} className={fieldLabelClass}>
         <Trans>Name</Trans>
         <Input
           id={`${ids}-name`}
@@ -516,86 +550,46 @@ export function BotSettings({
         />
       </label>
       <div className="mt-6 flex items-center justify-between pt-4 border-t border-border/20">
-        <div className="space-y-0.5 pe-4">
-          <div
-            id={`${ids}-notify-finish-label`}
-            className="text-[13.5px] font-medium text-foreground"
-          >
+        <div className="flex items-center gap-1 pe-4">
+          <div id={`${ids}-notify-finish-label`} className="text-[14px] text-muted-foreground">
             <Trans>Notifications</Trans>
           </div>
-          <div id={`${ids}-notify-finish-desc`} className="text-[12px] text-muted-foreground/70">
-            <Trans>Get notified when this Bot finishes or needs input</Trans>
-          </div>
+          <InfoTooltip label={t`Notifications`}>
+            {t`Get notified when this Bot finishes or needs input`}
+          </InfoTooltip>
         </div>
         <Switch
           id={`${ids}-notify-finish`}
           checked={notifyOnFinish}
           aria-labelledby={`${ids}-notify-finish-label`}
-          aria-describedby={`${ids}-notify-finish-desc`}
           onCheckedChange={(checked) => {
             setNotifyOnFinish(checked);
             void enqueueSave({ notifyOnFinish: checked });
           }}
         />
       </div>
-      <details
+      <Disclosure
         data-testid="bot-settings-advanced"
         className="group mt-5"
-        onToggle={(event) => {
-          if (event.currentTarget.open) setAdvancedOpened(true);
+        onOpenChange={(open) => {
+          if (open) setAdvancedOpened(true);
         }}
+        summary={<Trans>Advanced</Trans>}
+        summaryClassName="w-full flex items-center justify-between gap-3 text-[14px] text-muted-foreground"
       >
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-[14px] text-muted-foreground">
-          <span className="text-muted-foreground">
-            <Trans>Advanced</Trans>
-          </span>
-          <span aria-hidden="true" className="transition-transform group-open:rotate-90">
-            ›
-          </span>
-        </summary>
         <InstructionSettings key={bot.id} bot={bot} />
         <ComputerModePicker value={computerMode} onChange={setComputerMode} />
-        <ErrorBoundary fallback={<SectionLoadFailed />}>
-          <Suspense fallback={null}>
-            <ScratchpadSection botId={bot.id} />
-          </Suspense>
-        </ErrorBoundary>
-        {advancedOpened ? (
-          <ErrorBoundary fallback={<SectionLoadFailed />}>
-            <Suspense fallback={null}>
-              <KnowledgeSection botId={bot.id} onSkillsChange={onSkillsChange} />
-            </Suspense>
-          </ErrorBoundary>
-        ) : null}
         <label htmlFor={`${ids}-model`} className={fieldLabelClass}>
           <Trans>Model</Trans>
-          <NativeSelect
+          <ChatModelPicker
             id={`${ids}-model`}
-            className="mt-2 w-full"
+            choices={modelChoices}
             value={selectedModelKey}
-            onChange={(event) => {
-              setModelKey(event.target.value);
+            onChange={(key) => {
+              setModelKey(key);
               setThinkingLevel("");
             }}
-          >
-            <NativeSelectOption value="">
-              {t`Space default`}
-              {me?.defaultModel
-                ? ` (${catalogLabel(catalog, me.defaultProvider, me.defaultModel) ?? me.defaultModel})`
-                : ""}
-            </NativeSelectOption>
-            {selectedModelKey &&
-            !connectedOptions.some((option) => option.key === selectedModelKey) ? (
-              <NativeSelectOption value={selectedModelKey}>
-                {selectedModel?.modelId ?? selectedModelKey}
-              </NativeSelectOption>
-            ) : null}
-            {connectedOptions.map((option) => (
-              <NativeSelectOption key={option.key} value={option.key}>
-                {option.label}
-              </NativeSelectOption>
-            ))}
-          </NativeSelect>
+          />
         </label>
         {thinkingOptions.length ? (
           <label htmlFor={`${ids}-thinking`} className={fieldLabelClass}>
@@ -646,14 +640,16 @@ export function BotSettings({
         ) : null}
         <label
           htmlFor={`${ids}-auto-speak`}
-          className="mt-5 flex cursor-pointer items-center gap-3 text-[14px] text-foreground/75"
+          className="mt-5 flex cursor-pointer items-center justify-between gap-3 text-[14px] text-muted-foreground"
         >
+          <span className={rowLabelClass}>
+            <Trans>Read replies aloud</Trans>
+          </span>
           <Switch
             id={`${ids}-auto-speak`}
             checked={autoSpeak}
             onCheckedChange={(checked) => setAutoSpeak(checked)}
           />
-          <Trans>Read replies aloud</Trans>
         </label>
         {voices.length ? (
           <label htmlFor={`${ids}-voice`} className={fieldLabelClass}>
@@ -672,6 +668,37 @@ export function BotSettings({
               ))}
             </NativeSelect>
           </label>
+        ) : null}
+        <div className="mt-5 flex items-center justify-between gap-3 text-[14px] text-muted-foreground">
+          <div className="flex items-center gap-1">
+            <label htmlFor={`${ids}-fleet-management`} className={rowLabelClass}>
+              <Trans>Manage the bots it creates</Trans>
+            </label>
+            <InfoTooltip label={t`Manage the bots it creates`}>
+              {t`Organize the sidebar and edit bots. Instruction, model, routine and group edits need approval.`}
+            </InfoTooltip>
+          </div>
+          <Switch
+            id={`${ids}-fleet-management`}
+            checked={fleetManagement}
+            disabled={saving}
+            onCheckedChange={(checked) => {
+              setFleetManagement(checked);
+              void enqueueSave({ fleetManagement: checked });
+            }}
+          />
+        </div>
+        <ErrorBoundary fallback={<SectionLoadFailed />}>
+          <Suspense fallback={null}>
+            <ScratchpadSection botId={bot.id} />
+          </Suspense>
+        </ErrorBoundary>
+        {advancedOpened ? (
+          <ErrorBoundary fallback={<SectionLoadFailed />}>
+            <Suspense fallback={null}>
+              <KnowledgeSection botId={bot.id} onSkillsChange={onSkillsChange} />
+            </Suspense>
+          </ErrorBoundary>
         ) : null}
         <label htmlFor={`${ids}-disabled-tools`} className={fieldLabelClass}>
           <Trans>Disabled tools</Trans>
@@ -702,7 +729,7 @@ export function BotSettings({
           <label
             key={toolName}
             htmlFor={`${ids}-disabled-${toolName}`}
-            className="mt-2 flex items-center justify-between gap-3 text-[13px] text-foreground/80"
+            className="mt-2 flex items-center justify-between gap-3 text-[14px] text-muted-foreground"
           >
             <span className="font-mono">{toolName}</span>
             <Switch
@@ -718,35 +745,36 @@ export function BotSettings({
           </label>
         ))}
         {advancedOpened ? <BotCredentialsSection botId={bot.id} /> : null}
-      </details>
+        <div className="mt-5 flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" onClick={() => void onExport()}>
+            <Trans>Export</Trans>
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="text-destructive hover:text-destructive"
+            onClick={onClear}
+          >
+            <Trans>Clear conversation</Trans>
+          </Button>
+        </div>
+      </Disclosure>
       {error ? <p className="mt-2 text-[13px] text-destructive">{error}</p> : null}
-      <div className="mt-5 flex flex-col items-start gap-3">
-        <Button
-          disabled={saving}
-          onClick={() => {
-            void enqueueSave({
-              name,
-              title,
-              description,
-              color,
-              notifyOnFinish,
-            });
-          }}
-        >
-          <Trans>Save</Trans>
-        </Button>
-        <Button variant="ghost" size="sm" className="-ms-2.5" onClick={() => void onExport()}>
-          <Trans>Export</Trans>
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="-ms-2.5 text-destructive hover:text-destructive"
-          onClick={onClear}
-        >
-          <Trans>Clear conversation</Trans>
-        </Button>
-      </div>
+      <Button
+        className="mt-5"
+        disabled={saving}
+        onClick={() => {
+          void enqueueSave({
+            name,
+            title,
+            description,
+            color,
+            notifyOnFinish,
+          });
+        }}
+      >
+        <Trans>Save</Trans>
+      </Button>
     </div>
   );
 }
