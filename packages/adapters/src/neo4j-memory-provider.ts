@@ -19,6 +19,7 @@ import type {
   ConsolidateModelSettings,
   ConsolidationDecline,
   ConsolidationDeclineWrite,
+  ConsolidationDeferred,
   ConsolidationPage,
 } from "./memory-consolidate.js";
 import {
@@ -52,19 +53,25 @@ import type {
 import {
   collapseNeo4jParallelRelations,
   countExtractedNeo4jFacts,
+  deleteNeo4jEntities,
   ensureNeo4jMemorySchema,
   escapeLuceneQuery,
   findNeo4jPeopleByNorms,
   forgetNeo4jDeclinedPair,
+  forgetNeo4jDeferredPair,
   forgetNeo4jFact,
   linkNeo4jEntities,
   linkNeo4jFactEntity,
+  listNeo4jCleanupDeclined,
+  listNeo4jCleanupEntities,
   listNeo4jConsolidationEntities,
   listNeo4jDeclinedPairs,
+  listNeo4jDeferredPairs,
   listUnextractedNeo4jFacts,
   markNeo4jFactExtracted,
   mergeExtractedNeo4jEntity,
   mergeNeo4jDuplicateEntity,
+  noteNeo4jPairTimeout,
   openNeo4jMemoryDriver,
   purgeNeo4jChatSources,
   readNeo4jFactLearnedAt,
@@ -73,6 +80,7 @@ import {
   recallNeo4jFacts,
   rememberNeo4jDeclinedPair,
   renameNeo4jEntity,
+  replaceNeo4jThreadChatFact,
   saveNeo4jFact,
   stampNeo4jExtractedFacts,
 } from "./neo4j-memory-client.js";
@@ -373,6 +381,15 @@ function recallNamespaces(
   };
 }
 
+/** Compaction sets operationId to `history-compact:<threadId>`. */
+function chatThreadId(operationId: string | undefined): string | null {
+  const prefix = "history-compact:";
+  if (!operationId?.startsWith(prefix)) return null;
+  const threadId = operationId.slice(prefix.length).trim();
+  if (!threadId || threadId.length > 200) return null;
+  return threadId;
+}
+
 function digest(parts: string[]): string {
   return createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 32);
 }
@@ -586,6 +603,7 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
       if (text.length > MAX_FACT_CHARS) return { ok: false, error: "content is too long" };
       const kind = request.source.kind === "history" ? "chat" : "memory";
       const generation = request.source.kind === "history" ? request.source.generation : null;
+      const threadId = kind === "chat" ? chatThreadId(context.operationId) : null;
       const ns = saveNamespace(request.scope, request.botId, kind);
       const contentHash = digest([text]);
       const provenance = [
@@ -625,11 +643,25 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
           provenance,
           confidence: kind === "chat" ? 0.8 : 1,
           generation,
+          threadId,
           now: new Date().toISOString(),
         },
         context.signal,
       );
       if (!saved.id) return { ok: false, error: "Neo4j did not store the fact." };
+      if (threadId) {
+        await replaceNeo4jThreadChatFact(
+          await this.ready(context.signal),
+          this.connection.database,
+          {
+            spaceId: context.spaceId,
+            botId: request.botId,
+            threadId,
+            keepFactId: factId,
+          },
+          context.signal,
+        );
+      }
       await this.enqueueExtraction({
         spaceId: context.spaceId,
         userId: context.userId,
@@ -845,6 +877,69 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
     );
   }
 
+  async listDeferredPairs(
+    input: { spaceId: string; ns?: string; ids: string[] },
+    signal?: AbortSignal,
+  ): Promise<ConsolidationDeferred[]> {
+    return listNeo4jDeferredPairs(
+      await this.ready(signal),
+      this.connection.database,
+      input,
+      signal,
+    );
+  }
+
+  async notePairTimeout(input: ConsolidationDeclineWrite, signal?: AbortSignal): Promise<number> {
+    return noteNeo4jPairTimeout(await this.ready(signal), this.connection.database, input, signal);
+  }
+
+  async forgetDeferredPair(
+    input: { spaceId: string; leftId: string; rightId: string },
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await forgetNeo4jDeferredPair(
+      await this.ready(signal),
+      this.connection.database,
+      input,
+      signal,
+    );
+  }
+
+  async listCleanupEntities(
+    spaceId: string,
+    input: { skip: number; limit: number },
+    signal?: AbortSignal,
+  ) {
+    return listNeo4jCleanupEntities(
+      await this.ready(signal),
+      this.connection.database,
+      { spaceId, ...input },
+      signal,
+    );
+  }
+
+  async deleteCleanupEntities(
+    spaceId: string,
+    ids: string[],
+    signal?: AbortSignal,
+  ): Promise<number> {
+    return deleteNeo4jEntities(
+      await this.ready(signal),
+      this.connection.database,
+      { spaceId, ids },
+      signal,
+    );
+  }
+
+  async listCleanupDeclined(spaceId: string, signal?: AbortSignal) {
+    return listNeo4jCleanupDeclined(
+      await this.ready(signal),
+      this.connection.database,
+      { spaceId },
+      signal,
+    );
+  }
+
   async mergeDuplicateEntity(input: Neo4jDuplicateMerge, signal?: AbortSignal) {
     return mergeNeo4jDuplicateEntity(
       await this.ready(signal),
@@ -880,6 +975,7 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
       ns?: string;
       scope?: "page" | "space";
       dryRun?: boolean;
+      collapseTypes?: boolean;
     },
     signal?: AbortSignal,
   ) {

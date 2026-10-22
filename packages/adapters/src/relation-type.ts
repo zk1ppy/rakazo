@@ -159,3 +159,122 @@ function stamp(value: string | null | undefined): string | null {
   const trimmed = value.trim();
   return trimmed || null;
 }
+
+/**
+ * Business types kept on a new edge. Anything else is a synonym or `related_to`.
+ * `*` on MEMORY_RELATION_TYPES keeps the snake_case type and skips the map.
+ */
+export const DEFAULT_RELATION_TYPES = [
+  "knows",
+  "works_at",
+  "works_on",
+  "lives_in",
+  "located_in",
+  "part_of",
+  "member_of",
+  "owns",
+  "created",
+  "attended",
+  "uses",
+  "founded",
+  "manages",
+  "reports_to",
+  "parent_of",
+  "likes",
+  "has",
+  "related_to",
+] as const;
+
+const DEFAULT_RELATION_SYNONYMS: Readonly<Record<string, string>> = {
+  contact_of: "knows",
+  acquainted_with: "knows",
+  friend_of: "knows",
+  employed_by: "works_at",
+  works_for: "works_at",
+  employee_of: "works_at",
+  based_in: "lives_in",
+  resides_in: "lives_in",
+  lives_at: "lives_in",
+  located_at: "located_in",
+  belongs_to: "part_of",
+  mentioned_in: "related_to",
+  discussed_in: "related_to",
+  associated_with: "related_to",
+  linked_to: "related_to",
+};
+
+export interface RelationVocabulary {
+  /** Keep the snake_case type. Synonyms and the allowed list are not applied. */
+  passthrough: boolean;
+  allowed: ReadonlySet<string>;
+  synonyms: ReadonlyMap<string, string>;
+}
+
+const RELATION_TYPE_TOKEN = /^[a-z0-9_]{1,64}$/;
+
+/** Unset uses the built-in list. `*` leaves types as snake_case. A list replaces it. */
+export function readRelationVocabulary(env: NodeJS.ProcessEnv = process.env): RelationVocabulary {
+  const rawTypes = env.MEMORY_RELATION_TYPES?.trim() ?? "";
+  if (rawTypes === "*") {
+    return { passthrough: true, allowed: new Set(), synonyms: new Map() };
+  }
+  const allowed = new Set<string>(DEFAULT_RELATION_TYPES);
+  if (rawTypes) {
+    allowed.clear();
+    for (const part of rawTypes.split(",")) {
+      const type = normalizeRelationType(part);
+      if (type) allowed.add(type);
+    }
+  }
+  allowed.add("related_to");
+  const synonyms = new Map<string, string>();
+  const rawSynonyms = env.MEMORY_RELATION_SYNONYMS;
+  const source =
+    rawSynonyms === undefined
+      ? Object.entries(DEFAULT_RELATION_SYNONYMS)
+      : rawSynonyms.split(",").map((entry) => {
+          const split = entry.split(":");
+          return [split[0] ?? "", split.slice(1).join(":")] as const;
+        });
+  for (const [fromRaw, toRaw] of source) {
+    const from = normalizeRelationType(fromRaw);
+    const to = normalizeRelationType(toRaw);
+    if (!from || !to || from === to) continue;
+    synonyms.set(from, allowed.has(to) ? to : "related_to");
+  }
+  return { passthrough: false, allowed, synonyms };
+}
+
+/**
+ * Vocabulary applied when an edge is written.
+ * An allowed type stays. A synonym becomes its canonical type. Anything else is `related_to`.
+ * Empty input is not a type.
+ */
+export function canonicalRelationType(
+  value: string,
+  vocabulary: RelationVocabulary = readRelationVocabulary(),
+): string | null {
+  const normalized = normalizeRelationType(value);
+  if (!normalized) return null;
+  if (vocabulary.passthrough) return normalized;
+  if (vocabulary.allowed.has(normalized)) return normalized;
+  return vocabulary.synonyms.get(normalized) ?? "related_to";
+}
+
+/**
+ * Cypher CASE for a value that is already snake_case.
+ * Only tokens that match the type pattern are interpolated.
+ */
+export function relationTypeCase(expr: string, vocabulary: RelationVocabulary): string {
+  if (vocabulary.passthrough) return expr;
+  const lines = [`CASE ${expr}`];
+  for (const [from, to] of vocabulary.synonyms) {
+    if (!RELATION_TYPE_TOKEN.test(from) || !RELATION_TYPE_TOKEN.test(to)) continue;
+    lines.push(`WHEN '${from}' THEN '${to}'`);
+  }
+  lines.push(
+    `ELSE CASE WHEN ${expr} IN $relationAllowed THEN ${expr} ELSE 'related_to' END`,
+    "END",
+  );
+  return lines.join(" ");
+}

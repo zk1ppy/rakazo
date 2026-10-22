@@ -9,6 +9,7 @@
     "start": "node --enable-source-maps dist/index.js",
     "memory:backfill-extract": "tsx src/cli/backfill-extract.ts",
     "memory:backfill-consolidate": "tsx src/cli/backfill-consolidate.ts",
+    "memory:cleanup-graph": "tsx src/cli/cleanup-graph.ts",
     "check": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --passWithNoTests"
   },

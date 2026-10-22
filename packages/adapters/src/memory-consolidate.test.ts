@@ -31,14 +31,16 @@ import {
   planCanonicalEntity,
   planCanonicalRename,
   previewMemoryConsolidation,
+  readConsolidateCollapseRelationTypes,
+  readConsolidateMaxPairTimeouts,
   readConsolidateModelSettings,
+  readConsolidateSkipTypes,
 } from "./memory-consolidate.js";
 import type {
   Neo4jConsolidationEntity,
   Neo4jDuplicateMerge,
   Neo4jEntityRename,
 } from "./neo4j-memory-client.js";
-import { REASONING_MODEL_MAX_TOKENS } from "./pi-runtime-limits.js";
 
 const payload = {
   spaceId: "space-1",
@@ -93,6 +95,7 @@ function pageStore(
   renames: Neo4jEntityRename[];
   declines: ConsolidationDecline[];
   forgotten: Array<{ leftId: string; rightId: string }>;
+  deferred: Array<ConsolidationDecline & { timeouts: number }>;
   collapses: Array<{
     spaceId: string;
     ids: string[];
@@ -105,6 +108,7 @@ function pageStore(
   const renames: Neo4jEntityRename[] = [];
   const declines: ConsolidationDecline[] = [];
   const forgotten: Array<{ leftId: string; rightId: string }> = [];
+  const deferred: Array<ConsolidationDecline & { timeouts: number }> = [];
   const collapses: Array<{
     spaceId: string;
     ids: string[];
@@ -117,6 +121,7 @@ function pageStore(
     renames,
     declines,
     forgotten,
+    deferred,
     collapses,
     extractionModel: () => null,
     consolidateModelSettings: () => readConsolidateModelSettings({}),
@@ -167,6 +172,42 @@ function pageStore(
         (decline) => decline.leftId === input.leftId && decline.rightId === input.rightId,
       );
       if (index >= 0) declines.splice(index, 1);
+    },
+    listDeferredPairs: async (input) =>
+      deferred.filter(
+        (marker) =>
+          input.ids.includes(marker.leftId) &&
+          input.ids.includes(marker.rightId) &&
+          (!input.ns || marker.ns === input.ns),
+      ),
+    notePairTimeout: async (input) => {
+      const index = deferred.findIndex(
+        (marker) => marker.leftId === input.leftId && marker.rightId === input.rightId,
+      );
+      if (index >= 0) {
+        const current = deferred[index];
+        if (!current) return 1;
+        current.timeouts += 1;
+        current.leftFingerprint = input.leftFingerprint;
+        current.rightFingerprint = input.rightFingerprint;
+        return current.timeouts;
+      }
+      deferred.push({
+        leftId: input.leftId,
+        rightId: input.rightId,
+        ns: input.ns,
+        botId: input.botId,
+        leftFingerprint: input.leftFingerprint,
+        rightFingerprint: input.rightFingerprint,
+        timeouts: 1,
+      });
+      return 1;
+    },
+    forgetDeferredPair: async (input) => {
+      const index = deferred.findIndex(
+        (marker) => marker.leftId === input.leftId && marker.rightId === input.rightId,
+      );
+      if (index >= 0) deferred.splice(index, 1);
     },
   };
 }
@@ -955,7 +996,7 @@ describe("consolidateMemoryGraph", () => {
   });
 
   it("reads consolidate model settings and falls back when they are blank or invalid", () => {
-    expect(DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS).toBe(REASONING_MODEL_MAX_TOKENS);
+    expect(DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS).toBe(4_096);
     expect(DEFAULT_CONSOLIDATE_TIMEOUT_MS).toBe(180_000);
     expect(readConsolidateModelSettings({}, {})).toEqual({
       thinkingLevel: DEFAULT_CONSOLIDATE_THINKING_LEVEL,
@@ -1327,5 +1368,134 @@ describe("consolidateMemoryGraph", () => {
     expect(store.forgotten).toEqual([{ leftId: "apple-org", rightId: "apple-person" }]);
     expect(run).toHaveBeenCalledTimes(1);
     expect(declinedPairIdentity(person, org).botId).toBe("bot-1");
+  });
+
+  it("does not pair path segments or events whose dates differ", () => {
+    expect(readConsolidateSkipTypes({})).toEqual(new Set(["Event"]));
+    expect(readConsolidateSkipTypes({ MEMORY_CONSOLIDATE_SKIP_TYPES: "-" })).toEqual(new Set());
+    expect(readConsolidateMaxPairTimeouts({})).toBe(2);
+    expect(readConsolidateMaxPairTimeouts({ MEMORY_CONSOLIDATE_MAX_PAIR_TIMEOUTS: "1" })).toBe(1);
+    expect(readConsolidateCollapseRelationTypes({})).toBe(false);
+    expect(
+      readConsolidateCollapseRelationTypes({ MEMORY_CONSOLIDATE_COLLAPSE_RELATION_TYPES: "on" }),
+    ).toBe(true);
+    const path = entity({
+      id: "path",
+      type: "Object",
+      name: "shared/fabriq/prep-notes",
+      normName: "shared fabriq prep notes",
+    });
+    const segment = entity({ id: "fabriq", type: "Object", name: "fabriq", normName: "fabriq" });
+    expect(classifyConsolidationPair(path, segment)).toEqual({ action: "skip", reason: "weak" });
+    const monday = entity({
+      id: "hiit-22",
+      type: "Event",
+      name: "Brief du 22/10 9h",
+      normName: "brief du 22 10 9h",
+    });
+    const tuesday = entity({
+      id: "hiit-23",
+      type: "Event",
+      name: "Brief du 23/10 9h",
+      normName: "brief du 23 10 9h",
+    });
+    expect(classifyConsolidationPair(monday, tuesday, null, { skipTypes: new Set() })).toEqual({
+      action: "skip",
+      reason: "numeric",
+    });
+    expect(classifyConsolidationPair(monday, tuesday)).toEqual({
+      action: "skip",
+      reason: "numeric",
+    });
+    const morning = entity({
+      id: "hiit-am",
+      type: "Event",
+      name: "Test HIIT matin",
+      normName: "test hiit matin",
+    });
+    const evening = entity({
+      id: "hiit-pm",
+      type: "Event",
+      name: "Test HIIT soir",
+      normName: "test hiit soir",
+    });
+    expect(classifyConsolidationPair(morning, evening)).toEqual({
+      action: "skip",
+      reason: "skipped-type",
+    });
+  });
+
+  it("skips a pair after the timeout cap and still asks it once before that", async () => {
+    const run: AgentRuntime["run"] = async function* (_request, context) {
+      await new Promise<void>((resolve) => {
+        const signal = context?.signal;
+        if (!signal || signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      throw new Error("Request was aborted");
+    };
+    const store = pageStore([
+      entity({ id: "ada-short", name: "Ada", normName: "ada" }),
+      entity({ id: "ada-full", name: "Ada Example", normName: "ada example" }),
+    ]);
+    store.consolidateModelSettings = () => ({
+      thinkingLevel: "low",
+      maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
+      timeoutMs: 20,
+    });
+    const calls = vi.fn(run);
+    await consolidateMemoryGraph(deps(calls), payload, store);
+    expect(calls).toHaveBeenCalledTimes(1);
+    expect(store.deferred).toHaveLength(1);
+    expect(store.deferred[0]?.timeouts).toBe(1);
+    expect(store.declines).toEqual([]);
+    calls.mockClear();
+    await consolidateMemoryGraph(deps(calls), payload, store);
+    expect(calls).toHaveBeenCalledTimes(1);
+    expect(store.deferred[0]?.timeouts).toBe(2);
+    calls.mockClear();
+    await consolidateMemoryGraph(deps(calls), payload, store);
+    expect(calls).not.toHaveBeenCalled();
+    expect(store.declines).toEqual([]);
+  });
+
+  it("advances a full page when timeouts use up the confirmation budget", async () => {
+    const run: AgentRuntime["run"] = async function* (_request, context) {
+      await new Promise<void>((resolve) => {
+        const signal = context?.signal;
+        if (!signal || signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      throw new Error("Request was aborted");
+    };
+    const people = ["Ada", "Bea", "Cleo", "Dora", "Eve"].flatMap((name) => [
+      entity({ id: `${name}-short`, name, normName: name.toLowerCase() }),
+      entity({
+        id: `${name}-full`,
+        name: `${name} Example`,
+        normName: `${name.toLowerCase()} example`,
+      }),
+    ]);
+    const store = pageStore(people, { pageFull: true });
+    store.consolidateModelSettings = () => ({
+      thinkingLevel: "low",
+      maxOutputTokens: DEFAULT_CONSOLIDATE_MAX_OUTPUT_TOKENS,
+      timeoutMs: 20,
+    });
+    const queue = jobs();
+    await consolidateMemoryGraph(deps(run, queue), payload, store);
+    const job = queue.enqueue.mock.calls[0]?.[0];
+    expect(job?.name).toBe("memory.consolidate");
+    if (job?.name !== "memory.consolidate") throw new Error("expected memory.consolidate");
+    expect(job.payload.afterId).toBe("Eve-full");
+    expect(job.payload.skipped).toHaveLength(MAX_CONSOLIDATE_LLM_CALLS);
+    expect(store.declines).toEqual([]);
+    expect(store.deferred).toHaveLength(MAX_CONSOLIDATE_LLM_CALLS);
   });
 });

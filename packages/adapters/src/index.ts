@@ -85,6 +85,12 @@ export * from "./mcp-transport.js";
 export * from "./media-generation-factory.js";
 export * from "./media-generation-provider.js";
 export {
+  cleanupMemoryGraph,
+  formatCleanupReport,
+  loadNeo4jCleanupSpaces,
+  parseCleanupGraphArgs,
+} from "./memory-cleanup.js";
+export {
   assertConsolidateMaxOutputTokens,
   assertConsolidateThinkingLevel,
   assertConsolidateTimeoutMs,

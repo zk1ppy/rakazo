@@ -454,6 +454,8 @@ export async function compactHistory(deps: CompactHistoryDeps, threadId: string)
   if (semanticMemory) {
     externalSaveAttempted = true;
     try {
+      // operationId names the thread. The provider replaces the previous chat
+      // fact for that thread and the edges that exist only because of it.
       const result = await semanticMemory.provider.save(
         {
           content: summary,

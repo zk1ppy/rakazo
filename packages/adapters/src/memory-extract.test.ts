@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MemoryExtractDeps, MemoryExtractStore } from "./memory-extract.js";
 import {
   assertOwnerAliases,
+  capExtractedRelations,
   extractMemoryGraph,
   isFilesystemPathName,
   isNonReferentName,
@@ -21,6 +22,11 @@ import {
   normalizeRelationType,
   parseMemoryExtraction,
   planExtractionChunks,
+  readDroppedRelationTypes,
+  readDropSnakeCaseIds,
+  readExtractChatRelations,
+  readExtractMaxRelations,
+  readExtractMaxRelationsPerEntity,
   readExtractTimeoutMs,
   readNeo4jExtractionModel,
   readOwnerAliases,
@@ -522,6 +528,100 @@ describe("extraction role and measurement guards", () => {
     );
     expect(paths.entities.map((entity) => entity.name)).toEqual(["Vigierisc /ATRISC"]);
     expect(isNonReferentName("Step 1: warmup")).toBe(false);
+    expect(isFilesystemPathName("shared/fabriq/prep-notes")).toBe(true);
+    expect(isFilesystemPathName("notes.md")).toBe(true);
+    expect(isFilesystemPathName("importer_garmin")).toBe(true);
+    expect(isFilesystemPathName("jean-pierre")).toBe(false);
+    expect(isFilesystemPathName("Jean_Pierre")).toBe(false);
+    expect(isFilesystemPathName("importer_garmin", { dropSnakeCaseIds: false, patterns: [] })).toBe(
+      false,
+    );
+    expect(isFilesystemPathName("hub-42", { dropSnakeCaseIds: true, patterns: [/^hub-/u] })).toBe(
+      true,
+    );
+    expect(MEMORY_EXTRACT_INSTRUCTIONS).toContain("relative path");
+    expect(MEMORY_EXTRACT_INSTRUCTIONS).toContain("explicitly states");
+    expect(MEMORY_EXTRACT_INSTRUCTIONS).toContain("mentioned_in");
+    expect(readExtractMaxRelations({})).toBe(32);
+    expect(readExtractMaxRelations({ MEMORY_EXTRACT_MAX_RELATIONS: "10" })).toBe(10);
+    expect(readExtractMaxRelations({ MEMORY_EXTRACT_MAX_RELATIONS: "nope" })).toBe(32);
+    expect(readExtractMaxRelationsPerEntity({})).toBe(6);
+    expect(readExtractChatRelations({})).toBe(true);
+    expect(readExtractChatRelations({ MEMORY_EXTRACT_CHAT_RELATIONS: "off" })).toBe(false);
+    expect(readDropSnakeCaseIds({})).toBe(true);
+    expect(readDropSnakeCaseIds({ MEMORY_EXTRACT_DROP_SNAKE_CASE_IDS: "off" })).toBe(false);
+    expect(readDroppedRelationTypes({})).toEqual(new Set(["mentioned_in", "discussed_in"]));
+    expect(readDroppedRelationTypes({ MEMORY_EXTRACT_DROP_RELATION_TYPES: "-" }).size).toBe(0);
+  });
+
+  it("keeps six relations on one entity and drops mention edges", () => {
+    const names = ["Ada", "Bea", "Cleo", "Dora", "Eve", "Fay", "Gia", "Hana"];
+    const extracted = parseMemoryExtraction(
+      JSON.stringify({
+        entities: [
+          { type: "Event", name: "Test HIIT" },
+          ...names.map((name) => ({ type: "Person", name })),
+          { type: "Object", name: "Board" },
+          { type: "Object", name: "shared/fabriq/prep-notes" },
+          { type: "Object", name: "importer_garmin" },
+        ],
+        relations: [
+          ...names.map((name) => ({ source: "Test HIIT", target: name, type: "knows" })),
+          { source: "Test HIIT", target: "Board", type: "mentioned_in" },
+          { source: "Ada", target: "Board", type: "discussed_in" },
+        ],
+      }),
+      "space-1",
+      "shared",
+      null,
+      [],
+      {
+        maxRelations: 32,
+        maxRelationsPerEntity: 6,
+        dropNames: { dropSnakeCaseIds: true, patterns: [] },
+        dropRelationTypes: new Set(["mentioned_in", "discussed_in"]),
+      },
+    );
+    expect(extracted.entities.map((entity) => entity.name)).not.toContain(
+      "shared/fabriq/prep-notes",
+    );
+    expect(extracted.entities.map((entity) => entity.name)).not.toContain("importer_garmin");
+    expect(extracted.relations).toHaveLength(6);
+    expect(extracted.relations.map((relation) => relation.toNorm)).toEqual([
+      "ada",
+      "bea",
+      "cleo",
+      "dora",
+      "eve",
+      "fay",
+    ]);
+    expect(extracted.relations.some((relation) => relation.type.includes("mentioned"))).toBe(false);
+    const capped = capExtractedRelations(extracted.relations, 3, 6);
+    expect(capped.relations).toHaveLength(3);
+    expect(capped.capped).toBe(3);
+    expect(capped.perEntityDropped).toBe(0);
+  });
+
+  it("stores chat entities and omits their relations when asked", () => {
+    const extracted = parseMemoryExtraction(
+      JSON.stringify({
+        entities: [
+          { type: "Person", name: "Ada Lovelace" },
+          { type: "Organization", name: "Analytical Engines" },
+        ],
+        relations: [{ source: "Ada Lovelace", target: "Analytical Engines", type: "founded" }],
+      }),
+      "space-1",
+      "history:bot-1",
+      null,
+      [],
+      { includeRelations: false, dropNames: { dropSnakeCaseIds: true, patterns: [] } },
+    );
+    expect(extracted.entities.map((entity) => entity.name).sort()).toEqual([
+      "Ada Lovelace",
+      "Analytical Engines",
+    ]);
+    expect(extracted.relations).toEqual([]);
   });
 });
 
@@ -1002,5 +1102,27 @@ describe("extractMemoryGraph", () => {
       thinkingLevel: "low",
       maxTokens: 8192,
     });
+  });
+
+  it("omits chat relations when MEMORY_EXTRACT_CHAT_RELATIONS is off", async () => {
+    vi.stubEnv("MEMORY_EXTRACT_CHAT_RELATIONS", "off");
+    const memory = store("Ada Lovelace founded Analytical Engines.", { aliases: [] });
+    await extractMemoryGraph(
+      deps(
+        done(
+          JSON.stringify({
+            entities: [
+              { type: "Person", name: "Ada Lovelace" },
+              { type: "Organization", name: "Analytical Engines" },
+            ],
+            relations: [{ source: "Ada Lovelace", target: "Analytical Engines", type: "founded" }],
+          }),
+        ),
+      ),
+      payload({ ns: "history:bot-1" }),
+      memory,
+    );
+    expect(memory.applyExtraction.mock.calls[0]?.[0].relations).toEqual([]);
+    expect(memory.applyExtraction.mock.calls[0]?.[0].entities).toHaveLength(2);
   });
 });
