@@ -3,7 +3,7 @@
 Rakazo keeps the agent runtime and the computer runtime separate:
 
 ```text
-chat/API -> one Pi agent session -> Rakazo computer tools -> SandboxProvider -> E2B / Daytona / Box
+chat/API -> one Pi agent session -> Rakazo computer tools -> SandboxProvider -> E2B / Daytona / Boat
                                                    |-> Docker
                                                    |-> desktop/fake
 
@@ -18,7 +18,7 @@ Each workspace gets one Team Computer by default. Bots share its files and insta
 
 Each active Team bot gets its own X display and Chrome process, with a persistent Chrome profile keyed to the bot's identity. Logins, cookies, and browser history are independent. Profiles are never cloned from another bot, merged, or deleted when a desktop is released. Both bots keep their changes; reopening a bot uses its existing profile even when its display slot changes. Team runs use fenced per-bot database leases: different bots can operate concurrently, and one bot has only one computer driver at a time.
 
-Docker, E2B, Daytona, and Box use the same Linux desktop lifecycle commands. Remote adapters share allocation, observation, actions, and control handling; provider code supplies command execution, persistent workspace paths, and screen URLs. Box exposes the shared runtime through protected `host <port> --private` routes instead of its default desktop API. View and control use separate revocable websocket capabilities; teardown disconnects clients before a display slot is reused. A failed teardown keeps the slot reserved for retry.
+Docker, E2B, Daytona, and Boat use the same Linux desktop lifecycle commands. Remote adapters share allocation, observation, actions, and control handling; provider code supplies command execution, persistent workspace paths, and screen URLs. Boat exposes the shared runtime through protected ports from its `hostPort` API instead of its default desktop API. View and control use separate revocable websocket capabilities; teardown disconnects clients before a display slot is reused. A failed teardown keeps the slot reserved for retry.
 
 Desktop stacks start lazily when a bot uses graphical tools. There is no configured desktop cap by default; a computer can host 100 or more bot profiles, and simultaneous desktops are bounded by its RAM, CPU, process capacity, and available local debugger ports. Docker operators can set a positive `SANDBOX_TEAM_SCREEN_LIMIT` to cap active desktops (`0` leaves it unset). Requests beyond an explicit limit return `MULTI_SCREEN_UNAVAILABLE`; shell and file tools remain available. All desktops share one token-protected screen gateway, so adding desktops does not require publishing more ports. Each view/control capability targets a unique local Unix socket; recycling a display cannot redirect an old connection to its next bot. Inactive bots do not each run Chrome. Closing a viewer leaves the desktop intact. For Docker-managed computers, successful run completion revokes the run's control but retains that bot's screen and browser for the next run, keeping the existing view open. If a configured Team screen limit is reached, the oldest idle, uncontrolled screen may be torn down for a new bot. Failed or canceled runs and explicit computer deletion still tear down their screens. Other provider release behavior is unchanged. Whole-computer idle shutdown stops remaining processes while preserving the workspace. There is no separate inactivity timer per desktop. Persistent profiles consume disk but do not require a running Chrome process.
 
@@ -52,9 +52,9 @@ The web and desktop computer view opens a terminal and a file browser from a doc
 - Without control (for example after it was released or expired), an "Open shell" button takes control again and switches to the shell.
 - A user holding control also gets a Shell tab with an interactive shell. It starts on first use, stays connected across tab switches, and reconnects to a fresh shell if the connection drops. `computer.terminalUrl` starts a small PTY server in the computer beside the screen gateway.
   - It is bound to the display's control token and reached through the same sealed capability and gateway as the control screen. Later sessions under the same lease (another tab, a reopened window) join that server with their own shell, so open shells keep running.
-  - It runs as the computer's workspace user (never root), with the same environment as the bot's `shell` tool. Docker execs inherit the container's non-root user; E2B, Daytona, and Box use the same command runner as `shell`. When the computer runs as a host uid without a passwd entry (Docker on macOS), the terminal names it `rakazo` through nss_wrapper for its own session, so prompts and `whoami` work; `/etc/passwd` stays unchanged.
+  - It runs as the computer's workspace user (never root), with the same environment as the bot's `shell` tool. Docker execs inherit the container's non-root user; E2B, Daytona, and Boat use the same command runner as `shell`. When the computer runs as a host uid without a passwd entry (Docker on macOS), the terminal names it `rakazo` through nss_wrapper for its own session, so prompts and `whoami` work; `/etc/passwd` stays unchanged.
   - Releasing control, expiry, or screen teardown stops it, disconnects every shell, and removes its session files.
-- Providers opt in through `SandboxProvider.connectTerminal`. Docker, E2B, Daytona, and Box support it. Host (`desktop`) computers never expose a browser shell; other computers without it show only Activity.
+- Providers opt in through `SandboxProvider.connectTerminal`. Docker, E2B, Daytona, and Boat support it. Host (`desktop`) computers never expose a browser shell; other computers without it show only Activity.
 - The fake provider serves an emulated shell from a loopback websocket gateway that speaks the same frame protocol. Tests can then drive the browser terminal through the sealed capability and web proxy without exposing a host shell.
 
 **Files**
@@ -67,6 +67,10 @@ The web and desktop computer view opens a terminal and a file browser from a doc
 
 The web service logs `screen.proxy.target_rejected`, `screen.proxy.http_failed`, `screen.proxy.http_upstream_response`, `screen.proxy.websocket_handshake_failed`, `screen.proxy.websocket_error`, `screen.proxy.websocket_upgraded`, `screen.proxy.websocket_closed`, and revocation events. Each event includes a random `screen.connection_id` and a view/control policy. WebSocket close events include whether the upstream handshake completed, its duration, and the side that initiated the close (`client`, `upstream`, or `revoked`). Logs omit capability URLs, socket tokens, provider hostnames, cookies, and request headers.
 
+The web and Electron screen frame is sandboxed, so the app cannot look inside it. Before framing a proxied page the app fetches it once and shows the proxy's refusal (for example `Screen unavailable (upstream_timeout)`) in place of the screen. The proxy rewrites every noVNC page with a small reporter that posts `loading` as soon as the page runs and then `connecting`, `connected`, `failed` (with noVNC's status text) or `disconnected` to the app; Rakazo's own `embed.html` sets the same noVNC classes so Docker computers report too. A `failed` report, or nothing past `loading` within 15 seconds, shows the error and Retry instead of a blank frame. A frame that stays silent means the document never executed in that browser; one that stops at `loading` means noVNC's modules never finished evaluating; a `failed` report means the page ran and noVNC could not connect.
+
+The shim also removes `VideoDecoder` from the page. noVNC releases before 1.7 probe WebCodecs H.264 support with a top-level `await`, and on some Android devices `VideoDecoder.flush()` never returns, which leaves the page on `noVNC_loading` with no error. Screens never use H.264. Every proxied screen response is sent with `Cache-Control: no-transform`, so a CDN in front of the web service does not inject scripts into or minify the page.
+
 When the screen shows a connection error, check whether `computer.screenUrl` succeeded in the API logs, then inspect web-service `screen.proxy.*` events around the same time. On `screen.proxy.target_rejected`, read `reason`: `invalid_path` is not a session path (API not contacted); `authority_rejected` is a non-OK API response (expired, revoked, or an API error); `invalid_authority_response` is an OK response with an invalid or malformed target body; `authority_unavailable` is a request, connectivity, or timeout failure. An upstream error or non-101 handshake points to the provider screen gateway. An upgraded connection that closes quickly points to a transport drop after the handshake. If the API issued a URL but no web-service event appears, inspect the browser Network panel and its WebSocket request. Do not paste the full capability URL into an issue or log.
 
 ## E2B backend
@@ -77,11 +81,11 @@ The E2B adapter uses `@e2b/desktop` for machine lifecycle, shell commands, files
 
 The database stores the provider kind and opaque `providerRef`. That reference is an acceleration path, not durable data. It is passed back only to the same provider kind. A missing machine or a provider-kind change creates a replacement and restores its workspace through the provider-neutral contract.
 
-## Box backend
+## Boat backend
 
-The Box adapter uses ASCII's official TypeScript SDK for lifecycle, command, and file operations. It creates and resumes boxes with `noEnv: true`, as required when a third party supplies the API key, and keeps a two-hour TTL refreshed while the computer is active. The shared runtime creates each bot's display and noVNC transports, exposed through protected Box port hosting. Rakazo's encrypted screen capability proxy binds the view/control policy and keeps the provider credentials out of browser-visible URLs. Observations and actions target the assigned bot display.
+The Boat adapter uses Boat's official TypeScript SDK for lifecycle, command, and file operations. It creates and resumes sandboxes with `noEnv: true`, as required when a third party supplies the API key, and keeps a two-hour TTL refreshed while the computer is active. The shared runtime creates each bot's display and noVNC transports, exposed through protected Boat port hosting. Rakazo's encrypted screen capability proxy binds the view/control policy and keeps the provider credentials out of browser-visible URLs. Observations and actions target the assigned bot display.
 
-Box stop archives the machine and resume reconnects the same opaque box id. Each bot’s Chrome profile lives under the portable workspace and is included in checkpoint/export. The Box emulator uses the same multi-screen contract as the other managed-provider emulators.
+Boat stop archives the machine and resume reconnects the same opaque sandbox id. Each bot’s Chrome profile lives under the portable workspace and is included in checkpoint/export. Boat states the API cannot recover from (deleted, cancelled, snapshot data expired, or an `error` that recover cannot fix) are reported as gone, so the computer is replaced and restored from its last checkpoint.
 
 ## Persistence
 
@@ -102,7 +106,7 @@ contacts-export replay through real Pi, with either a stateful fake computer or
 real Docker Chromium. It requires no inference and complements the vision
 acceptance test below.
 
-Offline tests cover tool-result images, action parsing, provider conformance (including the page-browser adapter and computer_act fallback), workspace checkpoint/restore, provider SDK translation, lifecycle integration, and multi-screen managed-provider emulators. They never call a model or live sandbox.
+Offline tests cover tool-result images, action parsing, provider conformance (including the page-browser adapter and computer_act fallback), workspace checkpoint/restore, provider SDK translation, lifecycle integration, and the real Boat adapter against an in-memory Boat API. They never call a model or live sandbox.
 
 The explicit acceptance test requires Docker (for temporary Postgres), `E2B_API_KEY`, `OPENROUTER_API_KEY`, and a vision-capable OpenRouter model id:
 

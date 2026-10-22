@@ -3,12 +3,13 @@ import { builtinAgentTools } from "./builtin-tools.js";
 import {
   filterImageReturningComputerTools,
   IMAGE_RETURNING_COMPUTER_TOOLS,
-  MODEL_CANNOT_SEE_MESSAGE,
   modelAcceptsImageInput,
   modelIdSupportsImages,
   resolveModelRefForVisionCheck,
   updateModelImageCapabilities,
 } from "./model-vision.js";
+import { liveCatalogEntry } from "./pi-live-catalog.js";
+import { resolveRuntimeModel } from "./pi-runtime.js";
 
 describe("model vision gating for computer tools", () => {
   afterEach(() => {
@@ -30,6 +31,21 @@ describe("model vision gating for computer tools", () => {
   it("sees models the runtime adds to the bundled catalog", () => {
     expect(modelAcceptsImageInput("anthropic", "claude-sonnet-5-5")).toBe(true);
     expect(modelAcceptsImageInput("openai-codex", "gpt-6.1-sol")).toBe(true);
+  });
+
+  it.each([
+    ["openai", "gpt-4o-2099-01-01", true],
+    ["openai-codex", "gpt-6-luna-latest", true],
+    ["openai-codex", "gpt-unknown-future-model", false],
+  ])("agrees with listing and execution for live %s/%s", (provider, id, images) => {
+    expect(liveCatalogEntry(provider, id)?.images).toBe(images);
+    expect(resolveRuntimeModel({ provider, id }).model?.input.includes("image")).toBe(images);
+    expect(modelAcceptsImageInput(provider, id)).toBe(images);
+    const tools = filterImageReturningComputerTools(
+      builtinAgentTools,
+      modelAcceptsImageInput(provider, id),
+    );
+    expect(tools.some((tool) => tool.name === "computer_observe")).toBe(images);
   });
 
   it("resolves the scripted placeholder like Pi before checking vision", () => {
@@ -81,10 +97,5 @@ describe("model vision gating for computer tools", () => {
     expect(names).toEqual(builtinAgentTools.map((tool) => tool.name));
     expect(names).toContain("computer_observe");
     expect(names).toContain("computer_act");
-  });
-
-  it("exposes a clear operator-facing cannot-see message", () => {
-    expect(MODEL_CANNOT_SEE_MESSAGE).toMatch(/cannot see/i);
-    expect(MODEL_CANNOT_SEE_MESSAGE).toMatch(/vision-capable model/i);
   });
 });

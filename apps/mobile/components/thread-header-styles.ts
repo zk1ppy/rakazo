@@ -18,13 +18,18 @@ export function createThreadHeaderStyles() {
     },
     titleCapsuleFill: {
       borderWidth: StyleSheet.hairlineWidth,
-      borderColor: tokens.border,
-      backgroundColor: tokens.card,
+      borderColor: tokens.glassStroke,
+      backgroundColor: tokens.glassFill,
     },
     title: {
       color: tokens.foreground,
       fontSize: 18,
       fontWeight: "600",
+    },
+    headerActions: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 20,
     },
     circleButton: {
       flex: 1,
@@ -34,15 +39,23 @@ export function createThreadHeaderStyles() {
     },
     composerFill: {
       borderWidth: StyleSheet.hairlineWidth,
-      borderColor: tokens.border,
-      backgroundColor: tokens.card,
+      borderColor: tokens.glassStroke,
+      backgroundColor: tokens.glassFill,
     },
     headerFade: {
       position: "absolute",
       top: 0,
       left: 0,
       right: 0,
-      experimental_backgroundImage: `linear-gradient(to bottom, ${tokens.background} 0%, ${tokens.background} 58%, ${transparentBackground} 100%)`,
+      backgroundColor: tokens.background,
+    },
+    headerFadeEdge: {
+      position: "absolute",
+      top: "100%",
+      left: 0,
+      right: 0,
+      height: 16,
+      experimental_backgroundImage: `linear-gradient(to bottom, ${tokens.background} 0%, ${transparentBackground} 100%)`,
     },
     composerFade: {
       position: "absolute",

@@ -120,7 +120,12 @@ afterEach(() => {
   container.remove();
 });
 
-type SavePatch = { disabledBuiltinTools?: string[] };
+type SavePatch = {
+  disabledBuiltinTools?: string[];
+  name?: string;
+  title?: string;
+  fleetManagement?: boolean;
+};
 
 function setField(input: HTMLInputElement, value: string) {
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
@@ -151,6 +156,51 @@ async function renderSettings(onSave: (patch: SavePatch) => Promise<void>, curre
   });
   await flush();
 }
+
+describe("BotSettings help", () => {
+  it("keeps row explainers behind help without changing the management switch", async () => {
+    const onSave = vi.fn<(patch: SavePatch) => Promise<void>>(async () => undefined);
+    await renderSettings(onSave, { ...bot, fleetManagement: false });
+    const advanced = container.querySelector<HTMLButtonElement>(
+      '[data-testid="bot-settings-advanced"] button[aria-expanded]',
+    );
+    await act(async () => advanced?.click());
+    expect(advanced?.getAttribute("aria-expanded")).toBe("true");
+    const label = [...container.querySelectorAll("label")].find(
+      (entry) => entry.textContent === "Manage the bots it creates",
+    );
+    const toggle = document.getElementById(label?.htmlFor ?? "");
+    const speechToggle = container.querySelector<HTMLButtonElement>('[id$="-auto-speak"]');
+    const speechRow = speechToggle?.closest("label");
+    expect(speechRow?.htmlFor).toBe(speechToggle?.id);
+    expect(speechRow?.firstElementChild?.textContent).toBe("Read replies aloud");
+    expect(speechRow?.lastElementChild).toBe(speechToggle);
+    expect(toggle?.getAttribute("aria-checked")).toBe("false");
+    for (const label of ["Notifications", "Manage the bots it creates"]) {
+      const help = container.querySelector(`[aria-label="About ${label}"]`);
+      const description = document.getElementById(help?.getAttribute("aria-describedby") ?? "");
+      expect(description?.textContent).toContain(
+        label === "Notifications"
+          ? "Get notified when this Bot finishes"
+          : "Instruction, model, routine and group edits",
+      );
+      expect(description?.classList.contains("sr-only")).toBe(true);
+      expect(description?.closest('[aria-hidden="true"], [hidden]')).toBeNull();
+    }
+    expect(document.querySelector('[data-slot="tooltip-content"]')).toBeNull();
+    const help = container.querySelector<HTMLButtonElement>(
+      '[aria-label="About Manage the bots it creates"]',
+    );
+    await act(async () => help?.click());
+    expect(document.querySelector('[data-slot="tooltip-content"]')?.textContent).toContain(
+      "Organize the sidebar and edit bots. Instruction, model, routine and group edits need approval.",
+    );
+    expect(toggle?.getAttribute("aria-checked")).toBe("false");
+    expect(onSave).not.toHaveBeenCalled();
+    await act(async () => toggle?.click());
+    expect(onSave).toHaveBeenCalledWith({ fleetManagement: true });
+  });
+});
 
 describe("BotSettings disabled tools", () => {
   it("omits the disabled-tool list from an unrelated save", async () => {
@@ -426,4 +476,30 @@ describe("BotSettings disabled tools", () => {
     expect(container.textContent).toContain("Network failed");
     expect(container.textContent).not.toContain("Unknown tool");
   });
+});
+
+it("omits projected identity values on unrelated saves but keeps explicit edits", async () => {
+  const onSave = vi.fn<(patch: SavePatch) => Promise<void>>(async () => undefined);
+  await renderSettings(onSave, { ...bot, name: "Бот", title: "" });
+  const save = [...container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Save",
+  )!;
+  await act(async () => save.click());
+  await flush();
+  expect(onSave.mock.calls[0]?.[0]).not.toHaveProperty("name");
+  expect(onSave.mock.calls[0]?.[0]).not.toHaveProperty("title");
+  await act(async () => {
+    setField(container.querySelector<HTMLInputElement>('[id$="-name"]')!, "CustomerSupportBot2026");
+    setField(container.querySelector<HTMLInputElement>('[id$="-title"]')!, "Support");
+  });
+  await act(async () => save.click());
+  await flush();
+  expect(onSave.mock.calls[1]?.[0]).toMatchObject({
+    name: "CustomerSupportBot2026",
+    title: "Support",
+  });
+  await act(async () => save.click());
+  await flush();
+  expect(onSave.mock.calls[2]?.[0]).not.toHaveProperty("name");
+  expect(onSave.mock.calls[2]?.[0]).not.toHaveProperty("title");
 });

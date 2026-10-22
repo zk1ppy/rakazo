@@ -3,7 +3,6 @@ import {
   combineTranscript,
   Dictation,
   MAX_TRANSCRIPTION_RESPONSE_BYTES,
-  speechLocaleTag,
   TRANSCRIPTION_RESPONSE_TIMEOUT_MS,
   transcriptionLanguage,
   webSpeechAvailable,
@@ -824,6 +823,38 @@ describe("Dictation web speech", () => {
   function done(transcript: string): Part {
     return { transcript, isFinal: true };
   }
+
+  it("listens in the language the app is set to", async () => {
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => (key === "rakazo.uiLocale" ? "nl" : null),
+      setItem: () => undefined,
+      removeItem: () => undefined,
+      clear: () => undefined,
+    });
+
+    const dictation = new Dictation();
+    await dictation.listen({ mode: "hold", onFinal: () => undefined });
+
+    expect(instances[0]?.lang).toBe("nl-NL");
+  });
+
+  it("maps a regional browser language onto the app's own tag", async () => {
+    vi.stubGlobal("navigator", { language: "nl-BE" });
+
+    const dictation = new Dictation();
+    await dictation.listen({ mode: "hold", onFinal: () => undefined });
+
+    expect(instances[0]?.lang).toBe("nl-NL");
+  });
+
+  it("keeps the browser language when the app has no catalog for it", async () => {
+    vi.stubGlobal("navigator", { language: "it-IT" });
+
+    const dictation = new Dictation();
+    await dictation.listen({ mode: "hold", onFinal: () => undefined });
+
+    expect(instances[0]?.lang).toBe("it-IT");
+  });
 
   it("rides out a pause in the middle of a sentence", async () => {
     vi.useFakeTimers();
@@ -1649,11 +1680,6 @@ describe("Dictation web speech", () => {
 });
 
 describe("transcriptionLanguage", () => {
-  it("maps an app locale to a tag the recognizer accepts", () => {
-    expect(speechLocaleTag("es")).toBe("es-ES");
-    expect(speechLocaleTag("pt-BR")).toBe("pt-BR");
-  });
-
   it("hints the provider with the language the caller picked", () => {
     vi.stubGlobal("navigator", { language: "es-ES" });
     expect(transcriptionLanguage()).toBe("es");

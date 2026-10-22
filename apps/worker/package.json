@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "node ../../scripts/dev-watch.mjs src/index.ts",
-    "start": "tsx src/index.ts",
+    "build": "node ../../scripts/build-server.mjs src/index.ts",
+    "start": "node --enable-source-maps dist/index.js",
     "memory:backfill-extract": "tsx src/cli/backfill-extract.ts",
     "memory:backfill-consolidate": "tsx src/cli/backfill-consolidate.ts",
     "check": "tsc --noEmit -p tsconfig.json",
@@ -21,6 +22,6 @@
   },
   "devDependencies": {
     "typescript": "7.0.2",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   }
 }

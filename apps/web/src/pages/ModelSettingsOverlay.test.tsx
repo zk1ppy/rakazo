@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
 
+import type * as UiWeb from "@rakazo/ui-web";
 import type { ComponentProps, ReactNode } from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+
+type UiWebModule = typeof UiWeb;
 
 const models = vi.hoisted(() => ({
   list: vi.fn(),
@@ -30,6 +33,7 @@ vi.mock("../lib/rpc", () => ({
 }));
 vi.mock("../lib/localized-provider-hint", () => ({
   localizedProviderHint: () => "API key",
+  providerRowHint: () => null,
 }));
 vi.mock("@lingui/react/macro", () => {
   const t = (parts: TemplateStringsArray, ...values: unknown[]) =>
@@ -44,9 +48,24 @@ vi.mock("@lingui/react/macro", () => {
       value === 1 ? one : other,
   };
 });
-vi.mock("@rakazo/ui-web", () => {
+vi.mock("@rakazo/ui-web", async (importOriginal) => {
+  const actual = await importOriginal<UiWebModule>();
+  const {
+    Checkbox,
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuGroup,
+    DropdownMenuItem,
+    DropdownMenuLabel,
+    DropdownMenuTrigger,
+    Label,
+    Popover,
+    PopoverContent,
+    PopoverTrigger,
+  } = actual;
   const Pass = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
+    ...actual,
     AlertDialog: ({ open, children }: { open?: boolean; children?: ReactNode }) =>
       open ? <div>{children}</div> : null,
     AlertDialogAction: ({
@@ -86,12 +105,36 @@ vi.mock("@rakazo/ui-web", () => {
     ),
     Dialog: Pass,
     DialogClose: Pass,
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuGroup,
+    DropdownMenuItem,
+    DropdownMenuLabel,
+    DropdownMenuTrigger,
     DialogContent: Pass,
-    DialogDescription: Pass,
+    DialogDescription: ({ children }: { children?: ReactNode }) => (
+      <p data-testid="model-description">{children}</p>
+    ),
+    Popover,
+    PopoverContent,
+    PopoverTrigger,
     DialogHeader: Pass,
     DialogTitle: Pass,
     Input: (props: ComponentProps<"input">) => <input {...props} />,
-    ModelThinkingOptions: () => null,
+    Checkbox,
+    Label,
+    ModelThinkingOptions: (props: {
+      maxTokens?: string;
+      maxTokensLabel?: string;
+      onMaxTokensChange?: (value: string) => void;
+    }) =>
+      props.onMaxTokensChange ? (
+        <input
+          aria-label={props.maxTokensLabel}
+          value={props.maxTokens ?? ""}
+          onChange={(event) => props.onMaxTokensChange?.(event.target.value)}
+        />
+      ) : null,
     NativeSelect: (props: ComponentProps<"select">) => <select {...props} />,
     NativeSelectOption: (props: ComponentProps<"option">) => <option {...props} />,
   };
@@ -139,6 +182,7 @@ function account(provider: string, modelId: string) {
     avatarStyle: "robot" as const,
     billingEnabled: false,
     ticketBoardEnabled: false,
+    phoneCallsEnabled: false,
   };
 }
 
@@ -172,13 +216,19 @@ async function typeInto(input: HTMLInputElement, value: string) {
   });
 }
 
-async function renderSettings() {
+async function renderSettings(embedded = true, localOwner = false) {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<ModelSettingsOverlay embedded onClose={() => undefined} />);
+    root.render(
+      <ModelSettingsOverlay
+        embedded={embedded}
+        localOwner={localOwner}
+        onClose={() => undefined}
+      />,
+    );
   });
   await act(async () => {
     await Promise.resolve();
@@ -203,6 +253,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   document.body.replaceChildren();
   vi.clearAllMocks();
 });
@@ -226,6 +277,11 @@ it("shows a stored BYOK key when provider settings reopen", async () => {
     expect(input.placeholder).toBe(STORED_PLACEHOLDER);
     expect(input.type).toBe("password");
     expect(view.container.textContent).not.toContain("sk-");
+    // The Active model row is the only connection status in the connected view.
+    expect(view.container.textContent).not.toContain("Connected · DeepSeek");
+    expect(view.container.textContent).not.toContain("Stored securely");
+    expect(view.container.textContent).not.toContain("Save limits");
+    expect(buttons(view.container, "Replace API key")[0]?.disabled).toBe(true);
 
     await typeInto(input, "sk-replacement-key");
     expect(keyField(view.container).value).toBe("sk-replacement-key");
@@ -244,6 +300,7 @@ it("shows a stored BYOK key when provider settings reopen", async () => {
     expect(models.connect).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "deepseek", apiKey: "sk-replacement-key" }),
     );
+    expect(view.container.textContent).not.toContain("Connected and using");
     expect(keyField(view.container).value).toBe("");
     expect(keyField(view.container).placeholder).toBe(STORED_PLACEHOLDER);
 
@@ -261,6 +318,43 @@ it("shows a stored BYOK key when provider settings reopen", async () => {
     expect(models.disconnect).toHaveBeenCalledWith({ provider: "deepseek" });
     expect(keyField(view.container).value).toBe("");
     expect(keyField(view.container).placeholder).toBe("sk-…");
+  } finally {
+    await view.unmount();
+  }
+});
+
+it("saves an edited output limit without sending a half-typed replacement key", async () => {
+  models.credentials.mockResolvedValue([
+    {
+      id: "cred-deepseek",
+      provider: "deepseek",
+      label: "DeepSeek",
+      hasKey: true,
+      isDefault: true,
+      modelId: "deepseek-chat",
+    },
+  ]);
+
+  const view = await renderSettings();
+  try {
+    const limit = view.container.querySelector<HTMLInputElement>(
+      'input[aria-label="Maximum output tokens"]',
+    );
+    if (!limit) throw new Error("Missing output limit field");
+    await typeInto(limit, "4096");
+    await typeInto(keyField(view.container), "sk-ab");
+    const save = buttons(view.container, "Save").find((entry) => entry.textContent === "Save");
+    await act(async () => {
+      save?.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(models.connect).toHaveBeenCalledTimes(1);
+    const input = models.connect.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(input).toMatchObject({ provider: "deepseek", maxTokens: 4096 });
+    expect(input).not.toHaveProperty("apiKey");
+    expect(keyField(view.container).value).toBe("sk-ab");
   } finally {
     await view.unmount();
   }
@@ -395,5 +489,299 @@ it("shows a stored OpenAI-compatible key and stays empty when none is saved", as
     expect(input.placeholder).toBe("Optional");
   } finally {
     await empty.unmount();
+  }
+});
+
+it("omits the redundant description and connection prompt", async () => {
+  const view = await renderSettings(false);
+  try {
+    expect(view.container.querySelector('[data-testid="model-description"]')).toBeNull();
+    expect(view.container.textContent).not.toContain("Choose which connected model Rakazo uses.");
+    expect(view.container.textContent).not.toContain(
+      "Connect this provider to use it as your personal model.",
+    );
+    expect(keyField(view.container)).toBeInstanceOf(HTMLInputElement);
+  } finally {
+    await view.unmount();
+  }
+});
+
+it("keeps the server owner's description when relevant", async () => {
+  const view = await renderSettings(false, true);
+  try {
+    expect(view.container.querySelector('[data-testid="model-description"]')?.textContent).toBe(
+      "Models for the server owner’s default space.",
+    );
+  } finally {
+    await view.unmount();
+  }
+});
+
+/**
+ * Accessible name per accname: aria-labelledby wins, and a labelling element's
+ * text includes the control's own aria-label when the control sits inside it.
+ */
+function accessibleName(element: Element) {
+  const ids = element.getAttribute("aria-labelledby")?.split(/\s+/) ?? [];
+  if (!ids.length) return element.getAttribute("aria-label") ?? "";
+  return ids
+    .map((id) => {
+      const label = document.getElementById(id);
+      if (!label) return "";
+      const own = label.contains(element) ? element.getAttribute("aria-label") : null;
+      return [label.textContent, own].filter(Boolean).join(" ");
+    })
+    .join(" ");
+}
+
+/** The checkbox whose accessible name is exactly `id`. */
+function modelCheckbox(container: HTMLElement, id: string) {
+  const found = [...container.querySelectorAll("[role='checkbox']")].find(
+    (entry) => accessibleName(entry) === id,
+  );
+  if (!(found instanceof HTMLElement)) throw new Error(`Missing model checkbox: ${id}`);
+  return {
+    element: found,
+    get checked() {
+      return found.getAttribute("aria-checked") === "true";
+    },
+    get disabled() {
+      return found.getAttribute("aria-disabled") === "true" || found.hasAttribute("data-disabled");
+    },
+    click: () => found.click(),
+  };
+}
+
+const compatibleCredential = {
+  id: "cred-compatible",
+  provider: "openai-compatible",
+  label: "Local",
+  hasKey: false,
+  isDefault: true,
+  baseUrl: "http://127.0.0.1:8000/v1",
+  modelId: "model-a",
+  enabledModelIds: ["model-a"],
+};
+
+async function renderCompatibleWithProbe(probed: string[]) {
+  vi.mocked(rpc.me).mockResolvedValue(account("openai-compatible", "model-a"));
+  models.list.mockResolvedValue([compatibleEntry]);
+  models.credentials.mockResolvedValue([compatibleCredential]);
+  models.probeOpenAiCompatible.mockResolvedValue({ models: probed });
+  const view = await renderSettings();
+  await act(async () => {
+    buttons(view.container, "Find models")[0]?.click();
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+  return view;
+}
+
+it("sends the ticked models other than the default when an OpenAI-compatible endpoint saves", async () => {
+  const view = await renderCompatibleWithProbe(["model-a", "model-b", "model-c"]);
+  try {
+    expect(modelCheckbox(view.container, "model-b").checked).toBe(false);
+    await act(async () => {
+      modelCheckbox(view.container, "model-b").click();
+    });
+    expect(modelCheckbox(view.container, "model-b").checked).toBe(true);
+    await act(async () => {
+      buttons(view.container, "Save")[0]?.click();
+    });
+    expect(models.connect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "openai-compatible",
+        modelId: "model-a",
+        enabledModelIds: ["model-b"],
+      }),
+    );
+  } finally {
+    await view.unmount();
+  }
+});
+
+it("keeps the default model checked and disabled", async () => {
+  const view = await renderCompatibleWithProbe(["model-a", "model-b"]);
+  try {
+    const defaultBox = modelCheckbox(view.container, "model-a");
+    expect(defaultBox.checked).toBe(true);
+    expect(defaultBox.disabled).toBe(true);
+    await act(async () => {
+      defaultBox.click();
+    });
+    expect(modelCheckbox(view.container, "model-a").checked).toBe(true);
+    expect(modelCheckbox(view.container, "model-b").disabled).toBe(false);
+  } finally {
+    await view.unmount();
+  }
+});
+
+it("lists saved models as checked rows before the server is probed", async () => {
+  vi.mocked(rpc.me).mockResolvedValue(account("openai-compatible", "model-a"));
+  models.list.mockResolvedValue([compatibleEntry]);
+  models.credentials.mockResolvedValue([
+    { ...compatibleCredential, enabledModelIds: ["model-a", "model-b"] },
+  ]);
+  const view = await renderSettings();
+  try {
+    expect(modelCheckbox(view.container, "model-b").checked).toBe(true);
+    const select = view.container.querySelector("select[aria-label='Models from server']");
+    expect([...(select?.querySelectorAll("option") ?? [])].map((entry) => entry.value)).toEqual([
+      "model-a",
+      "model-b",
+      "",
+    ]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+async function chooseDefault(container: HTMLElement, id: string) {
+  const select = container.querySelector("select[aria-label='Models from server']");
+  if (!(select instanceof HTMLSelectElement)) throw new Error("Missing model select");
+  // Setting a value with no matching option would silently stage "" instead.
+  if (![...select.options].some((option) => option.value === id)) {
+    throw new Error(`Not a default option: ${id}`);
+  }
+  await act(async () => {
+    select.value = id;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
+it("allows Use this model only for a saved enabled model", async () => {
+  const unsaved = await renderCompatibleWithProbe(["model-a", "model-b"]);
+  try {
+    await act(async () => {
+      modelCheckbox(unsaved.container, "model-b").click();
+    });
+    await chooseDefault(unsaved.container, "model-b");
+    expect(buttons(unsaved.container, "Use this model")[0]?.disabled).toBe(true);
+  } finally {
+    await unsaved.unmount();
+  }
+
+  models.credentials.mockResolvedValue([
+    { ...compatibleCredential, enabledModelIds: ["model-a", "model-b"] },
+  ]);
+  const saved = await renderSettings();
+  try {
+    await chooseDefault(saved.container, "model-b");
+    expect(buttons(saved.container, "Use this model")[0]?.disabled).toBe(false);
+  } finally {
+    await saved.unmount();
+  }
+});
+
+it("names each model checkbox by its id alone", async () => {
+  const view = await renderCompatibleWithProbe(["model-a", "model-b"]);
+  try {
+    const names = [...view.container.querySelectorAll("[role='checkbox']")].map(accessibleName);
+    expect(names).toEqual(["model-a", "model-b"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+it("omits model counts and key subtitles on the OpenAI-compatible provider row", async () => {
+  vi.mocked(rpc.me).mockResolvedValue(account("openai-compatible", "model-a"));
+  models.list.mockResolvedValue([compatibleEntry]);
+  models.credentials.mockResolvedValue([
+    { ...compatibleCredential, enabledModelIds: ["model-a", "model-b"] },
+  ]);
+  const view = await renderSettings();
+  try {
+    // Provider search keeps connection details out of the row.
+    const search = view.container.querySelector("#model-provider-search");
+    if (!(search instanceof HTMLInputElement)) throw new Error("Missing provider search");
+    await typeInto(search, "o");
+    const row = [...view.container.querySelectorAll("button")].find((entry) =>
+      entry.textContent?.includes("OpenAI-compatible"),
+    );
+    expect(row?.textContent).not.toMatch(/models|API key/);
+  } finally {
+    await view.unmount();
+  }
+});
+
+it("keeps a saved model listed, unticked, after a refused save", async () => {
+  vi.mocked(rpc.me).mockResolvedValue(account("openai-compatible", "model-a"));
+  models.list.mockResolvedValue([compatibleEntry]);
+  models.credentials.mockResolvedValue([
+    { ...compatibleCredential, enabledModelIds: ["model-a", "model-b"] },
+  ]);
+  models.connect.mockRejectedValue(new Error("In use by Helper"));
+  const view = await renderSettings();
+  try {
+    await act(async () => {
+      modelCheckbox(view.container, "model-b").click();
+    });
+    await act(async () => {
+      buttons(view.container, "Save")[0]?.click();
+    });
+    expect(models.connect).toHaveBeenCalledWith(
+      expect.objectContaining({ modelId: "model-a", enabledModelIds: [] }),
+    );
+    expect(view.container.textContent).toContain("In use by Helper");
+    expect(modelCheckbox(view.container, "model-b").checked).toBe(false);
+  } finally {
+    await view.unmount();
+  }
+});
+
+it("allows Use this model for a legacy connection without a saved list", async () => {
+  vi.mocked(rpc.me).mockResolvedValue(account("openai-compatible", "model-a"));
+  models.list.mockResolvedValue([compatibleEntry]);
+  const { enabledModelIds: _unread, ...unreadable } = compatibleCredential;
+  models.credentials.mockResolvedValue([unreadable]);
+  models.probeOpenAiCompatible.mockResolvedValue({ models: ["model-a", "model-b"] });
+  const view = await renderSettings();
+  try {
+    await act(async () => {
+      buttons(view.container, "Find models")[0]?.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      modelCheckbox(view.container, "model-b").click();
+    });
+    await chooseDefault(view.container, "model-b");
+    expect(buttons(view.container, "Use this model")[0]?.disabled).toBe(false);
+  } finally {
+    await view.unmount();
+  }
+});
+
+function baseUrlField(container: HTMLElement) {
+  const input = [...container.querySelectorAll("input")].find(
+    (entry) => entry.value === compatibleCredential.baseUrl,
+  );
+  if (!(input instanceof HTMLInputElement)) throw new Error("Missing server URL field");
+  return input;
+}
+
+it("drops the saved ticks and rows when the server URL changes, and restores them on the saved URL", async () => {
+  vi.mocked(rpc.me).mockResolvedValue(account("openai-compatible", "model-a"));
+  models.list.mockResolvedValue([compatibleEntry]);
+  models.credentials.mockResolvedValue([
+    { ...compatibleCredential, enabledModelIds: ["model-a", "model-b"] },
+  ]);
+  const view = await renderSettings();
+  try {
+    const field = baseUrlField(view.container);
+    await typeInto(field, "http://other.test/v1");
+    expect(() => modelCheckbox(view.container, "model-b")).toThrow();
+    await act(async () => {
+      buttons(view.container, "Save")[0]?.click();
+    });
+    expect(models.connect).toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: "http://other.test/v1", enabledModelIds: [] }),
+    );
+    await typeInto(field, compatibleCredential.baseUrl);
+    expect(modelCheckbox(view.container, "model-b").checked).toBe(true);
+  } finally {
+    await view.unmount();
   }
 });

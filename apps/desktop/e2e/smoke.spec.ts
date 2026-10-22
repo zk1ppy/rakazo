@@ -27,9 +27,11 @@ test("launches with a narrow preload bridge and an isolated renderer", async () 
       const desktop = (window as typeof window & { rakazoDesktop?: RakazoDesktop }).rakazoDesktop;
 
       return {
+        computerKeys: desktop?.computer ? Object.keys(desktop.computer).sort() : [],
         bridgeKeys: desktop ? Object.keys(desktop).sort() : [],
         windowKeys: desktop ? Object.keys(desktop.window).sort() : [],
         updateKeys: desktop ? Object.keys(desktop.update).sort() : [],
+        badgeKeys: desktop?.badge ? Object.keys(desktop.badge) : [],
         platform: desktop?.platform,
         state: await desktop?.window.state(),
         update: await desktop?.update.state(),
@@ -41,9 +43,19 @@ test("launches with a narrow preload bridge and an isolated renderer", async () 
       };
     });
 
-    expect(renderer.bridgeKeys).toEqual(["localSettings", "oauth", "platform", "update", "window"]);
+    expect(renderer.bridgeKeys).toEqual([
+      "badge",
+      "computer",
+      "localSettings",
+      "oauth",
+      "platform",
+      "update",
+      "window",
+    ]);
+    expect(renderer.computerKeys).toEqual(["onConfigure", "requestAccess", "revokeAccess"]);
     expect(renderer.windowKeys).toEqual(["close", "minimize", "state", "toggleMaximize"]);
     expect(renderer.updateKeys).toEqual(["check", "download", "install", "state"]);
+    expect(renderer.badgeKeys).toEqual(["set"]);
     expect(renderer.platform).toBe(process.platform);
     expect(renderer.state).toEqual({ minimized: false, maximized: false, fullScreen: false });
     // An unpackaged run has no update feed, and that is reported as a state rather than an error.

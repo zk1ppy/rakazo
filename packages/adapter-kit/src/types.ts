@@ -89,6 +89,11 @@ export interface ComputerRef {
   started?: boolean;
 }
 
+export type WorkspaceDirectoryRequest =
+  | { action: "ensure"; paths: string[] }
+  | { action: "list" }
+  | { action: "remove"; parent: ".browser-profiles" | "bots"; names: string[] };
+
 export interface CommandRequest {
   argv: string[];
   cwd?: string;
@@ -310,6 +315,14 @@ export interface MemoryCommitRequest {
   sourceThreadId?: string;
 }
 
+export interface MemoryRemoveRequest {
+  /** When set, only this exact document is removed, never a newer one at the same path. */
+  id?: string;
+  scope: "bot" | "user";
+  botId?: string;
+  path: string;
+}
+
 export interface MemoryRevision {
   id: string;
   path: string;
@@ -351,6 +364,9 @@ export interface SemanticMemoryResult {
 
 export interface SemanticMemoryForgetRequest {
   id: string;
+  /** Same scope as recall: providers delete only facts inside these namespaces. */
+  scope: DurableMemoryScope;
+  botId: string;
   reason?: string;
   /** Entity/namespace from a prior recall citation, when the backend scopes deletes. */
   entity?: string;
@@ -415,6 +431,8 @@ export interface AgentRunModel {
   /** Cloudflare AI Gateway id stored with a gateway BYOK credential. */
   gatewayId?: string;
   baseUrl?: string;
+  /** The connection owner may reach a private or loopback `baseUrl`; absent means deny. */
+  allowPrivateEndpoint?: boolean;
   /** Whether this custom connection accepts standard reasoning_effort. */
   reasoning?: boolean;
   /** Whether this custom connection accepts image input. */
@@ -567,6 +585,8 @@ export interface ModelCallObserver {
 
 export type AgentRuntimeEvent =
   | { type: "text"; text: string }
+  /** A new assistant message starts; its text does not continue the previous text. */
+  | { type: "turn" }
   | {
       type: "progress";
       text: string;
@@ -663,6 +683,8 @@ export interface BackgroundJobPayloads {
   "computer.update": { updateId: string };
   "computer.control-expire": { computerId: string; leaseId: string };
   "skill.teaching-expire": { skillId: string };
+  /** The bot's call rang out: mark it missed if nobody answered. */
+  "call.expire": { threadId: string; callId: string };
   "history.compact": { threadId: string };
   "messaging.deliver": { runId?: string };
   /** Reconcile durable remote-agent intent; scope is loaded from the database. */
@@ -707,6 +729,8 @@ export interface BackgroundJobPayloads {
     /** Read the plan and relation counts. Do not merge, relabel, or delete. */
     dryRun?: boolean;
   };
+  /** Read an Expo push receipt; the token is identified by its digest, never stored. */
+  "push.receipt": { userId: string; ticketId: string; tokenDigest: string };
 }
 
 export type BackgroundJobName = keyof BackgroundJobPayloads;
@@ -723,6 +747,11 @@ export type BackgroundJob = {
      * replaced. Omit to replace, which is what an explicit continue does.
      */
     keepExisting?: boolean;
+    /**
+     * With `keepExisting`, still replace a job a worker locked at or before this
+     * time. A worker that died never unlocks its job, so it would never run again.
+     */
+    replaceLockedBefore?: Date;
     /** Cap retried executions; omit to use the job queue's default. */
     maxAttempts?: number;
     /**
@@ -972,14 +1001,21 @@ export interface BrowserSnapshotResult {
   /** Compact accessibility-style tree for the model. */
   tree: string;
   elements: BrowserSnapshotNode[];
+  /** The page was still loading or waiting on its own requests when it was captured. */
+  loading?: boolean;
   fallback?: "computer_act";
   error?: string;
 }
 
-export type BrowserActKind = "click" | "fill" | "type";
+export type BrowserActKind = "click" | "fill" | "type" | "upload";
+
+/** Most files one upload step may attach. */
+export const MAX_BROWSER_UPLOAD_FILES = 10;
 
 export type BrowserActStep =
   | { kind: "click"; ref: string }
+  /** Attaches computer files to a file input without opening a native file chooser. */
+  | { kind: "upload"; ref: string; paths: string[]; roots?: string[] }
   | {
       kind: "fill" | "type";
       ref: string;
@@ -1003,6 +1039,8 @@ export interface BrowserActResult {
   /** Snapshot after the actions when available. */
   tree?: string;
   elements?: BrowserSnapshotNode[];
+  /** The page was still loading or waiting on its own requests when that snapshot was taken. */
+  loading?: boolean;
   fallback?: "computer_act";
   error?: string;
 }
@@ -1016,7 +1054,7 @@ export type PageBrowserCommand =
 export type PageBrowserResult = Partial<BrowserSnapshotResult & BrowserActResult> & { ok: boolean };
 
 /** Vendor-neutral status for a remote cloud coding agent. */
-export type CloudAgentStatus = "running" | "finished" | "failed" | "cancelled";
+export type CloudAgentStatus = "running" | "finished" | "failed" | "cancelled" | "expired";
 
 export interface CloudAgentCapabilities {
   launch: boolean;
@@ -1090,6 +1128,12 @@ export interface AutoReviewRequest {
   userTask: string;
   botDescription: string;
   matchingRules: AutoReviewMatchingRule[];
+  /**
+   * A web_fetch to a site the run was not given. `args` is then only the full URL, and
+   * `userTask` only the owner's own words (their message or the routine's instructions), never
+   * tool results or inbound messages, so injected text cannot argue for the site.
+   */
+  newSite?: boolean;
 }
 
 export interface AutoReviewResult {
@@ -1104,6 +1148,9 @@ export type BillingSubscriptionStatus =
   | "active"
   | "past_due"
   | "incomplete"
+  /** No access; the subscription resumes from the billing portal, so a new checkout would double-bill. */
+  | "unpaid"
+  | "paused"
   | "canceled";
 
 export interface BillingPrice {

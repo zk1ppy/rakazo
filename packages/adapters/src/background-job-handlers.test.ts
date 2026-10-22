@@ -7,6 +7,7 @@ import type {
   SandboxProvider,
 } from "@rakazo/adapter-kit";
 import type { PrismaClient, ThreadEvents } from "@rakazo/db";
+import { currentDbContext } from "@rakazo/db";
 import { createLogger, createTestSink, getLogger, installLogger } from "@rakazo/logging";
 import { describe, expect, it, vi } from "vitest";
 import { createBackgroundJobHandlers } from "./background-job-handlers.js";
@@ -24,6 +25,9 @@ vi.mock("./messaging-delivery.js", () => ({
   mirrorMessagingOutbound: vi.fn(async () => undefined),
 }));
 
+const owner = { spaceId: "space-1", userId: "user-1" };
+const owned = () => ({ findUnique: vi.fn(async () => owner) });
+
 describe("createBackgroundJobHandlers", () => {
   it("delivers directly when shutdown rejects a completed run's mirror job", async () => {
     const enqueueError = new Error("Background job publisher is closing");
@@ -38,7 +42,7 @@ describe("createBackgroundJobHandlers", () => {
       executor: {
         continueRun: vi.fn(async () => undefined),
       } as unknown as ReturnType<typeof createRunExecutor>,
-      prisma: {} as unknown as PrismaClient,
+      prisma: { run: owned() } as unknown as PrismaClient,
       sandbox: {} as unknown as SandboxProvider,
       home: {} as unknown as AgentHomeStore,
       jobs,
@@ -58,7 +62,7 @@ describe("createBackgroundJobHandlers", () => {
     );
     expect(deliverMessagingOutbound).toHaveBeenCalledWith(
       expect.objectContaining({ prisma: expect.anything(), messaging: expect.anything(), jobs }),
-      { runId: undefined },
+      {},
       expect.objectContaining({ operationId: "messaging.deliver:drain" }),
     );
     expect(sink.events.some((event) => event.message === "messaging.deliver enqueue error")).toBe(
@@ -68,7 +72,7 @@ describe("createBackgroundJobHandlers", () => {
   });
 
   it("compacts the requested thread with the runtime, job publisher, and model key it was given", async () => {
-    const prisma = {} as unknown as PrismaClient;
+    const prisma = { thread: owned() } as unknown as PrismaClient;
     const runtime = {} as unknown as AgentRuntime;
     const jobs = {} as unknown as JobPublisher;
     const secretStore = {} as unknown as EncryptedSecretStore;
@@ -119,7 +123,7 @@ describe("createBackgroundJobHandlers", () => {
                 typeof createRunExecutor
               >[0])
             : ({ contextStrategy } as ReturnType<typeof createRunExecutor>),
-        prisma: {} as unknown as PrismaClient,
+        prisma: { thread: owned() } as unknown as PrismaClient,
         sandbox: {} as unknown as SandboxProvider,
         home: {} as unknown as AgentHomeStore,
         jobs: {} as unknown as JobPublisher,
@@ -136,6 +140,37 @@ describe("createBackgroundJobHandlers", () => {
       expect(runtime.run).not.toHaveBeenCalled();
     },
   );
+
+  it("runs a job as the tenant of the row it acts for, and skips one whose row is gone", async () => {
+    const seen: unknown[] = [];
+    const continueRun = vi.fn(async () => {
+      seen.push(currentDbContext());
+    });
+    const lookups = { findUnique: vi.fn(async () => owner) };
+    const handlers = createBackgroundJobHandlers({
+      executor: { continueRun } as unknown as ReturnType<typeof createRunExecutor>,
+      prisma: { run: lookups } as unknown as PrismaClient,
+      sandbox: {} as unknown as SandboxProvider,
+      home: {} as unknown as AgentHomeStore,
+      jobs: {} as unknown as JobPublisher,
+      events: {} as unknown as ThreadEvents,
+      workerId: "worker-1",
+      runtime: {} as unknown as AgentRuntime,
+      secretStore: {} as unknown as EncryptedSecretStore,
+      memoryProviders: { resolve: vi.fn(async () => null) },
+    });
+
+    await handlers["run.continue"]({ runId: "run-1" });
+    expect(seen).toEqual([{ kind: "tenant", ...owner }]);
+    expect(lookups.findUnique).toHaveBeenCalledWith({
+      where: { id: "run-1" },
+      select: { spaceId: true, userId: true },
+    });
+
+    lookups.findUnique.mockResolvedValueOnce(null as never);
+    await handlers["run.continue"]({ runId: "run-gone" });
+    expect(continueRun).toHaveBeenCalledTimes(1);
+  });
 
   it("does not call the model when the space has no Neo4j provider", async () => {
     const runtime = { run: vi.fn() } as unknown as AgentRuntime;

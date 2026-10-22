@@ -99,6 +99,8 @@ test("bot creation, editing, and deletion persist", async ({ page }, testInfo) =
   const teamComputer = settings.getByRole("button", { name: "Team" });
   const openWork = settings.getByTestId("bot-scratchpad");
   await expect(teamComputer).toBeHidden();
+  await expect(settings.getByRole("switch", { name: "Read replies aloud" })).toBeHidden();
+  await expect(settings.getByRole("switch", { name: "Manage the bots it creates" })).toBeHidden();
   await expect(modelSelect).toBeHidden();
   await expect(openWork).toBeHidden();
   await expect(settings.getByRole("button", { name: "Save", exact: true })).toBeVisible();
@@ -117,6 +119,8 @@ test("bot creation, editing, and deletion persist", async ({ page }, testInfo) =
   await expect(settings.getByRole("switch", { name: "web_search" })).toBeChecked();
   await captureScreenshot(page, testInfo, "27c-disabled-builtin-tools");
   await expect(teamComputer).toBeVisible();
+  await expect(settings.getByRole("switch", { name: "Read replies aloud" })).toBeVisible();
+  await expect(settings.getByRole("switch", { name: "Manage the bots it creates" })).toBeVisible();
   await expect(openWork).toBeVisible();
   await expect(modelSelect).toBeVisible();
   await expect(modelSelect).toContainText("Space default");
@@ -187,4 +191,64 @@ test("bot creation, editing, and deletion persist", async ({ page }, testInfo) =
   await expect(botList.getByRole("button", { name: /^Chief/ })).toBeVisible();
   await expect(page.getByPlaceholder("Message Chief")).toBeVisible();
   await captureScreenshot(page, testInfo, "31-deleted-bot-fallback");
+});
+
+test("bot management switch persists and settings help is accessible", async ({
+  page,
+}, testInfo) => {
+  await signup(
+    page,
+    `bot-management-${Date.now()}@rakazo.test`,
+    "password12",
+    "Manage the bots it creates",
+  );
+  await completeOnboarding(page);
+  await page.goto("/app");
+  await page.waitForURL(/\/app\/[^/]+$/);
+
+  const openAdvanced = async () => {
+    await page.locator("main").getByRole("button", { name: "Chief", exact: true }).click();
+    const settings = page.getByTestId("bot-settings");
+    await settings.getByText("Advanced", { exact: true }).click();
+    return settings.getByRole("switch", { name: "Manage the bots it creates" });
+  };
+
+  const fleetSwitch = await openAdvanced();
+  await expect(fleetSwitch).toBeChecked();
+  const help = page.getByRole("button", { name: "About Manage the bots it creates" });
+  const explanation =
+    "Organize the sidebar and edit bots. Instruction, model, routine and group edits need approval.";
+  const descriptionId = await help.getAttribute("aria-describedby");
+  expect(descriptionId).toBeTruthy();
+  const description = page.locator(`[id="${descriptionId}"]`);
+  const tooltip = page.locator('[data-slot="tooltip-content"]');
+  await expect(help).toHaveAccessibleDescription(explanation);
+  await expect(description).toHaveText(explanation);
+  await expect(description).toHaveCSS("position", "absolute");
+  await expect(description).toHaveCSS("width", "1px");
+  await expect(description).toHaveCSS("height", "1px");
+  await expect(description).toHaveCSS("overflow", "hidden");
+  await expect(description).toHaveCSS("clip-path", "inset(50%)");
+  await help.scrollIntoViewIfNeeded();
+  await expect(tooltip).toHaveCount(0);
+  await captureScreenshot(page, testInfo, "32-bot-settings-advanced");
+  await fleetSwitch.evaluate((element) => {
+    element.parentElement?.scrollIntoView({ block: "center" });
+  });
+  await help.click();
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toHaveText(explanation);
+  await expect(help).toHaveAccessibleDescription(explanation);
+  await captureScreenshot(page, testInfo, "32-bot-settings-info-tooltip");
+  await page.keyboard.press("Escape");
+  await expect(tooltip).toHaveCount(0);
+  await fleetSwitch.click();
+  await expect(fleetSwitch).not.toBeChecked();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByPlaceholder("Message Chief")).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByPlaceholder("Message Chief")).toBeVisible();
+  const reloadedSwitch = await openAdvanced();
+  await expect(reloadedSwitch).not.toBeChecked();
 });

@@ -473,7 +473,7 @@ describe("Neo4jMemoryProvider", () => {
     const driver = new FakeDriver();
     driver.rows.push({ records: [row({ id: "fact-1", reason: "cleanup" })] });
     const result = await providerFor(driver).forget(
-      { id: "fact-1", reason: " cleanup ", entity: "Ada" },
+      { id: "fact-1", scope: "shared", botId: "bot-1", reason: " cleanup ", entity: "Ada" },
       context,
     );
     expect(result).toEqual({
@@ -490,7 +490,9 @@ describe("Neo4jMemoryProvider", () => {
     });
 
     driver.rows.push({ records: [] });
-    await expect(providerFor(driver).forget({ id: "missing" }, context)).resolves.toEqual({
+    await expect(
+      providerFor(driver).forget({ id: "missing", scope: "shared", botId: "bot-1" }, context),
+    ).resolves.toEqual({
       ok: true,
       value: { id: "missing", expired: false, reason: null },
     });

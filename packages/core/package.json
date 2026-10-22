@@ -43,6 +43,11 @@
       "types": "./src/node/screen-capability.ts",
       "development": "./src/node/screen-capability.ts",
       "default": "./src/node/screen-capability.ts"
+    },
+    "./egress": {
+      "types": "./src/egress.ts",
+      "development": "./src/egress.ts",
+      "default": "./src/egress.ts"
     }
   },
   "scripts": {
@@ -59,12 +64,13 @@
     "mdast-util-to-hast": "13.2.1",
     "remark-gfm": "4.0.1",
     "remark-parse": "11.0.0",
+    "tldts": "7.4.10",
     "unified": "11.0.5"
   },
   "devDependencies": {
     "@types/d3-dsv": "3.0.7",
     "fast-check": "4.10.2",
     "typescript": "7.0.2",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   }
 }

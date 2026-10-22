@@ -1,7 +1,8 @@
 import { ONCE_ROUTINE_CRON } from "@rakazo/core";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cancelScheduleFromTool,
+  commandWatchFromTool,
   compactScheduleInput,
   createScheduleFromTool,
   filterBuiltinToolsForRun,
@@ -13,6 +14,9 @@ import {
 } from "./schedule-tools.js";
 
 describe("resolveScheduleTiming", () => {
+  beforeEach(() => vi.useFakeTimers({ now: new Date("2026-10-20T00:11:59.999Z") }));
+  afterEach(() => vi.useRealTimers());
+
   it("rejects repeating intervals under one minute", () => {
     expect(resolveScheduleTiming({ every: 2, unit: "seconds" })).toEqual({
       ok: false,
@@ -201,6 +205,37 @@ describe("isOneShotRoutineCron", () => {
 });
 
 describe("schedule tool persistence", () => {
+  it.each([{ cron: "0 9 * * *" }, { watch: { kind: "files", paths: ["inbox"] } }])(
+    "rejects an invalid timezone before persisting %j",
+    async (schedule) => {
+      const create = vi.fn(async (args: { data: Record<string, unknown> }) => ({
+        id: "routine-1",
+        ...args.data,
+      }));
+      const enqueue = vi.fn(async () => undefined);
+      const deps = {
+        prisma: {
+          routine: { create },
+          bot: { findFirst: vi.fn(async () => ({ computer: null })) },
+        },
+        events: { append: vi.fn() },
+        jobs: { enqueue },
+      } as unknown as Parameters<typeof createScheduleFromTool>[0];
+      const result = await createScheduleFromTool(deps, {
+        spaceId: "ws-1",
+        botId: "bot-1",
+        userId: "user-1",
+        threadId: "thread-1",
+        name: "Daily",
+        prompt: "Check",
+        timezone: "Mars/Olympus_Mons",
+        schedule,
+      });
+      expect(result).toEqual({ error: "Unknown timezone" });
+      expect(create).not.toHaveBeenCalled();
+      expect(enqueue).not.toHaveBeenCalled();
+    },
+  );
   it("creates routines with routine.created and enqueues wakeup", async () => {
     const append = vi.fn(async () => undefined);
     const enqueue = vi.fn(async () => undefined);
@@ -210,7 +245,7 @@ describe("schedule tool persistence", () => {
       nextRunAt: args.data.nextRunAt,
     }));
     const deps = {
-      prisma: { routine: { create } },
+      prisma: { bot: { findFirst: vi.fn(async () => ({ computer: null })) }, routine: { create } },
       events: { append },
       jobs: { enqueue, cancel: vi.fn(async () => undefined) },
     } as unknown as Parameters<typeof createScheduleFromTool>[0];
@@ -239,6 +274,46 @@ describe("schedule tool persistence", () => {
     );
     expect(append).toHaveBeenCalledWith(
       expect.objectContaining({ type: "routine.created", payload: { name: "Morning joke" } }),
+    );
+    expect(enqueue).toHaveBeenCalledOnce();
+  });
+
+  it("createScheduleFromTool creates the routine for the target bot and thread", async () => {
+    const append = vi.fn(async () => undefined);
+    const enqueue = vi.fn(async () => undefined);
+    const create = vi.fn(async (args: { data: Record<string, unknown> }) => ({
+      id: "routine-1",
+      ...args.data,
+    }));
+    const deps = {
+      prisma: { routine: { create } },
+      events: { append },
+      jobs: { enqueue, cancel: vi.fn(async () => undefined) },
+    } as unknown as Parameters<typeof createScheduleFromTool>[0];
+
+    const result = await createScheduleFromTool(deps, {
+      spaceId: "ws-1",
+      botId: "bot-1",
+      userId: "user-1",
+      threadId: "thread-1",
+      target: { botId: "child-1", threadId: "child-thread-1" },
+      name: "Morning joke",
+      prompt: "Tell a joke",
+      schedule: { every: 1, unit: "minutes" },
+    });
+
+    expect(result).toMatchObject({ ok: true, routineId: "routine-1" });
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ botId: "child-1", threadId: "child-thread-1" }),
+      }),
+    );
+    expect(append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "routine.created",
+        botId: "child-1",
+        threadId: "child-thread-1",
+      }),
     );
     expect(enqueue).toHaveBeenCalledOnce();
   });
@@ -406,7 +481,7 @@ describe("schedule tool persistence", () => {
     const findFirst = vi.fn(async () => null);
     const deps = {
       prisma: {
-        routine: { findMany, findFirst, delete: vi.fn(async () => undefined) },
+        routine: { findMany, findFirst, deleteMany: vi.fn(async () => ({ count: 1 })) },
       },
       events: { append: vi.fn(async () => undefined) },
       jobs: { enqueue: vi.fn(async () => undefined), cancel: vi.fn(async () => undefined) },
@@ -469,5 +544,171 @@ describe("schedule tool persistence", () => {
         where: { spaceId: "ws-1", botId: "bot-1", userId: "user-1", id: "routine-1" },
       }),
     );
+  });
+});
+
+describe("schedule_create with a watch", () => {
+  function deps() {
+    const create = vi.fn(async (args: { data: Record<string, unknown> }) => ({
+      id: "routine-w",
+      ...args.data,
+    }));
+    const enqueue = vi.fn(async () => undefined);
+    return {
+      create,
+      enqueue,
+      deps: {
+        prisma: {
+          connection: { findMany: vi.fn(async () => []) },
+          bot: { findFirst: vi.fn(async () => ({ computer: null })) },
+          routine: { create },
+        },
+        events: { append: vi.fn(async () => undefined) },
+        jobs: { enqueue, cancel: vi.fn(async () => undefined) },
+      } as unknown as Parameters<typeof createScheduleFromTool>[0],
+    };
+  }
+  const base = {
+    spaceId: "space-1",
+    botId: "bot-1",
+    userId: "user-1",
+    threadId: "thread-1",
+    name: "Brain check",
+    prompt: "Summarize what changed",
+  };
+
+  it("creates an active routine with no schedule that checks right away", async () => {
+    const { deps: d, create, enqueue } = deps();
+    const result = await createScheduleFromTool(d, {
+      ...base,
+      schedule: { watch: { kind: "tool", tool: "brain_changed", args: { limit: 1 } } },
+    });
+    expect(result).toMatchObject({ ok: true, routineId: "routine-w" });
+    expect(create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        crons: [],
+        active: true,
+        watch: expect.objectContaining({ kind: "tool", everyMinutes: 15, loud: false }),
+      }),
+    });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a team path escape before persisting", async () => {
+    const { deps: d, create } = deps();
+    vi.mocked(d.prisma.bot.findFirst).mockResolvedValue({ computer: { scope: "team" } } as never);
+    const result = await createScheduleFromTool(d, {
+      ...base,
+      schedule: { watch: { kind: "files", paths: ["/etc"] } },
+    });
+    expect(result).toMatchObject({ error: expect.stringContaining("inside the bot's folder") });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a write tool before persisting", async () => {
+    const { deps: d, create } = deps();
+    d.connector = {
+      discoverTools: vi.fn(async () => [
+        { name: "send", readOnly: false, description: "Send", inputSchema: {} },
+      ]),
+    } as unknown as typeof d.connector;
+    const result = await createScheduleFromTool(d, {
+      ...base,
+      schedule: { watch: { kind: "tool", tool: "send" } },
+    });
+    expect(result).toMatchObject({ error: expect.stringContaining("can change data") });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a caller outside the bot owner boundary", async () => {
+    const { deps: d, create } = deps();
+    vi.mocked(d.prisma.bot.findFirst).mockResolvedValue(null);
+    const result = await createScheduleFromTool(d, {
+      ...base,
+      schedule: { watch: { kind: "command", command: "echo changed" } },
+    });
+    expect(result).toMatchObject({ error: "Bot not found." });
+    expect(d.prisma.bot.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: base.botId, spaceId: base.spaceId, userId: base.userId, archivedAt: null },
+      }),
+    );
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("accepts the watch sent as JSON text", async () => {
+    const { deps: d, create } = deps();
+    const result = await createScheduleFromTool(d, {
+      ...base,
+      schedule: { watch: '{"kind":"files","paths":["inbox/"]}' },
+    });
+    expect(result).toMatchObject({ ok: true });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a watch combined with a schedule, or an invalid watch", async () => {
+    const { deps: d, create } = deps();
+    expect(
+      await createScheduleFromTool(d, {
+        ...base,
+        schedule: { cron: "0 9 * * *", watch: { kind: "files", paths: ["inbox"] } },
+      }),
+    ).toHaveProperty("error");
+    expect(
+      await createScheduleFromTool(d, { ...base, schedule: { watch: { kind: "files" } } }),
+    ).toHaveProperty("error");
+    expect(create).not.toHaveBeenCalled();
+  });
+});
+
+describe("cancelScheduleFromTool", () => {
+  it("deletes with the caller's scope and does not cancel the job when the row moved", async () => {
+    const findFirst = vi.fn(async () => ({ id: "routine-1", name: "Daily" }));
+    const deleteMany = vi.fn(async () => ({ count: 1 }));
+    const cancel = vi.fn(async () => undefined);
+    const deps = {
+      prisma: { routine: { findFirst, deleteMany } },
+      events: { append: vi.fn(async () => undefined) },
+      jobs: { enqueue: vi.fn(async () => undefined), cancel },
+    } as unknown as Parameters<typeof cancelScheduleFromTool>[0];
+    const input = {
+      spaceId: "ws-1",
+      botId: "bot-1",
+      userId: "user-1",
+      threadId: "group-thread-1",
+      name: "Daily",
+    };
+
+    await expect(cancelScheduleFromTool(deps, input)).resolves.toEqual({
+      ok: true,
+      routineId: "routine-1",
+      name: "Daily",
+    });
+    expect(deleteMany).toHaveBeenCalledWith({
+      where: {
+        spaceId: "ws-1",
+        botId: "bot-1",
+        userId: "user-1",
+        threadId: "group-thread-1",
+        id: "routine-1",
+      },
+    });
+    expect(cancel).toHaveBeenCalledOnce();
+
+    deleteMany.mockResolvedValueOnce({ count: 0 });
+    cancel.mockClear();
+    await expect(cancelScheduleFromTool(deps, input)).resolves.toEqual({
+      error: "Schedule not found.",
+    });
+    expect(cancel).not.toHaveBeenCalled();
+  });
+});
+
+describe("command watch approval classification", () => {
+  it("recognizes object and JSON command watches only", () => {
+    const watch = { kind: "command", command: "echo changed" };
+    expect(commandWatchFromTool(watch)).toBe("echo changed");
+    expect(commandWatchFromTool(JSON.stringify(watch))).toBe("echo changed");
+    expect(commandWatchFromTool({ kind: "files", paths: ["inbox"] })).toBeUndefined();
   });
 });

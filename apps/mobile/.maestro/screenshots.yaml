@@ -22,16 +22,23 @@ tags:
     timeout: 30000
 - takeScreenshot: "02-sign-up"
 - tapOn: "Sign in"
-- assertVisible: "Sign in to Rakazo"
-- takeScreenshot: "01-sign-in"
-
-- tapOn: "Use a custom server"
+- runFlow:
+    when:
+      notVisible:
+        id: "server-address"
+    commands:
+      - assertVisible: "Sign in to Rakazo"
+      - takeScreenshot: "01-sign-in"
+      - tapOn: "Use a custom server"
 - assertVisible: "Server"
 - takeScreenshot: "03-server"
-- tapOn: "Cancel"
+- runFlow: helpers/server.yaml
 
 - tapOn: "Email"
 - inputText: ${RAKAZO_SCREENSHOT_EMAIL}
+- tapOn:
+    text: "Use password"
+    optional: true
 - tapOn: "Password"
 - inputText: ${RAKAZO_SCREENSHOT_PASSWORD}
 - hideKeyboard
@@ -51,20 +58,32 @@ tags:
     timeout: 10000
 - takeScreenshot: "05-activity"
 
-- tapOn: "Search"
+- tapOn:
+    id: "home-search-button"
+    optional: true
+- runFlow:
+    when:
+      notVisible:
+        id: "search-sheet-field"
+    commands:
+      - tapOn: "Search"
+- tapOn:
+    id: "search-sheet-field"
 - inputText: "fixture"
 - hideKeyboard
 - extendedWaitUntil:
     visible: "Weekly fixture review"
     timeout: 10000
 - takeScreenshot: "06-search-results"
+- tapOn:
+    id: "search-sheet-close"
 
 - openLink: "rakazo:///new"
 - assertVisible: "Name this bot"
 - takeScreenshot: "07-new-bot"
 
 - openLink: "rakazo:///new-group"
-- assertVisible: "Name this group"
+- assertVisible: "Search bots"
 - takeScreenshot: "08-new-group"
 
 - openLink: "rakazo:///new-space"
@@ -108,6 +127,9 @@ tags:
 - takeScreenshot: "13-integrations"
 - tapOn:
     id: "integrations-advanced"
+- scrollUntilVisible:
+    element: "Add MCP server"
+    direction: DOWN
 - assertVisible: "Add MCP server"
 - takeScreenshot: "14-integrations-advanced"
 
@@ -119,30 +141,47 @@ tags:
 - assertNotVisible: "React"
 - assertNotVisible: "More"
 - takeScreenshot: "15-thread"
+- assertVisible: "Show Message from Writer"
+- assertNotVisible: "Update from Writer: The fixture launch note is drafted."
+- takeScreenshot: "15e-thread-peer-folded"
+- tapOn: "Show Message from Writer"
+- assertVisible: "Update from Writer: The fixture launch note is drafted."
+- takeScreenshot: "15f-thread-peer-expanded"
+- tapOn: "Hide Message from Writer"
 - tapOn: "Message Researcher"
 - inputText: "Keyboard visibility check"
 - assertVisible: "Keyboard visibility check"
 - assertVisible: "Send"
 - takeScreenshot: "15d-thread-keyboard"
-- eraseText
+- pressKey: Enter
+- inputText: "Second line"
+- assertVisible: 'Keyboard visibility check\nSecond line'
 - hideKeyboard
+- assertVisible: 'Keyboard visibility check\nSecond line'
+- tapOn: "Message Researcher"
+- assertVisible: 'Keyboard visibility check\nSecond line'
+- assertVisible: "Send"
+- takeScreenshot: "15g-thread-keyboard-reopened"
+- longPressOn: "Message Researcher"
+- tapOn: "Select all"
+- eraseText: 1
+- assertNotVisible: 'Keyboard visibility check\nSecond line'
+- hideKeyboard
+# Holding a message opens the reaction row and grouped actions next to it.
 - longPressOn: "The fixture workspace is ready."
 - assertVisible: "Reply"
-- assertVisible: "React"
-- assertVisible: "More"
-- takeScreenshot: "15b-message-actions"
-- tapOn: "More"
+- assertVisible: "👍"
 - assertVisible: "Speak message"
+- takeScreenshot: "15b-message-actions"
 - back
-# User messages omit Speak, so Android fits Reply/React/Copy on one page (no More).
+# User messages omit Speak.
 - longPressOn: "Summarize the fixture launch checklist."
 - assertVisible: "Reply"
-- assertVisible: "React"
+- assertVisible: "👍"
 - assertVisible: "Copy"
-- assertNotVisible: "More"
 - assertNotVisible: "Speak message"
 - tapOn: "Reply"
-- assertVisible: "Replying to"
+- assertVisible: "Cancel reply"
 - tapOn: "Cancel reply"
 - tapOn: "Bot actions"
 - assertVisible: "Clear conversation"
@@ -183,8 +222,8 @@ tags:
 - hideKeyboard
 - longPressOn: "The fixture launch plan is ready."
 - assertVisible: "Reply"
-- assertVisible: "React"
-- assertVisible: "More"
+- assertVisible: "👍"
+- assertVisible: "Speak message"
 - back
 
 - openLink: "rakazo:///group-settings?groupId=${RAKAZO_SCREENSHOT_GROUP_ID}"
@@ -212,7 +251,7 @@ tags:
 - takeScreenshot: "23-new-bot-dark"
 
 - openLink: "rakazo:///new-group"
-- assertVisible: "Name this group"
+- assertVisible: "Search bots"
 - takeScreenshot: "24-new-group-dark"
 
 - openLink: "rakazo:///new-space"
@@ -244,7 +283,6 @@ tags:
 # Capture the reaction after theme comparisons. Reactions are append-only, so adding
 # 👍 earlier would leak into dark/light thread frames with no remove control.
 - longPressOn: "The fixture workspace is ready."
-- tapOn: "React"
 - tapOn: "👍"
 - extendedWaitUntil:
     visible: "👍"

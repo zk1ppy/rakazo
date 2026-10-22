@@ -183,8 +183,23 @@ function shortenHistoryResult(
   }
   return encoded;
 }
+/**
+ * A result cut before the model read it is missing evidence. A result cut after the model read
+ * it is not: saying "unavailable" there makes a model retract statements it made from it.
+ */
+const OMITTED_BEFORE_USE =
+  "[Tool result truncated to fit context; omitted evidence is unavailable.]";
+const OMITTED_TEXT_BEFORE_USE =
+  "[Tool result truncated to fit context; inspect original evidence before claiming omitted details.]";
+const OMITTED_AFTER_USE =
+  "[Earlier result shortened after you read it; statements made from it stand. Re-run the tool only if you need the omitted text.]";
+
 /** Keep control fields and JSON shape while marking omitted long evidence strings. */
-function shortenStructuredResult(source: string, size: number): string | undefined {
+function shortenStructuredResult(
+  source: string,
+  size: number,
+  marker = OMITTED_BEFORE_USE,
+): string | undefined {
   let payload: unknown;
   try {
     payload = JSON.parse(source);
@@ -222,8 +237,15 @@ function shortenStructuredResult(source: string, size: number): string | undefin
     }, undefined);
     if (!largest) break; // Required metadata alone may still need explicit budget failure.
     const value = (largest.parent as Record<string, unknown>)[largest.key] as string;
-    const keep = Math.max(8, Math.floor(value.length / 4));
-    const shortened = `${value.slice(0, keep)}\n[Tool result truncated to fit context; omitted evidence is unavailable.]\n${value.slice(-keep)}`;
+    // Keep a quarter at each end when that still shrinks the field. Otherwise size the ends net
+    // of the marker, so each pass on a medium-length field halves what is left to cut.
+    const preferredKeep = Math.max(8, Math.floor(value.length / 4));
+    const keep =
+      2 * preferredKeep + marker.length + 2 < value.length
+        ? preferredKeep
+        : Math.floor((value.length - marker.length) / 4);
+    if (keep < 1) break;
+    const shortened = `${value.slice(0, keep)}\n${marker}\n${value.slice(-keep)}`;
     if (shortened.length >= value.length) break;
     (largest.parent as Record<string, unknown>)[largest.key] = shortened;
     encoded = JSON.stringify(holder.payload);
@@ -231,16 +253,130 @@ function shortenStructuredResult(source: string, size: number): string | undefin
   return encoded;
 }
 
-/** Shorten evidence cheaply while keeping structured controls and original-history offsets. */
+/**
+ * MCP results put JSON in a text content part (sometimes beside other parts). Treating that inner
+ * JSON as one prose leaf cuts IDs and cursors out of it, so shorten JSON text parts with their own
+ * control-preserving rules, shrink sibling parts and outer metadata the same way, and re-wrap.
+ * Non-JSON envelopes fall through to the generic path.
+ */
+function isJsonTextPart(part: { type?: string; text?: unknown } | undefined): part is {
+  type: "text";
+  text: string;
+} {
+  if (part?.type !== "text" || typeof part.text !== "string") return false;
+  const trimmed = part.text.trimStart();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return false;
+  try {
+    JSON.parse(part.text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function shortenMcpEnvelope(source: string, size: number, marker: string): string | undefined {
+  let payload: { content?: Array<{ type?: string; text?: unknown }> } & Record<string, unknown>;
+  try {
+    payload = JSON.parse(source);
+  } catch {
+    return;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+  const originalParts = payload.content;
+  if (!Array.isArray(originalParts) || !originalParts.some(isJsonTextPart)) return;
+
+  const wrap = (nextParts: typeof originalParts) =>
+    JSON.stringify({ ...payload, content: nextParts });
+
+  // Shrink outer metadata first so the inner budget is not crushed by a large _meta blob.
+  const outer = { ...payload };
+  delete outer.content;
+  delete outer.structuredContent;
+  let outerSource = JSON.stringify(outer);
+  if (outerSource.length > Math.max(64, Math.floor(size / 4))) {
+    const shortenedOuter = shortenStructuredResult(
+      outerSource,
+      Math.max(64, Math.floor(size / 4)),
+      marker,
+    );
+    if (shortenedOuter !== undefined) {
+      Object.assign(payload, JSON.parse(shortenedOuter));
+      if (shortenedOuter !== outerSource) payload.contextTruncated = true;
+      outerSource = shortenedOuter;
+    }
+  }
+
+  const structuredSource =
+    payload.structuredContent === undefined ? undefined : JSON.stringify(payload.structuredContent);
+  let parts = originalParts.map((part) => ({ ...part }));
+  const emptyJsonShell = parts.map((part) => (isJsonTextPart(part) ? { ...part, text: "" } : part));
+  let budget = Math.max(128, size - wrap(emptyJsonShell).length);
+  let encoded = wrap(parts);
+
+  for (let attempt = 0; attempt < 6 && encoded.length > size; attempt++) {
+    let changed = false;
+    parts = parts.map((part) => {
+      if (isJsonTextPart(part)) {
+        const shortened = shortenStructuredResult(part.text, budget, marker);
+        if (shortened === undefined || shortened === part.text) return part;
+        changed = true;
+        return { ...part, text: shortened };
+      }
+      const serialized = JSON.stringify(part);
+      if (serialized.length <= 128) return part;
+      const shortened = shortenStructuredResult(
+        serialized,
+        Math.min(budget, Math.max(128, Math.floor(size / 4))),
+        marker,
+      );
+      if (shortened === undefined || shortened === serialized) return part;
+      try {
+        const parsed = JSON.parse(shortened) as typeof part;
+        if (!parsed || typeof parsed !== "object") return part;
+        changed = true;
+        return parsed;
+      } catch {
+        return part;
+      }
+    });
+    if (structuredSource !== undefined) {
+      const shortenedStructured = shortenStructuredResult(structuredSource, budget, marker);
+      try {
+        payload.structuredContent = JSON.parse(shortenedStructured ?? "");
+        if (shortenedStructured !== structuredSource) changed = true;
+      } catch {
+        delete payload.structuredContent;
+        changed = true;
+      }
+    }
+    if (changed) payload.contextTruncated = true;
+    encoded = wrap(parts);
+    if (encoded.length <= size) break;
+    if (!changed) break;
+    budget = Math.max(128, Math.floor(budget * (size / encoded.length)) - 1);
+  }
+  // Soft target may still be exceeded by protected ids. Keep the envelope on this path even when
+  // nothing could shrink: the generic shortener would cut the JSON text and drop its ids.
+  return encoded;
+}
+
+/**
+ * Shorten evidence cheaply while keeping structured controls and original-history offsets.
+ * Pass afterUse when the model already read the result on an earlier step.
+ */
 export function shortenToolResultText(
   source: string,
   size: number,
   tool: { name?: string; arguments?: unknown } = {},
+  options: { afterUse?: boolean } = {},
 ): string {
+  const afterUse = options.afterUse || source.includes(OMITTED_AFTER_USE);
+  const marker = afterUse ? OMITTED_AFTER_USE : OMITTED_BEFORE_USE;
   return (
     shortenHistoryResult(source, size, tool) ??
-    shortenStructuredResult(source, size) ??
-    `${source.slice(0, Math.floor(size / 2))}\n[Tool result truncated to fit context; inspect original evidence before claiming omitted details.]\n${source.slice(-Math.floor(size / 2))}`
+    shortenMcpEnvelope(source, size, marker) ??
+    shortenStructuredResult(source, size, marker) ??
+    `${source.slice(0, Math.floor(size / 2))}\n${afterUse ? OMITTED_AFTER_USE : OMITTED_TEXT_BEFORE_USE}\n${source.slice(-Math.floor(size / 2))}`
   );
 }
 interface Group {
@@ -326,13 +462,19 @@ export function selectContext<T extends ContextMessage>(
   const fixed = fixedTokens(options.budget);
   const available = Math.floor(options.budget.contextWindow - options.budget.outputReserve - fixed);
   const groups = messageGroups(messages, options.budget.imageTokens);
+  // A result followed by any assistant message has been read, with or without a later tool call.
+  const latestAssistant = messages.findLastIndex((message) => message.role === "assistant");
   const protectedIndexes = new Set(options.protectedIndexes ?? []);
   for (const [index, message] of messages.entries()) {
     if (message.role === "system") protectedIndexes.add(index);
   }
   const lastUser = messages.findLastIndex((message) => message.role === "user");
   if (lastUser >= 0) protectedIndexes.add(lastUser);
-  // Keep the latest tool group intact. Earlier complete groups can be omitted.
+  // Keep the unread tool step intact even when user messages follow its results.
+  const latestContent = messages[latestAssistant]?.content;
+  if (Array.isArray(latestContent) && latestContent.some((part) => part?.type === "toolCall"))
+    protectedIndexes.add(latestAssistant);
+  // Keep the final group intact. Earlier complete groups can be omitted.
   for (const index of groups.at(-1)?.indexes ?? []) protectedIndexes.add(index);
   for (const index of protectedIndexes) {
     if (!Number.isInteger(index) || index < 0 || index >= messages.length)
@@ -383,6 +525,7 @@ export function selectContext<T extends ContextMessage>(
           serialized,
           size,
           nativeCall ?? { name: message.toolName },
+          { afterUse: index < latestAssistant },
         );
         if (text.length >= serialized.length) return message;
         shortenedCount += 1;

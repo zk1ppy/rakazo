@@ -17,6 +17,25 @@ test("memory and skills are readable and editable in the app", async ({ page }, 
   await completeOnboarding(page);
   await page.goto("/app");
   await page.waitForURL(/\/app\/[^/]+$/);
+  // A second shared document that the user can delete later in this test. Saving shared
+  // memory from chat writes directly, without an approval card.
+  const retiredPath = "projects/retired.md";
+  const retiredContent = `Retired project ${stamp}`;
+  const setupComposer = page.getByRole("combobox", { name: "Message Chief" });
+  await setupComposer.fill(`save shared memory ${retiredPath} with: ${retiredContent}`);
+  await setupComposer.press("Enter");
+  await expect
+    .poll(
+      async () =>
+        (await rpc<MemoryDocument[]>(page, "memory/list", { scope: "user" })).find(
+          (doc) => doc.path === retiredPath,
+        )?.content,
+      { timeout: 30_000 },
+    )
+    .toBe(retiredContent);
+  await expect(page.getByRole("button", { name: "Allow once", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Deny", exact: true })).toHaveCount(0);
+  await expect(page.getByText(/Review before saving shared memory/)).toHaveCount(0);
 
   // Space-wide documents live in Settings → Memory. Open that before bot
   // settings so the Knowledge Memory tab cannot steal this click.
@@ -65,6 +84,18 @@ test("memory and skills are readable and editable in the app", async ({ page }, 
   const sharedDocument = sharedDocuments.find((doc) => doc.path === "MEMORY.md")!;
   const latestMarker = `Latest shared memory ${stamp}`;
   await rpc(page, "memory/update", { documentId: sharedDocument.id, content: latestMarker });
+  // A concurrent writer must not be overwritten by this open editor.
+  await docEditor.fill("Unsaved draft");
+  await spaceDocs.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(
+    spaceDocs.getByText("Document changed. Reopen to edit the latest version.", { exact: true }),
+  ).toBeVisible();
+  await expect(docEditor).toHaveValue("Unsaved draft");
+  await expect(spaceDocs.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  expect(await rpc<MemoryDocument[]>(page, "memory/list", { scope: "user" })).toContainEqual(
+    expect.objectContaining({ id: sharedDocument.id, content: latestMarker, revision: 3 }),
+  );
+  await captureScreenshot(page, testInfo, "84-space-memory-conflict");
   const downloadPromise = page.waitForEvent("download");
   await spaceDocs.getByRole("button", { name: "Download as markdown" }).click();
   const download = await downloadPromise;
@@ -73,6 +104,33 @@ test("memory and skills are readable and editable in the app", async ({ page }, 
   expect(exported).toContain(latestMarker);
   expect(exported).not.toContain(marker);
   expect(exported).not.toContain("# Chief");
+  // Exporting must not hide why Save stays disabled.
+  const conflictNotice = spaceDocs.getByText(
+    "Document changed. Reopen to edit the latest version.",
+    { exact: true },
+  );
+  await expect(conflictNotice).toBeVisible();
+  await expect(spaceDocs.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await spaceDocs.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(conflictNotice).toHaveCount(0);
+  await memoryRow.click();
+  await expect(docEditor).toHaveValue(latestMarker);
+
+  // Any shared document but MEMORY.md can be deleted after a confirmation.
+  // MEMORY.md editor is open again after the reopen above; do not toggle it closed.
+  await expect(spaceDocs.getByRole("button", { name: "Delete", exact: true })).toHaveCount(0);
+  await spaceDocs.getByRole("button", { name: "Cancel", exact: true }).click();
+  const retiredRow = spaceDocs.getByRole("button", { name: new RegExp(retiredPath) });
+  await retiredRow.click();
+  await expect(spaceDocs.getByRole("button", { name: "Delete", exact: true })).toBeVisible();
+  await captureScreenshot(page, testInfo, "85-space-memory-delete");
+  await spaceDocs.getByRole("button", { name: "Delete", exact: true }).click();
+  await captureScreenshot(page, testInfo, "85-space-memory-confirm-delete");
+  await spaceDocs.getByRole("button", { name: "Confirm delete", exact: true }).click();
+  await expect(retiredRow).toHaveCount(0);
+  expect(
+    (await rpc<MemoryDocument[]>(page, "memory/list", { scope: "user" })).map((doc) => doc.path),
+  ).not.toContain(retiredPath);
   await page.getByLabel("Close memory settings").click();
   await expect(page.getByLabel("Close memory settings")).toHaveCount(0);
 

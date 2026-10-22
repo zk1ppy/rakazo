@@ -23,6 +23,7 @@ import {
   assertVolumeSubpathSupport,
   COMPUTER_IMAGE,
   computerBridgeNameFor,
+  computerDnsMatches,
   computerHomeStorage,
   computerNetworkCreateOptions,
   computerNetworkNameFor,
@@ -37,7 +38,9 @@ import {
   parseMemoryBytes,
   publishedLoopbackControlHostPort,
   resolveComputerControlEndpoint,
+  resolveComputerDns,
   resolveComputerEgressMode,
+  resolveComputerImage,
   resolveScreenNetworkMode,
   resolveScreenPublishTarget,
   resolveSpaceComputerLimit,
@@ -63,6 +66,28 @@ describe("graphical computer spec", () => {
     expect(resolveTeamScreenLimit("4")).toBe(4);
     for (const value of ["-1", "1.5", "not-a-number"])
       expect(() => resolveTeamScreenLimit(value)).toThrow(/positive integer/);
+  });
+
+  it("resolves the computer image tag outside Compose", () => {
+    // Explicit "" stands for unset, so exported RAKAZO_COMPUTER_IMAGE* values cannot leak in.
+    expect(resolveComputerImage("", "")).toBe("rakazo/computer:local");
+    expect(resolveComputerImage("", "edge")).toBe("rakazo/computer:local");
+    expect(resolveComputerImage("ghcr.io/elie222/rakazo/computer", "edge")).toBe(
+      "ghcr.io/elie222/rakazo/computer:edge",
+    );
+    expect(resolveComputerImage("ghcr.io/elie222/rakazo/computer", "")).toBe(
+      "ghcr.io/elie222/rakazo/computer",
+    );
+    // Compose already appends the tag, so a tagged or pinned image is never tagged twice.
+    expect(resolveComputerImage("ghcr.io/elie222/rakazo/computer:edge", "edge")).toBe(
+      "ghcr.io/elie222/rakazo/computer:edge",
+    );
+    expect(resolveComputerImage("registry.example.com:5000/rakazo/computer", "v1.2.3")).toBe(
+      "registry.example.com:5000/rakazo/computer:v1.2.3",
+    );
+    expect(resolveComputerImage("rakazo/computer@sha256:abc", "edge")).toBe(
+      "rakazo/computer@sha256:abc",
+    );
   });
 
   it("validates space computer limit", () => {
@@ -147,8 +172,43 @@ describe("graphical computer spec", () => {
     expect(resolveComputerEgressMode("")).toBe("open");
     expect(resolveComputerEgressMode("open")).toBe("open");
     expect(resolveComputerEgressMode("restricted")).toBe("restricted");
+    expect(resolveComputerEgressMode("auto")).toBe("auto");
     for (const value of ["blocked", "RESTRICTED", "0"])
       expect(() => resolveComputerEgressMode(value)).toThrow(/SANDBOX_COMPUTER_EGRESS/);
+  });
+
+  it("parses computer DNS servers, with Docker's default when unset", () => {
+    expect(resolveComputerDns(undefined)).toBeUndefined();
+    expect(resolveComputerDns(" ")).toBeUndefined();
+    expect(resolveComputerDns("1.1.1.1, 2606:4700:4700::1111")).toEqual([
+      "1.1.1.1",
+      "2606:4700:4700::1111",
+    ]);
+    for (const value of ["dns.example.com", "1.1.1.1,resolver", "300.1.1.1"])
+      expect(() => resolveComputerDns(value)).toThrow(/SANDBOX_COMPUTER_DNS/);
+  });
+
+  it("sets DNS servers on computers only when configured", () => {
+    const base = {
+      name: "rakazo-bot-x",
+      image: "img",
+      botId: "x",
+      spaceId: "s",
+      homePath: "/data/x",
+    };
+    expect(containerCreateOptions(base).HostConfig).not.toHaveProperty("Dns");
+    expect(containerCreateOptions({ ...base, dns: ["1.1.1.1"] }).HostConfig).toMatchObject({
+      Dns: ["1.1.1.1"],
+    });
+  });
+
+  it("matches a computer's DNS servers to the configured ones", () => {
+    expect(computerDnsMatches(null, undefined)).toBe(true);
+    expect(computerDnsMatches([], undefined)).toBe(true);
+    expect(computerDnsMatches(["1.1.1.1"], ["1.1.1.1"])).toBe(true);
+    expect(computerDnsMatches(null, ["1.1.1.1"])).toBe(false);
+    expect(computerDnsMatches(["1.1.1.1"], undefined)).toBe(false);
+    expect(computerDnsMatches(["1.0.0.1", "1.1.1.1"], ["1.1.1.1", "1.0.0.1"])).toBe(false);
   });
 
   it("derives deterministic host bridge names within the 15-byte interface limit", () => {
@@ -232,6 +292,63 @@ describe("graphical computer spec", () => {
     expect(dockerfile).toMatch(/wmctrl/);
     expect(dockerfile).toMatch(/rakazo-focus-or-launch/);
   });
+
+  it.skipIf(process.platform === "win32")(
+    "finds Google Chrome and passes over Ubuntu's snap chromium",
+    () => {
+      const root = path.resolve(import.meta.dirname, "../../computer");
+      const temp = mkdtempSync(path.join(tmpdir(), "rakazo-browser-find-"));
+      const bin = path.join(temp, "bin");
+      const tools = path.join(temp, "tools");
+      const capture = path.join(temp, "launched");
+      const snapChromium = path.join(bin, "chromium-browser");
+      const chrome = path.join(bin, "google-chrome");
+      mkdirSync(bin);
+      writeFileSync(snapChromium, '#!/bin/sh\nexec /snap/bin/chromium "$@"\n');
+      writeFileSync(chrome, '#!/bin/sh\nprintf "%s" "$0" > "$RAKAZO_TEST_LAUNCHED"\n');
+      chmodSync(snapChromium, 0o755);
+      chmodSync(chrome, 0o755);
+
+      try {
+        mkdirSync(tools);
+        // Expose only shell utilities, never browsers from the host PATH.
+        const utilities = [
+          "sh",
+          "mkdir",
+          "readlink",
+          "head",
+          "grep",
+          "rm",
+          "find",
+          "tr",
+          "sed",
+          "cat",
+        ];
+        if (process.platform === "linux") utilities.push("timeout");
+        for (const utility of utilities) {
+          const resolved = spawnSync("/bin/sh", ["-c", 'command -v "$1"', "sh", utility], {
+            encoding: "utf8",
+          });
+          expect(resolved.status, resolved.stderr).toBe(0);
+          symlinkSync(resolved.stdout.trim(), path.join(tools, utility));
+        }
+        const result = spawnSync("sh", [path.join(root, "rakazo-browser")], {
+          env: {
+            ...process.env,
+            DISPLAY: ":1",
+            HOME: path.join(temp, "home"),
+            PATH: `${bin}${path.delimiter}${tools}`,
+            RAKAZO_TEST_LAUNCHED: capture,
+          },
+          encoding: "utf8",
+        });
+        expect(result.status, result.error?.message ?? result.stderr).toBe(0);
+        expect(readFileSync(capture, "utf8")).toBe(chrome);
+      } finally {
+        rmSync(temp, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("ships a sha256-pinned gh CLI", () => {
     const root = path.resolve(import.meta.dirname, "../../computer");
@@ -365,6 +482,52 @@ describe("graphical computer spec", () => {
           ].join("\n"),
         );
         expect(readFileSync(initPath, "utf8")).toBe(init);
+      } finally {
+        rmSync(temp, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "removes only libnss_wrapper from the Chromium preload environment",
+    () => {
+      const root = path.resolve(import.meta.dirname, "../../computer");
+      const temp = mkdtempSync(path.join(tmpdir(), "rakazo-browser-preload-"));
+      try {
+        const chromium = path.join(temp, "chromium");
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion
+        writeFileSync(chromium, '#!/bin/sh\nprintf "%s" "${LD_PRELOAD-unset}"\n');
+        chmodSync(chromium, 0o755);
+        for (const [preload, expected] of [
+          ["/usr/local/lib/libnss_wrapper.so", "unset"],
+          [
+            "/tmp/first.so:/usr/local/lib/libnss_wrapper.so:/tmp/last.so",
+            "/tmp/first.so:/tmp/last.so",
+          ],
+          [":libnss_wrapper.so::", "unset"],
+          ["/usr/local/lib/libnss_wrapper.so /tmp/other.so", "/tmp/other.so"],
+          [" /tmp/first.so:libnss_wrapper.so /tmp/last.so ", "/tmp/first.so:/tmp/last.so"],
+          ["/tmp/other.so", "/tmp/other.so"],
+          ["", ""],
+        ]) {
+          const result = spawnSync(
+            "sh",
+            [path.join(root, "rakazo-browser"), "https://example.test"],
+            {
+              env: {
+                ...process.env,
+                HOME: temp,
+                RAKAZO_BROWSER_PROFILE: path.join(temp, "profile"),
+                PATH: `${temp}${path.delimiter}${process.env.PATH ?? ""}`,
+                LD_PRELOAD: preload,
+              },
+              encoding: "utf8",
+              timeout: 5_000,
+            },
+          );
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.stdout).toBe(expected);
+        }
       } finally {
         rmSync(temp, { recursive: true, force: true });
       }
@@ -1224,13 +1387,6 @@ describe("graphical computer spec", () => {
     expect(screenUrlFor("16080")).toBe("http://127.0.0.1:16080/embed.html");
   });
 
-  it("wires host clipboard paste into the chrome-less embed", () => {
-    const root = path.resolve(import.meta.dirname, "../../computer");
-    const embed = readFileSync(path.join(root, "embed.html"), "utf8");
-    expect(embed).toMatch(/clipboard-bridge\.js/);
-    expect(embed).toMatch(/attachHostClipboardPaste/);
-  });
-
   it("uses the published host mapping in the default topology even when a container IP exists", () => {
     // Regression: per-bot NetworkMode always yields a 172.x address. Returning
     // that to clients makes local/dev screens look dead — browsers cannot load
@@ -1773,6 +1929,49 @@ describe("computer home storage", () => {
     for (const version of ["1.45", "1.46", "2.0"])
       expect(() => assertVolumeSubpathSupport(version)).not.toThrow();
   });
+
+  it("supervises computer control with a bounded restart delay", () => {
+    const start = readFileSync(
+      path.resolve(import.meta.dirname, "../../computer/start.sh"),
+      "utf8",
+    );
+    expect(start).toMatch(
+      /while true; do\s+\/usr\/local\/bin\/rakazo-computer-control\s+sleep 1\s+done >\/tmp\/rakazo\/control\.log 2>&1 &/,
+    );
+    // PID 1 terminates both the background loop and its current child on stop.
+    expect(start).toContain("kill -TERM -- -1");
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "restarts computer control after an abnormal exit",
+    () => {
+      const start = readFileSync(
+        path.resolve(import.meta.dirname, "../../computer/start.sh"),
+        "utf8",
+      );
+      const loop = start.match(
+        /while true; do[\s\S]*?done >\/tmp\/rakazo\/control\.log 2>&1 &/,
+      )?.[0];
+      expect(loop).toBeDefined();
+      const result = spawnSync(
+        "bash",
+        [
+          "-c",
+          [
+            "attempts=0",
+            "control() { echo control; return 137; }",
+            'sleep() { echo "delay $1"; attempts=$((attempts + 1)); if [ "$attempts" -eq 2 ]; then exit 0; fi; }',
+            loop
+              ?.replace("/usr/local/bin/rakazo-computer-control", "control")
+              .replace(" >/tmp/rakazo/control.log 2>&1 &", ""),
+          ].join("\n"),
+        ],
+        { encoding: "utf8", timeout: 5_000 },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe("control\ndelay 1\ncontrol\ndelay 1\n");
+    },
+  );
 
   it("stops promptly when Docker sends SIGTERM to the start script", () => {
     const root = path.resolve(import.meta.dirname, "../../computer");

@@ -365,11 +365,6 @@ function recallNamespaces(
   };
 }
 
-function visibleNamespaces(botId: string | undefined): string[] | null {
-  if (!botId) return null;
-  return [SHARED_NS, isolatedNs(botId), historyNs(botId)];
-}
-
 function digest(parts: string[]): string {
   return createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 32);
 }
@@ -669,14 +664,21 @@ export class Neo4jMemoryProvider implements SemanticMemoryProvider {
     try {
       const id = request.id.trim();
       if (!id) return { ok: false, error: "id is required" };
+      const botId = request.botId.trim();
+      if (!botId) return { ok: false, error: "botId is required" };
       const reason = request.reason?.trim() || null;
+      // Same namespaces recall would search, plus this bot's history facts.
+      const namespaces = [
+        ...recallNamespaces(request.scope, botId, undefined).namespaces,
+        historyNs(botId),
+      ];
       const forgotten = await forgetNeo4jFact(
         await this.ready(context.signal),
         this.connection.database,
         {
           id,
           spaceId: context.spaceId,
-          namespaces: visibleNamespaces(context.botId),
+          namespaces,
           now: new Date().toISOString(),
           reason,
         },

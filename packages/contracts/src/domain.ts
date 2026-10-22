@@ -9,7 +9,14 @@ import {
 } from "./cloudflare-ai-gateway.js";
 import { ThreadMessageSchema } from "./events.js";
 import { Id, MemoryScope, RunStatus, SandboxKind } from "./ids.js";
-import { McpHeadersSchema, McpRemoteEndpointSchema, McpTransportSchema } from "./mcp.js";
+import {
+  McpHeadersSchema,
+  McpRemoteEndpointSchema,
+  McpStdioFilesSchema,
+  McpTransportSchema,
+  parseMcpOAuthAuthorizationParams,
+} from "./mcp.js";
+import { RoutineWatchSchema, RoutineWatchStateSchema } from "./routine-watch.js";
 import { RunTriggerSchema } from "./runs.js";
 
 export const ComputerModeSchema = z.enum(["team", "dedicated"]);
@@ -19,6 +26,24 @@ export const MemoryScopeSchema = z.enum(["isolated", "shared"]);
 export type MemoryScopeValue = z.infer<typeof MemoryScopeSchema>;
 
 export const AvatarStyleSchema = z.enum(["robot", "organic"]);
+
+/** True for an IANA timezone this runtime can format in, such as "Pacific/Auckland". */
+export function isValidTimeZone(value: string): boolean {
+  // Intl also accepts fixed offsets, which are not IANA timezone names.
+  if (/^[+-]/.test(value)) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export const TimeZoneSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .refine(isValidTimeZone, { message: "Unknown timezone" });
 export type AvatarStyle = z.infer<typeof AvatarStyleSchema>;
 
 export const ThinkingLevelSchema = z.enum([
@@ -97,10 +122,21 @@ export const BotSchema = z.object({
   thinkingLevel: ThinkingLevelSchema.nullable(),
   teamChatAmbientEnabled: z.boolean(),
   teamChatRules: z.string(),
+  fleetManagement: z.boolean().default(false),
   disabledBuiltinTools: z.array(z.string()).default([]),
   webhookConfigured: z.boolean(),
   /** Present when created with an idempotency key (e.g. onboarding:first). */
   spawnKey: z.string().nullable(),
+  /** The bot is ringing the user right now. */
+  incomingCall: z
+    .object({
+      callId: z.string(),
+      reason: z.string(),
+      opening: z.string(),
+      expiresAt: z.string(),
+    })
+    .nullable()
+    .optional(),
 });
 export type Bot = z.infer<typeof BotSchema>;
 
@@ -132,6 +168,13 @@ export function truncateReplyQuote(value: string): string {
 
 export const GROUP_MEMBER_MIN = 2;
 export const GROUP_MEMBER_MAX = 10;
+
+/** Preserve pick order and the group name limit without splitting a surrogate pair. */
+export function defaultGroupName(names: readonly string[]): string {
+  const value = names.join(", ").trim().slice(0, 80);
+  const last = value.charCodeAt(value.length - 1);
+  return (last >= 0xd800 && last <= 0xdbff ? value.slice(0, -1) : value).trim();
+}
 
 export const GroupSchema = z.object({
   id: Id,
@@ -176,6 +219,8 @@ export const GroupDetailSchema = GroupSchema.extend({
   messages: z.array(ThreadMessageSchema).optional(),
 });
 export type GroupDetail = z.infer<typeof GroupDetailSchema>;
+
+export const BotSectionName = z.string().trim().min(1).max(60);
 
 export const BotSectionSchema = z.object({
   id: Id,
@@ -329,6 +374,7 @@ export const CreateBotInput = z.object({
   description: z.string().max(BOT_DESCRIPTION_MAX_LENGTH).default(""),
   instructions: z.string().max(BOT_INSTRUCTIONS_MAX_LENGTH).default(""),
   notifyOnFinish: z.boolean().default(true),
+  fleetManagement: z.boolean().optional(),
   color: BotAvatarValueSchema.optional(),
   computerMode: ComputerModeSchema.default("team"),
   /** Idempotency key within a space (unique with spaceId). */
@@ -369,6 +415,7 @@ export const UpdateBotInput = z
     thinkingLevel: ThinkingLevelSchema.nullable().optional(),
     teamChatAmbientEnabled: z.boolean().optional(),
     teamChatRules: z.string().max(TEAM_CHAT_RULES_MAX_LENGTH).optional(),
+    fleetManagement: z.boolean().optional(),
     disabledBuiltinTools: DisabledBuiltinToolsSchema.optional(),
   })
   .superRefine((value, ctx) => {
@@ -448,6 +495,9 @@ export const RoutineSchema = z.object({
   modelProvider: z.string().nullable(),
   modelId: z.string().nullable(),
   thinkingLevel: ThinkingLevelSchema.nullable(),
+  /** Null unless the routine starts when something changes. */
+  watch: RoutineWatchSchema.nullable(),
+  watchState: RoutineWatchStateSchema.nullable(),
   lastRunAt: z.string().nullable(),
   nextRunAt: z.string().nullable(),
   createdAt: z.string(),
@@ -460,7 +510,7 @@ export const CreateRoutineInput = z
     name: z.string().min(1).max(80),
     prompt: z.string().min(1),
     crons: z.array(z.string().min(1)).default([]),
-    timezone: z.string().default("UTC"),
+    timezone: TimeZoneSchema.default("UTC"),
     notify: z.boolean().default(true),
     active: z.boolean().default(false),
     webhookEnabled: z.boolean().default(false),
@@ -475,6 +525,7 @@ export const CreateRoutineInput = z
     modelProvider: z.string().trim().min(1).max(80).nullable().default(null),
     modelId: z.string().trim().min(1).max(200).nullable().default(null),
     thinkingLevel: ThinkingLevelSchema.nullable().default(null),
+    watch: RoutineWatchSchema.nullable().default(null),
   })
   .superRefine((value, ctx) => {
     routineModelIssues(value, ctx);
@@ -482,12 +533,20 @@ export const CreateRoutineInput = z
       value.crons.length === 0 &&
       !value.webhookEnabled &&
       !value.githubEnabled &&
-      !value.messageProvider
+      !value.messageProvider &&
+      !value.watch
     ) {
       ctx.addIssue({
         code: "custom",
-        message: "Add a schedule, webhook, GitHub, or message trigger",
+        message: "Add a schedule, webhook, GitHub, message, or change trigger",
         path: ["crons"],
+      });
+    }
+    if (value.watch && value.crons.length > 0) {
+      ctx.addIssue({
+        code: "custom",
+        message: "A change trigger checks on its own interval; remove the schedule",
+        path: ["watch"],
       });
     }
   });
@@ -647,6 +706,12 @@ export const MemoryDocumentSchema = z.object({
 });
 export type MemoryDocument = z.infer<typeof MemoryDocumentSchema>;
 
+/** Every bot and Space keeps its MEMORY.md index; other memory documents can be deleted. */
+export const MEMORY_INDEX_PATH = "MEMORY.md";
+export function isDeletableMemoryDocument(path: string): boolean {
+  return path !== MEMORY_INDEX_PATH;
+}
+
 export const ConnectionSchema = z.object({
   id: Id,
   connectorId: z.string(),
@@ -671,7 +736,7 @@ export type ConnectionCatalogItem = z.infer<typeof ConnectionCatalogItemSchema>;
 export const ActionApprovalRuleSchema = z.object({
   id: Id,
   effect: z.enum(["always_allow", "require_approval"]),
-  matchKind: z.enum(["tool", "connector", "category"]),
+  matchKind: z.enum(["tool", "connector", "category", "site"]),
   matchValue: z.string(),
   createdAt: z.string(),
 });
@@ -730,18 +795,53 @@ const McpServerBaseInput = z.object({
    * OAuth state survives so a connected server stays connected. */
   clearCredential: z.boolean().optional(),
 });
+const McpOAuthClientFields = {
+  clientId: z.string().trim().min(1).max(512),
+  clientSecret: z.string().min(1).max(4096).optional(),
+  /** Space-separated scopes to request. Empty: the server's advertised scopes. */
+  scope: z.string().trim().max(2000).optional(),
+  /** Extra authorization request parameters in query-string form, e.g. Google's
+   * `access_type=offline&prompt=consent` for a refresh token. */
+  authorizationParams: z
+    .string()
+    .trim()
+    .max(1000)
+    .refine((value) => {
+      try {
+        parseMcpOAuthAuthorizationParams(value);
+        return true;
+      } catch {
+        return false;
+      }
+    }, "Extra authorization parameters cannot set the OAuth flow's own parameters")
+    .optional(),
+};
+/** A client registered with the server's OAuth provider out of band, for
+ * providers without dynamic client registration. On update, omit it to keep
+ * the stored client and send null to remove it. A remote server discovers its
+ * authorization server, so the client is bound to it on first use. */
+const McpOAuthClientInput = z.object(McpOAuthClientFields).nullable().optional();
+/** A stdio server has no URL to discover from, so its client names the
+ * authorization server (its issuer, e.g. https://accounts.google.com). Rakazo
+ * runs the OAuth flow and passes the grant through `{{oauth.*}}` env references. */
+const McpStdioOAuthClientInput = z
+  .object({ ...McpOAuthClientFields, authorizationServer: McpRemoteEndpointSchema })
+  .nullable()
+  .optional();
 export const McpServerConfigInput = z.discriminatedUnion("transport", [
   McpServerBaseInput.extend({
     transport: z.literal("streamable_http"),
     endpoint: McpRemoteEndpointSchema,
     headers: McpHeadersSchema.default({}),
     secret: z.string().max(16384).optional(),
+    oauthClient: McpOAuthClientInput,
   }),
   McpServerBaseInput.extend({
     transport: z.literal("sse"),
     endpoint: McpRemoteEndpointSchema,
     headers: McpHeadersSchema.default({}),
     secret: z.string().max(16384).optional(),
+    oauthClient: McpOAuthClientInput,
   }),
   McpServerBaseInput.extend({
     transport: z.literal("stdio"),
@@ -755,10 +855,26 @@ export const McpServerConfigInput = z.discriminatedUnion("transport", [
         }
       })
       .default({}),
+    /** Update: omit to keep the stored files, send the complete set to replace them. */
+    files: McpStdioFilesSchema.optional(),
     secret: z.string().max(16384).optional(),
+    oauthClient: McpStdioOAuthClientInput,
   }),
 ]);
 export type McpServerConfigInput = z.infer<typeof McpServerConfigInput>;
+
+/**
+ * Last observed launch/discovery outcome of an MCP server. `installing` covers a stdio
+ * package being prepared; `unknown` means nothing has tried to reach the server yet.
+ */
+export const McpServerHealthSchema = z.object({
+  status: z.enum(["unknown", "installing", "ok", "error"]),
+  /** Redacted, human-readable failure reason (stderr tail included for stdio). */
+  message: z.string().nullable(),
+  toolCount: z.number().int().nonnegative().nullable(),
+  checkedAt: z.string().nullable(),
+});
+export type McpServerHealth = z.infer<typeof McpServerHealthSchema>;
 
 export const McpServerSchema = z.object({
   id: Id,
@@ -771,9 +887,14 @@ export const McpServerSchema = z.object({
   command: z.string().nullable(),
   args: z.array(z.string()),
   envKeys: z.array(z.string()),
+  /** Env variables that receive a credential file's path instead of a value. */
+  fileKeys: z.array(z.string()),
   headerKeys: z.array(z.string()),
   hasSecret: z.boolean(),
   oauthStatus: z.enum(["none", "connected", "reconnect"]),
+  /** The pre-registered OAuth client, when one is configured. Its secret is never returned. */
+  oauthClientId: z.string().nullable(),
+  health: McpServerHealthSchema,
   enabled: z.boolean(),
   revision: z.number().int().positive(),
   createdAt: z.string(),
@@ -931,6 +1052,7 @@ export type MessagingAgentConnection = z.infer<typeof MessagingAgentConnectionSc
 
 export const RunSchema = z.object({
   id: Id,
+  userId: Id.optional(),
   botId: Id,
   threadId: Id,
   taskId: Id,
@@ -975,8 +1097,8 @@ export const DEFAULT_MODEL_MAX_TOKENS = 4_096;
 /** Largest completion-token limit exposed by model settings. */
 export const MAX_MODEL_MAX_TOKENS = 131_072;
 
-/** Default context window for an OpenAI-compatible connection. */
-export const DEFAULT_MODEL_CONTEXT_WINDOW = 32_768;
+/** Fallback context window for OpenAI-compatible connections that do not report a size (e.g. Ollama, LM Studio, vLLM). */
+export const DEFAULT_MODEL_CONTEXT_WINDOW = 262_144;
 
 /** Largest context window exposed by model settings. */
 export const MAX_MODEL_CONTEXT_WINDOW = 2_147_483_647;
@@ -1044,6 +1166,8 @@ export function modelOutputLeavesInputRoom(
 }
 
 export const ModelCredentialSchema = z.object({
+  /** Computed space preference order; credentials themselves remain newest first. */
+  preferenceRank: z.number().int().nonnegative().optional(),
   ...ModelContextLimitsSchema.shape,
   id: Id,
   provider: z.string(),
@@ -1061,6 +1185,8 @@ export const ModelCredentialSchema = z.object({
   supportsImages: z.boolean().optional(),
   maxImagesPerPrompt: z.number().int().min(1).max(1000).optional(),
   thinkingLevels: z.array(ThinkingLevelSchema).optional(),
+  /** Openai-compatible only; always contains `modelId` when set. */
+  enabledModelIds: z.array(z.string()).optional(),
   /** Stored secret kind. Absent when the secret could not be read. */
   authKind: z.enum(["api_key", "oauth", "openai_compatible"]).optional(),
 });
@@ -1092,6 +1218,8 @@ export const ModelBackupListSchema = z
 
 export const OPENAI_COMPATIBLE_PROVIDER_ID = "openai-compatible";
 
+export const MAX_ENABLED_MODEL_IDS = 500;
+
 export const ModelConnectInputSchema = z
   .object({
     ...ModelContextLimitsSchema.shape,
@@ -1108,6 +1236,10 @@ export const ModelConnectInputSchema = z
     maxTokens: z.number().int().min(1).max(MAX_MODEL_MAX_TOKENS).nullable().optional(),
     supportsImages: z.boolean().optional(),
     maxImagesPerPrompt: z.number().int().min(1).max(1000).nullable().optional(),
+    enabledModelIds: z
+      .array(z.string().trim().min(1).max(512))
+      .max(MAX_ENABLED_MODEL_IDS)
+      .optional(),
   })
   .superRefine((value, ctx) => {
     if (!modelOutputLeavesInputRoom(value.maxTokens, value.contextWindow)) {
@@ -1212,10 +1344,14 @@ export const ModelCatalogEntrySchema = z.object({
   signIn: ModelOAuthSignInModeSchema.optional(),
   reasoning: z.boolean().optional(),
   thinkingLevels: z.array(ThinkingLevelSchema).optional(),
+  /** The model reads images. Left out where a connection setting decides it. */
+  images: z.boolean().optional(),
   /** Catalog stand-in so a provider appears before the user enters a real model id. */
   placeholder: z.boolean().optional(),
   /** Models share one pinned HTTPS models-list URL that can be probed. */
   catalogProbe: z.boolean().optional(),
+  /** Listed by the provider's live models list but not in the bundled catalog. */
+  live: z.literal(true).optional(),
 });
 export type ModelCatalogEntry = z.infer<typeof ModelCatalogEntrySchema>;
 
@@ -1243,6 +1379,10 @@ export const VoiceCredentialSchema = z.object({
   /** Fish speech-model override. Empty uses the deployment default. */
   speechModel: z.string(),
   transcribe: z.boolean(),
+  /** Self-hosted server base URL and model ids (never the key). Empty for hosted providers. */
+  endpoint: z.string().default(""),
+  ttsModel: z.string().default(""),
+  sttModel: z.string().default(""),
 });
 export type VoiceCredential = z.infer<typeof VoiceCredentialSchema>;
 
@@ -1370,6 +1510,7 @@ export type ServerUpdateRequest = z.infer<typeof ServerUpdateRequestSchema>;
 export const MeSchema = z.object({
   maxUploadSizeBytes: z.number().int().positive().optional(),
   ticketBoardEnabled: z.boolean(),
+  phoneCallsEnabled: z.boolean().default(false),
   userId: Id,
   email: z.string().email(),
   name: z.string(),
@@ -1386,6 +1527,11 @@ export const MeSchema = z.object({
   canChooseHostComputer: z.boolean(),
   sandboxProvider: z.string(),
   avatarStyle: AvatarStyleSchema,
+  /**
+   * The user's IANA timezone, or null when unset (bots then see UTC only).
+   * Absent from servers that predate it.
+   */
+  timezone: z.string().nullable().optional(),
   /** True when this deployment bills and the user is not the deployment owner. */
   billingEnabled: z.boolean(),
 });
@@ -1397,7 +1543,16 @@ export const BillingStatusSchema = z.object({
   canManage: z.boolean(),
   trialAvailable: z.boolean(),
   trialDays: z.number().int().nonnegative(),
-  state: z.enum(["none", "trialing", "active", "past_due", "incomplete", "canceled"]),
+  state: z.enum([
+    "none",
+    "trialing",
+    "active",
+    "past_due",
+    "incomplete",
+    "unpaid",
+    "paused",
+    "canceled",
+  ]),
   price: z
     .object({
       amount: z.number().int().nonnegative(),

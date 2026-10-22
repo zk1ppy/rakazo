@@ -1,18 +1,17 @@
 import type { SandboxProvider } from "@rakazo/adapter-kit";
-import { BoxSandboxEmulator } from "./box-emulator.js";
-import { BoxSandboxProvider } from "./box-sandbox.js";
+import { BoatSandboxProvider } from "./boat-sandbox.js";
 import { CreateOSSandboxProvider } from "./createos-sandbox.js";
-import { DaytonaSandboxEmulator } from "./daytona-emulator.js";
 import { DaytonaSandboxProvider } from "./daytona-sandbox.js";
-import { DesktopSandboxProvider } from "./desktop-sandbox.js";
+import { assertHostCommandsAllowed, DesktopSandboxProvider } from "./desktop-sandbox.js";
 import { DockerSandboxProvider } from "./docker-sandbox.js";
-import { ManagedSandboxEmulator } from "./e2b-emulator.js";
 import { E2BSandboxProvider } from "./e2b-sandbox.js";
 import { FakeSandboxProvider } from "./fake-sandbox.js";
 import { NoneSandboxProvider } from "./none-sandbox.js";
 import { RailwaySandboxProvider } from "./railway-sandbox.js";
 
 export interface SandboxProviderOptions {
+  hostComputerUrl?: string;
+  hostComputerToken?: string;
   supervisorUrl?: string;
   supervisorToken?: string;
   e2bApiKey?: string;
@@ -26,13 +25,14 @@ export interface SandboxProviderOptions {
   railwayApiToken?: string;
   railwayEnvironmentId?: string;
   railwayMaxWorkspaceFileBytes?: string;
-  boxApiKey?: string;
-  boxApiUrl?: string;
+  railwaySandboxRegion?: string;
+  boatApiKey?: string;
+  boatApiUrl?: string;
   dataDir?: string;
 }
 
 function missingRemoteKey(
-  provider: "e2b" | "daytona" | "createos" | "box" | "railway",
+  provider: "e2b" | "daytona" | "createos" | "boat" | "railway",
   envName: string,
 ): SandboxProvider {
   return new NoneSandboxProvider(
@@ -64,9 +64,9 @@ export function createSandboxProvider(kind: string, opts: SandboxProviderOptions
         shape: opts.createosShape,
         rootfs: opts.createosRootfs,
       });
-    case "box":
-      if (!opts.boxApiKey?.trim()) return missingRemoteKey("box", "BOX_API_KEY");
-      return new BoxSandboxProvider({ apiKey: opts.boxApiKey, apiUrl: opts.boxApiUrl });
+    case "boat":
+      if (!opts.boatApiKey?.trim()) return missingRemoteKey("boat", "BOAT_API_KEY");
+      return new BoatSandboxProvider({ apiKey: opts.boatApiKey, apiUrl: opts.boatApiUrl });
     case "railway":
       if (!opts.railwayApiToken?.trim()) return missingRemoteKey("railway", "RAILWAY_API_TOKEN");
       if (!opts.railwayEnvironmentId?.trim())
@@ -75,19 +75,15 @@ export function createSandboxProvider(kind: string, opts: SandboxProviderOptions
         token: opts.railwayApiToken,
         environmentId: opts.railwayEnvironmentId,
         maxWorkspaceFileBytes: opts.railwayMaxWorkspaceFileBytes,
+        region: opts.railwaySandboxRegion,
       });
     case "docker":
       return new DockerSandboxProvider(
         opts.supervisorUrl ?? "http://127.0.0.1:7091",
         opts.supervisorToken,
       );
-    case "e2b-emulator":
-      return new ManagedSandboxEmulator();
-    case "daytona-emulator":
-      return new DaytonaSandboxEmulator();
-    case "box-emulator":
-      return new BoxSandboxEmulator();
     case "desktop":
+      assertHostCommandsAllowed();
       return new DesktopSandboxProvider({
         root: opts.dataDir,
       });
@@ -95,7 +91,7 @@ export function createSandboxProvider(kind: string, opts: SandboxProviderOptions
       return new FakeSandboxProvider();
     default:
       throw new Error(
-        `Unknown SANDBOX_PROVIDER "${kind}". Use none | docker | e2b | daytona | createos | box | railway | e2b-emulator | daytona-emulator | box-emulator | desktop | fake.`,
+        `Unknown SANDBOX_PROVIDER "${kind}". Use none | docker | e2b | daytona | createos | boat | railway | desktop | fake.`,
       );
   }
 }

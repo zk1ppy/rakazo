@@ -1,28 +1,70 @@
+import type { DesktopEnvironment } from "@rakazo/core/node/desktop-runtime";
 import {
+  ensureScreenCommand as coreEnsureScreenCommand,
+  interactiveScreenCommand as coreInteractiveScreenCommand,
+  terminalCommand as coreTerminalCommand,
+  DEFAULT_DESKTOP_ENV,
   BROWSER_APPLICATIONS as DOCKER_BROWSER_ALIASES,
   MAX_DESKTOP_DISPLAY,
   resetDesktopRuntimeCommand,
+  screenPorts,
   shellQuote,
   stopBrowserCommand,
   stopExtraScreenCommand,
+  stopScreenTransportsCommand,
 } from "@rakazo/core/node/desktop-runtime";
 
 export {
   browserProfilePathForScreen,
-  ensureScreenCommand,
-  interactiveScreenCommand,
   prepareBrowserProfileCommand,
   quiesceBrowserProfilesCommand,
   stopBrowserCommand,
   stopExtraScreenCommand,
-  terminalCommand,
 } from "@rakazo/core/node/desktop-runtime";
 
 import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { canReleaseScreenLease, canTakeScreenLease } from "@rakazo/core";
 import { z } from "zod";
-import { type SandboxInput, xdotoolCommand } from "./computer-spec.js";
+import type { SandboxInput } from "./computer-spec.js";
+import { xdotoolCommand } from "./computer-spec.js";
+
+// Docker forwarding reaches the isolated container's bridge interface; loopback cannot serve it.
+const DOCKER_DESKTOP_ENV: DesktopEnvironment = { ...DEFAULT_DESKTOP_ENV, bindHost: "0.0.0.0" };
+
+export function ensureScreenCommand(
+  index: number,
+  screenId: string,
+  viewToken: string,
+  env = DOCKER_DESKTOP_ENV,
+) {
+  return coreEnsureScreenCommand(index, screenId, viewToken, env);
+}
+
+export function interactiveScreenCommand(
+  interactive: boolean,
+  controlToken?: string,
+  layout = screenPorts(0),
+) {
+  return coreInteractiveScreenCommand(interactive, controlToken, {
+    ...layout,
+    bindHost: DOCKER_DESKTOP_ENV.bindHost,
+  });
+}
+
+export function terminalCommand(
+  controlToken: string,
+  terminalToken: string,
+  cwd: string,
+  env = DOCKER_DESKTOP_ENV,
+  layout = screenPorts(0, env),
+) {
+  return coreTerminalCommand(controlToken, terminalToken, cwd, env, {
+    ...layout,
+    bindHost: env.bindHost,
+  });
+}
 
 export const computerActionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("key"), key: z.string(), modifiers: z.array(z.string()).optional() }),
@@ -271,6 +313,7 @@ export function completeWarmReleasedScreen(
   if (slot?.releasing && slot.index === index) {
     delete slot.releasing;
     delete slot.controlled;
+    delete slot.controlToken;
     slot.idleAt = idleAt;
   }
 }
@@ -295,10 +338,18 @@ export async function teardownReleasedScreen(
   screenId: string,
   index: number,
   teardown: () => Promise<{ code: number; stderr: string }>,
+  options: { retainBrowser?: boolean } = {},
 ) {
   const result = await teardown();
   if (result.code !== 0) throw new Error(result.stderr || "computer screen failed to stop");
-  completeReleasedScreen(assigned, screenId, index);
+  const slot = assigned.get(screenId);
+  if (options.retainBrowser && slot?.releasing && slot.index === index) {
+    // Keep the display reserved for this browser, and the fence to reject delayed releases.
+    completeWarmReleasedScreen(assigned, screenId, index, Date.now());
+    delete slot.viewToken;
+  } else {
+    completeReleasedScreen(assigned, screenId, index);
+  }
 }
 
 export interface ScreenAssignment {
@@ -308,6 +359,7 @@ export interface ScreenAssignment {
   viewToken?: string;
   idleAt?: number;
   controlled?: boolean;
+  controlToken?: string;
 }
 
 /** Forget screen assignments and their boot marker together on every cleanup path. */
@@ -338,7 +390,7 @@ export function currentComputerScreens(
   return assigned;
 }
 
-/** Choose the stop command for DELETE /screen cancel/release.
+/** Release access on DELETE /screen; only cancellation stops the browser.
  * Callers must hold the per-computer screen lock across this decision and any stop. */
 export function screenReleaseStopCommand(
   index: number | undefined,
@@ -349,7 +401,9 @@ export function screenReleaseStopCommand(
   },
 ): string {
   if (index !== undefined) {
-    return stopExtraScreenCommand(index, options.screenId);
+    return options.cancelRunWork
+      ? stopExtraScreenCommand(index, options.screenId)
+      : ["set -eu", stopScreenTransportsCommand(index)].join("\n");
   }
   // Missing registry after a supervisor restart: cancel still tears down the
   // matching bot's orphaned Chromium process without touching another bot.
@@ -418,14 +472,17 @@ export function containerActionStep(
       action.direction === "up" ? "4" : "5",
     ];
   } else if (action.kind === "open") {
-    const target = /^https?:\/\//i.test(action.path)
+    const isHttpUrl = /^https?:\/\//i.test(action.path);
+    const target = isHttpUrl
       ? action.path
-      : workspaceTarget(normalizeWorkspaceRelative(action.path));
+      : pathToFileURL(workspaceTarget(normalizeWorkspaceRelative(action.path)), {
+          windows: false,
+        }).href;
     argv = [
       "env",
       `DISPLAY=${display}`,
       ...(browserProfile ? [`RAKAZO_BROWSER_PROFILE=${browserProfile}`] : []),
-      "xdg-open",
+      isHttpUrl ? "xdg-open" : "rakazo-browser",
       target,
     ];
   } else {

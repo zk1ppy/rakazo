@@ -8,9 +8,11 @@ import type {
 import { computerSleepJob } from "@rakazo/adapter-kit";
 import { ACTIVE_RUN_STATUSES } from "@rakazo/core";
 import type { PrismaClient, ThreadEvents } from "@rakazo/db";
+import { getLogger } from "@rakazo/logging";
 import { expireComputerControl, hasActiveComputerControl } from "./computer-control.js";
 import { toComputerRef } from "./computer-lifecycle.js";
 import { checkpointComputerWorkspace } from "./computer-workspace.js";
+import { isSandboxGoneError } from "./sandbox-errors.js";
 
 export const DEFAULT_SANDBOX_IDLE_MS = 10 * 60 * 1000;
 /**
@@ -126,7 +128,7 @@ export function cancelComputerRunWorkArgv(computerId: string, runId: string): st
 }
 
 export async function cancelComputerRunWork(
-  sandbox: Pick<SandboxProvider, "execute">,
+  sandbox: Pick<SandboxProvider, "execute" | "cancelRunWork">,
   computer: ComputerRef,
   computerId: string,
   runId: string,
@@ -134,6 +136,12 @@ export async function cancelComputerRunWork(
 ): Promise<void> {
   if (!computerId || !runId) return;
   try {
+    if (sandbox.cancelRunWork) {
+      await sandbox.cancelRunWork(computer, computerId, runId, context);
+      return;
+    }
+    if (computer.kind === "desktop") return;
+
     for await (const _event of sandbox.execute(
       computer,
       { argv: cancelComputerRunWorkArgv(computerId, runId), timeoutMs: 15_000 },
@@ -250,6 +258,8 @@ export async function sleepComputerIfIdle(
   if (!computerIdleSleepEnabled()) return;
   let computer = await loadComputer(deps.prisma, computerId);
   if (!computer?.providerRef || computer.state !== "running") return;
+  // Native computers have no provisioned runtime to suspend; Electron owns their lifetime.
+  if (computer.kind === "desktop") return;
 
   if (computer.controlBotId && computer.controlLeaseId && !hasActiveComputerControl(computer)) {
     await expireComputerControl(deps, computer.id, computer.controlLeaseId);
@@ -282,14 +292,14 @@ export async function sleepComputerIfIdle(
     limitReached
       ? Promise.resolve(false)
       : hasActiveBackgroundWork(deps.sandbox, ref, ctx, computerId);
-  if (await runHolds()) {
+  if ((await runHolds()) || (await backgroundHolds())) {
     scheduleComputerSleep(deps.jobs, computerId);
-    return;
-  }
-
-  if (await backgroundHolds()) {
-    scheduleComputerSleep(deps.jobs, computerId);
-    await deps.sandbox.keepAlive?.(ref);
+    try {
+      await deps.sandbox.keepAlive?.(ref);
+    } catch (error) {
+      // The holding run or the next idle check recovers a computer whose sandbox is gone.
+      if (!isSandboxGoneError(error)) throw error;
+    }
     return;
   }
 
@@ -338,6 +348,24 @@ export async function sleepComputerIfIdle(
       return;
     }
   } catch (error) {
+    if (isSandboxGoneError(error)) {
+      // Nothing is left to checkpoint or stop. Retrying would fail the same way every idle
+      // window, so clear the dead ref and let the next use boot from the last saved revision.
+      await deps.prisma.computer.updateMany({
+        where: suspensionClaim,
+        data: {
+          state: "stopped",
+          providerRef: null,
+          runningSince: null,
+          controlHolder: "none",
+          controlLeaseId: null,
+          controlLeaseExpiresAt: null,
+          controlBotId: null,
+          controlRunId: null,
+        },
+      });
+      return;
+    }
     await deps.prisma.computer.updateMany({
       where: suspensionClaim,
       data: { state: "running" },
@@ -396,6 +424,12 @@ export async function sleepComputerIfIdle(
       controlBotId: null,
       controlRunId: null,
     },
+  });
+  getLogger().info("computer.suspended", {
+    "computer.id": computerId,
+    provider: computer.kind,
+    reason: limitReached ? "active_limit" : "idle",
+    activeMs: computer.runningSince ? Date.now() - computer.runningSince.getTime() : undefined,
   });
   const bots = await deps.prisma.bot.findMany({
     where: { computerId },
@@ -459,8 +493,9 @@ async function hasActiveBackgroundWork(
   if (sandbox.inspectBackgroundWork) {
     try {
       return (await sandbox.inspectBackgroundWork(computer, computerId, context)) !== "idle";
-    } catch {
-      return true;
+    } catch (error) {
+      // A gone sandbox runs nothing; the checkpoint below then stops the computer.
+      return !isSandboxGoneError(error);
     }
   }
   let exitCode: number | undefined;
@@ -477,8 +512,8 @@ async function hasActiveBackgroundWork(
       if (event.type === "stdout") stdout += event.data;
       if (event.type === "exit") exitCode = event.code;
     }
-  } catch {
-    return true;
+  } catch (error) {
+    return !isSandboxGoneError(error);
   }
   // Only the probe's explicit idle result permits suspension; unsupported or failed probes retry.
   return exitCode !== 1 || stdout.trim() !== BACKGROUND_WORK_IDLE_SENTINEL;

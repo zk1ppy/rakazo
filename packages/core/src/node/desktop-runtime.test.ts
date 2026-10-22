@@ -1,5 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   mkdirSync,
@@ -9,6 +10,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -110,6 +112,61 @@ function fixture() {
 }
 
 describe("shared Linux desktop lifecycle", () => {
+  it("defaults to a loopback gateway without environment options", () => {
+    expect(ensureScreenCommand(0, "bot", "view")).toContain("127.0.0.1:6080 8>&-");
+    expect(interactiveScreenCommand(true, "control")).toContain("127.0.0.1:6080 8>&-");
+    expect(terminalCommand("control", "terminal", "/work")).toContain("127.0.0.1:6080 8>&-");
+  });
+
+  it.each([undefined, "127.0.0.1", "localhost", "192.0.2.10", "0.0.0.0"])(
+    "binds and identifies the configured gateway (%s)",
+    (bindHost) => {
+      const environment = { ...env, bindHost };
+      const host = bindHost ?? "127.0.0.1";
+      const command = terminalCommand("control", "terminal", "/work", environment);
+      expect(command).toContain(`--token-source=/tmp/rakazo/desktop-targets ${host}:6100 8>&-`);
+      const pattern = command.match(/if ! pgrep -f '([^']+)'/)?.[1];
+      expect(pattern).toBeDefined();
+      const process = (address: string, source = "desktop-targets") =>
+        `/usr/bin/python3 /usr/bin/websockify --token-source=/tmp/rakazo/${source} ${address}:6100`;
+      expect(process(host)).toMatch(new RegExp(pattern!));
+      expect(process("192x0x2x10")).not.toMatch(new RegExp(pattern!));
+      expect(process(host, "view-target-1")).not.toMatch(new RegExp(pattern!));
+      if (host !== "0.0.0.0") expect(process("0.0.0.0")).not.toMatch(new RegExp(pattern!));
+      // Retirement still matches older wildcard listeners, including single-screen images.
+      const retirement = command.match(/pkill -f '([^']*websockify[^']*)'/)?.[1];
+      expect(retirement).toBeDefined();
+      expect(process("0.0.0.0", "view-target-1")).toMatch(new RegExp(retirement!));
+      expect(process("0.0.0.0")).toMatch(new RegExp(retirement!));
+      expect(command).toContain(`/dev/tcp/${host === "0.0.0.0" ? "127.0.0.1" : host}/6100`);
+      expect(ensureScreenCommand(0, "bot", "view", environment)).toContain(`${host}:6100 8>&-`);
+      expect(interactiveScreenCommand(true, "control", screenPorts(0, environment))).toContain(
+        `${host}:6100 8>&-`,
+      );
+    },
+  );
+
+  it.each([
+    "",
+    "example.test",
+    "256.1.1.1",
+    "127.1",
+    "::1",
+    "127.0.0.1; touch /tmp/injected",
+    "localhost\n",
+  ])("rejects invalid gateway hosts (%j)", (bindHost) => {
+    const environment = { ...env, bindHost };
+    expect(() => ensureScreenCommand(0, "bot", "view", environment)).toThrow(
+      "invalid screen gateway bind host",
+    );
+    expect(() => terminalCommand("control", "terminal", "/work", environment)).toThrow(
+      "invalid screen gateway bind host",
+    );
+    expect(() =>
+      interactiveScreenCommand(true, "control", { ...screenPorts(0), bindHost }),
+    ).toThrow("invalid screen gateway bind host");
+  });
+
   it("allocates live slots past 1000 bots, keeps assignments across callers, and rejects stale leases", () => {
     const f = fixture();
     expect(f.ensure("a").stdout).toContain("RAKAZO_DESKTOP=0:view-a");
@@ -217,6 +274,8 @@ describe("shared Linux desktop lifecycle", () => {
   it("drops libnss_wrapper before the screen browser exec", () => {
     const command = ensureScreenCommand(0, "bot", "token");
     expect(command).toContain("*libnss_wrapper.so");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: generated shell parameter expansion
+    expect(command).toContain("${_rest%%[: ]*}");
     expect(command).toContain("unset LD_PRELOAD");
     expect(command).toContain('[ "$(cat /tmp/rakazo/desktop-targets/view-1)" != "$desired" ]');
     expect(command).toContain(
@@ -227,6 +286,82 @@ describe("shared Linux desktop lifecycle", () => {
     const execAt = lines.findIndex((line) => line.startsWith("exec "));
     expect(unsetAt).toBeGreaterThan(-1);
     expect(execAt).toBeGreaterThan(unsetAt);
+  });
+
+  it.each([false, true])(
+    "repairs an empty control route or fails if publication fails (failPublish=%s)",
+    async (failPublish) => {
+      const root = mkdtempSync("/tmp/rk-control-");
+      roots.push(root);
+      mkdirSync(path.join(root, "sockets"));
+      mkdirSync(path.join(root, "desktop-targets"));
+      const socket = path.join(
+        root,
+        `sockets/control-1-${createHash("sha256").update("human").digest("hex").slice(0, 32)}`,
+      );
+      const input = net.createServer();
+      const gateway = net.createServer((connection) => connection.destroy());
+      await new Promise<void>((resolve) => input.listen(socket, resolve));
+      await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+      const address = gateway.address();
+      if (!address || typeof address === "string") throw new Error("expected port");
+      writeFileSync(path.join(root, "control-token-1"), "human");
+      writeFileSync(path.join(root, "desktop-targets/control-1"), "");
+      try {
+        const script = interactiveScreenCommand(true, "human", {
+          ...screenPorts(0),
+          controlPort: String(address.port),
+        })
+          .replaceAll("/tmp/rakazo", root)
+          .replaceAll("/usr/share/novnc", root);
+        const result = spawnSync(
+          "bash",
+          [
+            "-c",
+            [
+              ...(failPublish ? ["mv() { return 1; }"] : []),
+              "pgrep() { return 0; }",
+              "pkill() { echo unexpected-stop >&2; return 1; }",
+              "flock() { :; }",
+              "command() { echo /fake/websockify; }",
+              script,
+            ].join("\n"),
+          ],
+          { encoding: "utf8", timeout: 5000 },
+        );
+        expect(result.status, result.stderr).toBe(failPublish ? 1 : 0);
+        expect(result.stderr).not.toContain("unexpected-stop");
+        if (failPublish) return;
+        expect(readFileSync(path.join(root, "desktop-targets/control-1"), "utf8")).toBe(
+          `human: unix_socket:${socket}\n`,
+        );
+      } finally {
+        input.close();
+        gateway.close();
+      }
+    },
+  );
+
+  it("fails without publishing a token when the input server cannot start", () => {
+    const root = mkdtempSync("/tmp/rk-control-");
+    roots.push(root);
+    const script = interactiveScreenCommand(true, "human").replaceAll("/tmp/rakazo", root);
+    const result = spawnSync(
+      "bash",
+      [
+        "-c",
+        [
+          "nohup() { return 1; }",
+          "pgrep() { return 1; }",
+          "pkill() { :; }",
+          "sleep() { :; }",
+          script,
+        ].join("\n"),
+      ],
+      { encoding: "utf8", timeout: 5000 },
+    );
+    expect(result.status).not.toBe(0);
+    expect(() => readFileSync(path.join(root, "control-token-1"))).toThrow();
   });
 
   it("stops the terminal with the control lease and the screen transports", () => {

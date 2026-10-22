@@ -3,8 +3,11 @@ import {
   activeBotId,
   captureScreenshot,
   completeOnboarding,
+  expandAdvancedSection,
+  expectCardWidth,
   realSandboxTimeout,
   rpc,
+  showPasswordForm,
   signup,
 } from "./helpers";
 
@@ -70,6 +73,7 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   await expect(computerCard).toBeVisible();
   await expect(computerCard.getByText("Needs you", { exact: true })).toBeVisible();
   await expect(computerCard.getByTestId("computer-card-open")).toBeVisible();
+  await expectCardWidth(computerCard, 340);
   await captureScreenshot(page, testInfo, "08-protected-input-request");
   await computerCard.getByTestId("computer-card-open").click();
   await page
@@ -79,7 +83,7 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   await expect(page.getByRole("button", { name: "Close computer" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Skip", exact: true }).last()).toBeVisible();
   await expect(page.getByRole("button", { name: "I’m done", exact: true }).last()).toBeVisible();
-  if (process.env.SANDBOX_PROVIDER === "box") await waitForBoxFramebuffer(page);
+  if (process.env.SANDBOX_PROVIDER === "boat") await waitForBoatFramebuffer(page);
   await captureScreenshot(page, testInfo, "09-computer-takeover-outcomes");
   await page.getByRole("button", { name: "I’m done", exact: true }).last().click();
   await expect(page.getByRole("button", { name: "Close computer" })).toBeVisible();
@@ -99,9 +103,9 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   // Agent computer toggles the panel. Re-open when closed so Open can refresh computer status.
   const sidePanel = page.getByTestId("side-panel");
   if ((await sidePanel.getAttribute("data-panel")) === "computer") {
-    await page.getByTitle("Agent computer").click();
+    await page.getByRole("button", { name: "Agent computer", exact: true }).click();
   }
-  await page.getByTitle("Agent computer").click();
+  await page.getByRole("button", { name: "Agent computer", exact: true }).click();
   await expect(sidePanel).toHaveAttribute("data-panel", "computer");
   await expect(sidePanel).toHaveCSS("width", "384px");
   const [mainBox, panelBox] = await Promise.all([
@@ -146,9 +150,28 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   await expect(page.getByText("Monday briefing")).toBeVisible();
   await captureScreenshot(page, testInfo, "10-routine-created");
 
-  await page.getByText("Integrations").click();
-  await expect(page.getByPlaceholder("Search apps")).toBeVisible();
+  let releaseCatalog!: () => void;
+  const catalogGate = new Promise<void>((resolve) => {
+    releaseCatalog = resolve;
+  });
+  await page.route("**/rpc/connections/catalog", async (route) => {
+    await catalogGate;
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "Connect apps", exact: true }).click();
+  const catalogSpinner = page.getByRole("status", { name: "Loading integrations…" });
   const featured = page.getByTestId("featured-connectors");
+  try {
+    await expect(catalogSpinner).toBeVisible();
+    await expect(featured).toBeHidden();
+    await expect(page.getByPlaceholder("Search apps")).toBeDisabled();
+    await expect(page.getByText("Not in the plugin catalog", { exact: true })).toBeHidden();
+    await captureScreenshot(page, testInfo, "11-plugins-loading");
+  } finally {
+    releaseCatalog();
+  }
+  await expect(catalogSpinner).toBeHidden();
+  await expect(page.getByPlaceholder("Search apps")).toBeEnabled();
   await expect(featured).toContainText(
     /Gmail[\s\S]*Google Calendar[\s\S]*Google Drive[\s\S]*Slack[\s\S]*Notion/,
   );
@@ -190,8 +213,15 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   await expect(detail.getByLabel("Account label").nth(1)).toHaveValue("Work");
   await captureScreenshot(page, testInfo, "11a2-multi-account-plugins");
 
+  await page
+    .getByTestId("connection-tools")
+    .getByText(/tools?$/)
+    .click();
+  await expect(detail.getByText("Send email", { exact: true })).toBeVisible();
+  await captureScreenshot(page, testInfo, "11a3-plugin-tools");
+
   await page.getByRole("button", { name: "Close integrations" }).click();
-  await page.getByText("Integrations").click();
+  await page.getByRole("button", { name: "Connect apps", exact: true }).click();
   await expect(page.getByPlaceholder("Search apps")).toBeVisible();
   const gmailTileAgain = page.getByTestId("connection-tile-gmail");
   await expect(gmailTileAgain.getByRole("button", { name: "Added", exact: true })).toBeVisible();
@@ -227,9 +257,13 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   await expect(linearRow.getByRole("button", { name: "Add", exact: true })).toBeVisible();
 
   const advanced = page.getByTestId("integrations-advanced");
-  await advanced.evaluate((element) => {
-    (element as HTMLDetailsElement).open = true;
-  });
+  const browseMcp = page.getByRole("button", { name: "Browse MCP servers", exact: true });
+  await expect(browseMcp).toBeHidden();
+  await expect(page.getByRole("button", { name: "Add GraphQL", exact: true })).toBeHidden();
+  await expandAdvancedSection(advanced);
+  await expect(
+    advanced.getByRole("button", { name: "Browse MCP servers", exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole("button", { name: "Manage MCP servers", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Add MCP server", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Add OpenAPI", exact: true })).toBeVisible();
@@ -238,7 +272,6 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   await expect(page.getByRole("button", { name: "Add Treg", exact: true })).toBeVisible();
   await expect(page.getByText("Tool sources", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "MCP servers", exact: true })).toBeHidden();
-  // Thin Advanced smoke only. GraphQL install and order screenshots live in graphql-integrations.spec.ts.
   await expect(page.getByTestId("integrations-catalog-feed")).toBeVisible();
   // Catalog Search is optional chrome; add buttons stay MCP → OpenAPI → GraphQL → Executor → Treg.
   const advancedActions = advanced.getByTestId("integrations-advanced-add").locator("button");
@@ -248,6 +281,7 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   await expect(advancedActions.nth(2)).toHaveText("Add GraphQL");
   await expect(advancedActions.nth(3)).toHaveText("Add Executor");
   await expect(advancedActions.nth(4)).toHaveText("Add Treg");
+  await captureScreenshot(page, testInfo, "01-graphql-advanced-order");
 
   const feed = page.getByTestId("integrations-catalog-feed");
   await feed.getByRole("textbox", { name: "Integration domain" }).fill("github.com");
@@ -308,14 +342,26 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
   ).toBeVisible();
   await captureScreenshot(page, testInfo, "11d-provider-emulators");
 
+  await page.getByRole("button", { name: "Add GraphQL", exact: true }).click();
+  await page.getByPlaceholder("Display name").fill("Browser GraphQL");
+  await page
+    .getByPlaceholder("https://example.com/graphql")
+    .fill("https://graphql.example.test/graphql");
+  await page.getByRole("button", { name: "Verify and add", exact: true }).click();
+  await expect(
+    page.getByText(/GRAPHQL · https:\/\/graphql\.example\.test\/graphql · no auth/),
+  ).toBeVisible();
+  await captureScreenshot(page, testInfo, "02-graphql-installed");
+
   await page.getByRole("button", { name: "Close integrations" }).click();
 
   await page.getByText("Chief").first().click();
   const gear = page.getByRole("button", { name: "Show settings" });
   if (!(await gear.isVisible().catch(() => false))) {
-    await page.getByTitle("Agent computer").click();
+    await page.getByRole("button", { name: "Agent computer", exact: true }).click();
   }
   await gear.click();
+  await expandAdvancedSection(page.getByTestId("bot-settings"));
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "Export" }).click();
   const download = await downloadPromise;
@@ -366,6 +412,9 @@ test("sign-in, spawn, and stop work in the shell", async ({ page }, testInfo) =>
   await expect(sidebarBotButton(page, /Scout/)).toBeVisible({
     timeout: 30_000,
   });
+  const botLinkCard = page.getByTestId("bot-link-card");
+  await expect(botLinkCard).toBeVisible({ timeout: 30_000 });
+  await expectCardWidth(botLinkCard, 340);
   await captureScreenshot(page, testInfo, "13-spawned-bot");
 
   await page
@@ -382,12 +431,12 @@ test("sign-in, spawn, and stop work in the shell", async ({ page }, testInfo) =>
   await expect(page.getByText(/^Steer /)).toHaveCount(0);
   await expect(composer).toHaveAttribute("placeholder", "Message Chief");
   await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
-  const voiceButton = page
+  const holdToTalk = page
     .getByTestId("composer-bar")
-    .getByRole("button", { name: "Voice", exact: true });
-  await expect(voiceButton).toBeVisible();
+    .getByRole("button", { name: "Hold to talk", exact: true });
+  await expect(holdToTalk).toBeVisible();
   await composer.fill("Use the newer report and keep the answer short.");
-  await expect(voiceButton).toHaveCount(0);
+  await expect(holdToTalk).toHaveCount(0);
   await composer.press("Tab");
   await expect(page.getByRole("button", { name: "Send", exact: true })).toBeFocused();
   await page.keyboard.press("Enter");
@@ -430,6 +479,7 @@ test("sign-in, spawn, and stop work in the shell", async ({ page }, testInfo) =>
   await page.context().clearCookies();
   await page.goto("/sign-in");
   await page.getByPlaceholder("Your email address").fill(email);
+  await showPasswordForm(page);
   await page.getByPlaceholder("Password").fill("password12");
   await page.getByRole("button", { name: "Continue with email" }).click();
   await page.waitForURL(/\/app/, { timeout: 20_000 });
@@ -489,7 +539,7 @@ async function threadRunStatus(page: Page) {
   return result.run?.status ?? "idle";
 }
 
-async function waitForBoxFramebuffer(page: Page) {
+async function waitForBoatFramebuffer(page: Page) {
   await expect
     .poll(
       async () => {
@@ -507,7 +557,7 @@ async function waitForBoxFramebuffer(page: Page) {
         }
         return false;
       },
-      { timeout: 60_000, message: "the Box noVNC framebuffer must be ready" },
+      { timeout: 60_000, message: "the Boat noVNC framebuffer must be ready" },
     )
     .toBe(true);
 }

@@ -1,6 +1,8 @@
 import { ORPCError } from "@orpc/server";
 import type { AdapterContext, SecretStore } from "@rakazo/adapter-kit";
+import { VoiceAccountError } from "@rakazo/adapter-kit";
 import {
+  actorMayUsePrivateEndpoint,
   createVoiceProvider,
   isFishSpeechModelId,
   isVoiceProviderId,
@@ -8,9 +10,12 @@ import {
   MAX_SPEAK_CHARS,
   MAX_TRANSCRIBE_BYTES,
   NoVoiceConfigured,
+  OPENAI_COMPATIBLE_VOICE_PROVIDER_ID,
+  openAiCompatibleVoiceServer,
+  serializeOpenAiCompatibleVoiceSecret,
   voiceCatalogEntry,
 } from "@rakazo/adapters";
-import type { Actor, VoiceCredential, VoiceStatus } from "@rakazo/contracts";
+import type { Actor, VoiceAccountErrorCode, VoiceCredential, VoiceStatus } from "@rakazo/contracts";
 import { toUtterances } from "@rakazo/core";
 import {
   deleteUnreferencedCredentialSecret,
@@ -20,6 +25,7 @@ import {
   newestVoiceCredentialOrder,
   Prisma,
   type PrismaClient,
+  runAsTenant,
   selectSpaceVoicePreference,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
@@ -30,6 +36,27 @@ import { withSerializableRetry } from "./serializable-retry.js";
 export interface VoiceDeps {
   prisma: PrismaClient;
   secrets: SecretStore;
+  /** The instance flag (`MCP_ALLOW_PRIVATE_ENDPOINT`). */
+  env?: { mcpAllowPrivateEndpoint?: boolean };
+}
+
+/** A self-hosted speech server on a private address is limited like model endpoints. */
+async function voiceMayUsePrivateEndpoint(deps: VoiceDeps, actor: Actor, provider: string) {
+  return (
+    provider === OPENAI_COMPATIBLE_VOICE_PROVIDER_ID &&
+    actorMayUsePrivateEndpoint(
+      deps.prisma,
+      actor.userId,
+      deps.env?.mcpAllowPrivateEndpoint === true,
+    )
+  );
+}
+
+/** The voice adapter for a credential, with the actor's private-endpoint decision. */
+export async function voiceProviderFor(deps: VoiceDeps, actor: Actor, provider: string) {
+  return createVoiceProvider(provider, {
+    allowPrivateEndpoint: await voiceMayUsePrivateEndpoint(deps, actor, provider),
+  });
 }
 
 export { listVoiceCatalog };
@@ -69,6 +96,7 @@ export function toVoiceCredential(row: {
   isDefault: boolean;
   voiceId: string;
   speechModel?: string | null;
+  server?: { endpoint: string; ttsModel: string; sttModel: string };
 }): VoiceCredential {
   return {
     id: row.id,
@@ -78,7 +106,81 @@ export function toVoiceCredential(row: {
     voiceId: row.voiceId,
     speechModel: row.speechModel ?? "",
     transcribe: Boolean(catalogEntry(row.provider)?.transcribe),
+    endpoint: row.server?.endpoint ?? "",
+    ttsModel: row.server?.ttsModel ?? "",
+    sttModel: row.server?.sttModel ?? "",
   };
+}
+
+/**
+ * A self-hosted connection's address and model ids, read from its secret. Undefined for
+ * hosted providers and for a secret that cannot be read, which still lists the connection.
+ */
+export async function voiceCredentialServer(
+  deps: VoiceDeps,
+  actor: Actor,
+  row: { provider: string; secretId: string },
+) {
+  if (row.provider !== OPENAI_COMPATIBLE_VOICE_PROVIDER_ID) return undefined;
+  try {
+    const secret = await deps.prisma.secret.findFirst({
+      where: { id: row.secretId, userId: actor.userId, spaceId: null },
+    });
+    if (!secret) return undefined;
+    return openAiCompatibleVoiceServer(await deps.secrets.load(secret.ciphertext, secret.id));
+  } catch {
+    // Reconnecting replaces an unreadable secret.
+    return undefined;
+  }
+}
+
+/**
+ * Another server or speech model has its own voices, so saved voice choices cannot carry
+ * over. Only self-hosted connections can change either while keeping the credential.
+ */
+export function voiceChoicesChanged(previousPlaintext: string | undefined, plaintext: string) {
+  const previous = previousPlaintext ? openAiCompatibleVoiceServer(previousPlaintext) : undefined;
+  if (!previous) return false;
+  const next = openAiCompatibleVoiceServer(plaintext);
+  return previous.endpoint !== next?.endpoint || previous.ttsModel !== next?.ttsModel;
+}
+
+/**
+ * The secret to store. Hosted providers keep the bare key; a self-hosted server stores
+ * its base URL, optional key, and model ids, validated like model connections.
+ */
+export function voiceCredentialPlaintext(input: {
+  provider: string;
+  plaintext: string;
+  baseUrl?: string;
+  ttsModel?: string;
+  sttModel?: string;
+  /** The stored secret for this provider; blank fields keep its key and models. */
+  previousPlaintext?: string;
+  allowPrivateEndpoint?: boolean;
+}): string {
+  if (input.provider !== OPENAI_COMPATIBLE_VOICE_PROVIDER_ID) {
+    if (input.plaintext.trim().length < 8) {
+      throw new ORPCError("BAD_REQUEST", { message: "Enter an API key." });
+    }
+    return input.plaintext;
+  }
+  try {
+    return serializeOpenAiCompatibleVoiceSecret(
+      {
+        baseUrl: input.baseUrl ?? "",
+        apiKey: input.plaintext,
+        ttsModel: input.ttsModel,
+        sttModel: input.sttModel,
+      },
+      input.previousPlaintext,
+      { allowPrivate: input.allowPrivateEndpoint },
+    );
+  } catch (error) {
+    throw new ORPCError("BAD_REQUEST", {
+      message: error instanceof Error ? error.message : "That server URL is not valid.",
+    });
+  }
 }
 
 const FISH_AUDIO_PROVIDER = "fish-audio";
@@ -138,27 +240,48 @@ export async function persistVoiceCredential(
     plaintext: string;
     voiceId?: string;
     speechModel?: string;
+    baseUrl?: string;
+    ttsModel?: string;
+    sttModel?: string;
     signal?: AbortSignal;
   },
 ): Promise<VoiceCredential> {
   if (!isVoiceProviderId(input.provider)) {
     throw new ORPCError("BAD_REQUEST", { message: "Unknown voice provider." });
   }
+  const previous =
+    input.provider === OPENAI_COMPATIBLE_VOICE_PROVIDER_ID
+      ? // An unreadable old secret only means nothing is inherited; the form must be complete.
+        await loadVoiceCredential(deps, actor, input.provider).catch(() => null)
+      : null;
+  const allowPrivateEndpoint = await voiceMayUsePrivateEndpoint(deps, actor, input.provider);
+  const plaintext = voiceCredentialPlaintext({
+    ...input,
+    previousPlaintext: previous?.apiKey,
+    allowPrivateEndpoint,
+  });
+  const server =
+    input.provider === OPENAI_COMPATIBLE_VOICE_PROVIDER_ID
+      ? openAiCompatibleVoiceServer(plaintext)
+      : undefined;
+  const choicesChanged = voiceChoicesChanged(previous?.apiKey, plaintext);
   const requestedSpeechModel =
     input.provider === FISH_AUDIO_PROVIDER && input.speechModel !== undefined
       ? fishSpeechModelValue(input.speechModel)
       : undefined;
-  const provider = createVoiceProvider(input.provider);
-  const verified = await provider.verify(input.plaintext, voiceContext(actor, input.signal));
+  const provider = createVoiceProvider(input.provider, { allowPrivateEndpoint });
+  const verified = await provider.verify(plaintext, voiceContext(actor, input.signal));
   if (!verified.ok) {
     throw new ORPCError("BAD_REQUEST", { message: verified.message ?? "That key was rejected." });
   }
-  let voiceId = input.voiceId?.trim() ?? "";
+  let voiceId = choicesChanged ? "" : (input.voiceId?.trim() ?? "");
+  let validVoiceIds: string[] = [];
   if (!voiceId) {
-    const voices = await provider.listVoices(input.plaintext, voiceContext(actor, input.signal));
+    const voices = await provider.listVoices(plaintext, voiceContext(actor, input.signal));
     voiceId = voices[0]?.id ?? "";
+    validVoiceIds = voices.map((voice) => voice.id);
   }
-  const stored = await deps.secrets.put(input.plaintext, voiceContext(actor, input.signal));
+  const stored = await deps.secrets.put(plaintext, voiceContext(actor, input.signal));
   const cred = await withSerializableRetry(() =>
     deps.prisma.$transaction(
       async (tx) => {
@@ -198,12 +321,26 @@ export async function persistVoiceCredential(
               },
             })
           : null;
-        const selectedVoiceId = voiceId || previousPreference?.voiceId || "";
+        const selectedVoiceId =
+          voiceId || (choicesChanged ? "" : previousPreference?.voiceId) || "";
         const speechModel =
           requestedSpeechModel !== undefined
             ? requestedSpeechModel
             : previousPreference?.speechModel;
         await selectSpaceVoicePreference(tx, actor, credential.id, selectedVoiceId, speechModel);
+        if (existing && choicesChanged) {
+          // The credential is account-wide but each space keeps its own voice. Move every
+          // other space whose voice the new server or model lacks onto the new default.
+          await tx.spaceVoicePreference.updateMany({
+            where: {
+              userId: actor.userId,
+              credentialId: existing.id,
+              spaceId: { not: actor.spaceId },
+              voiceId: { notIn: validVoiceIds },
+            },
+            data: { voiceId: selectedVoiceId },
+          });
+        }
         if (existing) {
           await deleteUnreferencedCredentialSecret(tx, {
             credentialKind: "voice",
@@ -216,6 +353,7 @@ export async function persistVoiceCredential(
           isDefault: true,
           voiceId: selectedVoiceId,
           speechModel: speechModel ?? "",
+          server,
         };
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -352,7 +490,7 @@ export async function synthesizeVoice(
   if (text.length > MAX_SPEAK_CHARS) {
     throw new ORPCError("BAD_REQUEST", { message: "That utterance is too long to speak." });
   }
-  const provider = createVoiceProvider(target.cred.provider);
+  const provider = await voiceProviderFor(deps, actor, target.cred.provider);
   return provider.synthesize(
     {
       text,
@@ -372,7 +510,7 @@ export async function transcribeVoice(
 ) {
   const loaded = await loadDefaultVoiceCredential(deps, actor);
   if (!loaded) throw new NoVoiceConfigured("key");
-  const provider = createVoiceProvider(loaded.cred.provider);
+  const provider = await voiceProviderFor(deps, actor, loaded.cred.provider);
   if (!provider.transcribe) {
     throw new ORPCError("BAD_REQUEST", {
       message: "This voice provider does not transcribe audio. Use on-device dictation instead.",
@@ -405,16 +543,18 @@ export function mountVoiceHttpRoutes(
     if (raw === null) return c.json({ error: "Request body is too large." }, 413);
     const body = parseVoiceRequestBody(raw);
     try {
-      const clip = await synthesizeVoice(deps, actor, {
-        text: String((body as { text?: unknown }).text ?? ""),
-        voiceId: optionalString((body as { voiceId?: unknown }).voiceId),
-        botId: optionalString((body as { botId?: unknown }).botId),
-        signal: AbortSignal.any(
-          [c.req.raw.signal, AbortSignal.timeout(SPEAK_TIMEOUT_MS)].filter(
-            Boolean,
-          ) as AbortSignal[],
-        ),
-      });
+      const clip = await runAsTenant(actor, () =>
+        synthesizeVoice(deps, actor, {
+          text: String((body as { text?: unknown }).text ?? ""),
+          voiceId: optionalString((body as { voiceId?: unknown }).voiceId),
+          botId: optionalString((body as { botId?: unknown }).botId),
+          signal: AbortSignal.any(
+            [c.req.raw.signal, AbortSignal.timeout(SPEAK_TIMEOUT_MS)].filter(
+              Boolean,
+            ) as AbortSignal[],
+          ),
+        }),
+      );
       // Copy into a fresh ArrayBuffer-backed view: DOM-lib BodyInit rejects
       // Uint8Array<ArrayBufferLike> since TS 5.7.
       return new Response(new Uint8Array(clip.bytes), {
@@ -438,12 +578,14 @@ export function mountVoiceHttpRoutes(
     const language = optionalString((body as { language?: unknown }).language);
     try {
       const audio = decodeAudioBase64(audioBase64);
-      const result = await transcribeVoice(deps, actor, {
-        audio,
-        mimeType: String((body as { mimeType?: unknown }).mimeType ?? "audio/webm"),
-        language,
-        signal: c.req.raw.signal,
-      });
+      const result = await runAsTenant(actor, () =>
+        transcribeVoice(deps, actor, {
+          audio,
+          mimeType: String((body as { mimeType?: unknown }).mimeType ?? "audio/webm"),
+          language,
+          signal: c.req.raw.signal,
+        }),
+      );
       return c.json({ text: result.text });
     } catch (error) {
       return voiceHttpError(c, error);
@@ -475,6 +617,11 @@ function decodeAudioBase64(value: string): Uint8Array {
   }
 }
 
+/** Spent credit is 402; a rejected key is 403, never 401, which clients read as a lost session. */
+export function voiceAccountErrorStatus(code: VoiceAccountErrorCode) {
+  return code === "VOICE_OUT_OF_CREDIT" ? 402 : 403;
+}
+
 function voiceHttpError(c: Context, error: unknown) {
   if (error instanceof IsolationError) {
     return c.json({ error: "Resource not found" }, 404);
@@ -487,6 +634,13 @@ function voiceHttpError(c: Context, error: unknown) {
     const status =
       code === "UNAUTHORIZED" ? 401 : code === "NOT_FOUND" ? 404 : code === "CONFLICT" ? 409 : 400;
     return c.json({ error: error.message }, status);
+  }
+  if (error instanceof VoiceAccountError) {
+    getLogger().warn("voice provider account rejected the request", {
+      route: c.req.path,
+      reason: error.code,
+    });
+    return c.json({ error: error.message, code: error.code }, voiceAccountErrorStatus(error.code));
   }
   const message = error instanceof Error ? error.message : "Voice request failed.";
   // Message only: request bodies, keys and audio never reach the log.

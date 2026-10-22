@@ -133,8 +133,11 @@ function fill(element: HTMLInputElement | HTMLTextAreaElement | null, value: str
 function ModelShot() {
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    const details = document.querySelector("details");
-    if (details) details.open = true;
+    document
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="bot-settings-advanced"] > button[aria-expanded="false"]',
+      )
+      ?.click();
     const timer = window.setTimeout(() => setReady(true), 400);
     return () => window.clearTimeout(timer);
   }, []);
@@ -216,6 +219,7 @@ function ApprovalShot() {
 
 const subscriptionMe: Me = {
   ticketBoardEnabled: false,
+  phoneCallsEnabled: false,
   userId: "user-demo",
   email: "ada@example.test",
   name: "Ada",
@@ -471,11 +475,7 @@ function SubscriptionShot() {
   useEffect(() => {
     const timer = window.setInterval(() => {
       const text = document.body.textContent ?? "";
-      if (
-        text.includes("Sign in with Claude Pro/Max") &&
-        text.includes("Connect a provider to add backups") &&
-        text.includes("Claude Sonnet 5.5")
-      ) {
+      if (text.includes("Sign in with Claude Pro/Max") && text.includes("Claude Sonnet 5.5")) {
         setReady(true);
         window.clearInterval(timer);
       }

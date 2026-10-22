@@ -30,7 +30,10 @@ shutdown() {
 trap shutdown TERM INT
 
 if [[ -n "${RAKAZO_COMPUTER_CONTROL_TOKEN:-}" ]]; then
-  /usr/local/bin/rakazo-computer-control >/tmp/rakazo/control.log 2>&1 &
+  while true; do
+    /usr/local/bin/rakazo-computer-control
+    sleep 1
+  done >/tmp/rakazo/control.log 2>&1 &
 fi
 
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
@@ -118,6 +121,7 @@ if [[ ! -f "$NOVNC_ROOT/mobile-keyboard.js" ]]; then
   echo "noVNC mobile-keyboard.js is missing from the computer image" >&2
   exit 1
 fi
+# The screen proxy reaches this isolated container through its bridge interface.
 websockify --heartbeat=30 --web="$NOVNC_ROOT" --token-plugin=TokenFile --token-source=/tmp/rakazo/view-target-1 0.0.0.0:6080 >/tmp/rakazo/novnc.log 2>&1 &
 
 wait "$XVFB_PID"

@@ -157,6 +157,8 @@ describe("spawned bot creation", () => {
         runId: "run-1",
         spawnKey: "tool-call-2",
         name: "Painter",
+        description: " Paints murals. ",
+        instructions: " Ask before using the shared screen. ",
         computerMode: "dedicated",
       },
     );
@@ -165,6 +167,8 @@ describe("spawned bot creation", () => {
       expect.objectContaining({ userId: "user-1", spaceId: "workspace-1" }),
       expect.objectContaining({
         name: "Painter",
+        description: "Paints murals.",
+        instructions: "Ask before using the shared screen.",
         computerMode: "dedicated",
         parentBotId: "parent-1",
       }),
@@ -286,7 +290,13 @@ describe("destroyBot", () => {
         jobs: { cancel: vi.fn() } as unknown as JobPublisher,
         artifacts: { remove: removeArtifact } as unknown as ArtifactStore,
       },
-      { id: "bot-1", spaceId: "workspace-1", name: "Researcher", archivedAt: null },
+      {
+        id: "bot-1",
+        spaceId: "workspace-1",
+        userId: "user-1",
+        name: "Researcher",
+        archivedAt: null,
+      },
       context,
       { deleteMemories: false },
     );
@@ -425,7 +435,13 @@ describe("destroyBot", () => {
         home: {} as AgentHomeStore,
         jobs: { cancel } as unknown as JobPublisher,
       },
-      { id: "bot-1", spaceId: "workspace-1", name: "Researcher", archivedAt: null },
+      {
+        id: "bot-1",
+        spaceId: "workspace-1",
+        userId: "user-1",
+        name: "Researcher",
+        archivedAt: null,
+      },
       context,
       { deleteMemories: true },
     );
@@ -550,7 +566,13 @@ describe("destroyBot", () => {
           home: {} as AgentHomeStore,
           jobs: { cancel: vi.fn() } as unknown as JobPublisher,
         },
-        { id: "bot-1", spaceId: "workspace-1", name: "Researcher", archivedAt: null },
+        {
+          id: "bot-1",
+          spaceId: "workspace-1",
+          userId: "user-1",
+          name: "Researcher",
+          archivedAt: null,
+        },
         context,
         { deleteMemories: true },
       ),
@@ -599,6 +621,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: team.id,
@@ -674,6 +697,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: team.id,
@@ -721,6 +745,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: team.id,
@@ -773,6 +798,7 @@ describe("destroyBot", () => {
           {
             id: "bot-1",
             spaceId: "workspace-1",
+            userId: "user-1",
             name: "Researcher",
             archivedAt: null,
             computerId: team.id,
@@ -839,8 +865,8 @@ describe("destroyBot", () => {
       const team = {
         id: "team-computer",
         homeKey: "team-workspace-1",
-        kind: "box",
-        providerRef: "box-1",
+        kind: "boat",
+        providerRef: "boat-1",
         scope: "team",
         state: "running",
       };
@@ -858,6 +884,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: team.id,
@@ -907,6 +934,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: team.id,
@@ -964,6 +992,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: team.id,
@@ -1014,6 +1043,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: team.id,
@@ -1068,6 +1098,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: team.id,
@@ -1119,6 +1150,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: "dedicated-computer",
@@ -1170,6 +1202,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: team.id,
@@ -1194,7 +1227,8 @@ describe("destroyBot", () => {
     vi.mocked(prisma.computer.findUnique).mockImplementation((async (query: {
       where: { scopeKey?: string };
     }) => {
-      if (query.where.scopeKey === "team:workspace-1") throw new Error("database unavailable");
+      if (query.where.scopeKey === "team:workspace-1:user-1")
+        throw new Error("database unavailable");
       return null;
     }) as never);
 
@@ -1209,6 +1243,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: null,
@@ -1257,6 +1292,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: team.id,
@@ -1318,6 +1354,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: team.id,
@@ -1351,8 +1388,8 @@ describe("destroyBot", () => {
       const team = {
         id: "team-computer",
         homeKey: "team-workspace-1",
-        kind: "box",
-        providerRef: "box-1",
+        kind: "boat",
+        providerRef: "boat-1",
         scope: "team",
         state: "running",
       };
@@ -1370,6 +1407,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: team.id,
@@ -1418,6 +1456,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: team.id,
@@ -1462,6 +1501,7 @@ describe("destroyBot", () => {
           {
             id: "bot-1",
             spaceId: "workspace-1",
+            userId: "user-1",
             name: "Researcher",
             archivedAt: null,
             computerId: team.id,
@@ -1515,6 +1555,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: team.id,
@@ -1575,6 +1616,7 @@ describe("destroyBot", () => {
         {
           id: "bot-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Researcher",
           archivedAt: null,
           computerId: team.id,
@@ -1630,7 +1672,13 @@ describe("archiveBot", () => {
         home: {} as AgentHomeStore,
         jobs: { cancel } as unknown as JobPublisher,
       },
-      { id: "bot-1", spaceId: "workspace-1", name: "Researcher", archivedAt: null },
+      {
+        id: "bot-1",
+        spaceId: "workspace-1",
+        userId: "user-1",
+        name: "Researcher",
+        archivedAt: null,
+      },
       context,
     );
 
@@ -1696,7 +1744,7 @@ describe("archiveBot", () => {
           home,
           jobs: { cancel: vi.fn() } as unknown as JobPublisher,
         },
-        { id: "bot-1", spaceId: "workspace-1", name: "Researcher", archivedAt },
+        { id: "bot-1", spaceId: "workspace-1", userId: "user-1", name: "Researcher", archivedAt },
         context,
       ),
     ).rejects.toThrow("stop failed");
@@ -1751,7 +1799,13 @@ describe("archiveBot", () => {
         home,
         jobs: { cancel: vi.fn() } as unknown as JobPublisher,
       },
-      { id: "bot-1", spaceId: "workspace-1", name: "Researcher", archivedAt: null },
+      {
+        id: "bot-1",
+        spaceId: "workspace-1",
+        userId: "user-1",
+        name: "Researcher",
+        archivedAt: null,
+      },
       context,
     );
 
@@ -1810,6 +1864,7 @@ describe("archiveBot", () => {
         {
           id: "child-1",
           spaceId: "workspace-1",
+          userId: "user-1",
           name: "Scout",
           archivedAt: null,
           computerId: team.id,
@@ -1892,7 +1947,9 @@ function deletionPrisma(team: { id: string }) {
   return {
     computer: {
       findUnique: vi.fn(async (query: { where: { id?: string; scopeKey?: string } }) =>
-        query.where.id === team.id || query.where.scopeKey === "team:workspace-1" ? team : null,
+        query.where.id === team.id || query.where.scopeKey === "team:workspace-1:user-1"
+          ? team
+          : null,
       ),
     },
     run: {
