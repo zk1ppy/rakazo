@@ -47,6 +47,11 @@ export interface BackfillConsolidateCounts {
   dryRun: boolean;
 }
 
+export interface SpaceLoadFailure {
+  spaceId: string;
+  reason: string;
+}
+
 export function parseBackfillConsolidateArgs(argv: readonly string[]): {
   spaceId?: string;
   ns?: string;
@@ -59,6 +64,7 @@ export function parseBackfillConsolidateArgs(argv: readonly string[]): {
   let dryRun = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+    // pnpm forwards the separator, so `-- --space X --dry-run` arrives as ["--", "--space", "X", "--dry-run"].
     if (arg === "--") continue;
     if (arg === "--dry-run") {
       dryRun = true;
@@ -111,6 +117,11 @@ export async function backfillMemoryConsolidation(
     if (counts.enqueued >= options.limit) break;
     if (!space.spaceId.trim() || !space.userId.trim()) {
       counts.failed += 1;
+      getLogger().error(
+        "memory consolidate skipped a space",
+        new Error("space id or user id is empty"),
+        { "memory.space_id": space.spaceId },
+      );
       continue;
     }
     if (!options.dryRun) {
@@ -133,22 +144,25 @@ export async function loadNeo4jConsolidationSpaces(
   prisma: Pick<PrismaClient, "spaceMemoryConfig">,
   secrets: Pick<SecretStore, "load">,
   spaceId?: string,
-): Promise<{ spaces: ConsolidateSpace[]; failed: number }> {
+): Promise<{ spaces: ConsolidateSpace[]; failed: number; failures: SpaceLoadFailure[] }> {
   const configs = await prisma.spaceMemoryConfig.findMany({
     where: { provider: "neo4j", ...(spaceId ? { spaceId } : {}) },
     include: { secret: true },
   });
   const spaces: ConsolidateSpace[] = [];
-  let failed = 0;
+  const failures: SpaceLoadFailure[] = [];
   for (const config of configs) {
     try {
+      const secret = config.secret;
+      if (!secret?.ciphertext || !secret.id) {
+        throw new Error("memory secret is not visible");
+      }
       const settings = toStringRecord(config.settings);
-      const plaintext = await secrets.load(config.secret.ciphertext, config.secret.id);
+      const plaintext = await secrets.load(secret.ciphertext, secret.id);
       const credentials = toStringRecord(JSON.parse(plaintext) as unknown);
       const provider = createNeo4jProvider(settings, credentials);
       if (!(provider instanceof Neo4jMemoryProvider)) {
-        failed += 1;
-        continue;
+        throw new Error("provider is not neo4j");
       }
       spaces.push({
         spaceId: config.spaceId,
@@ -161,12 +175,17 @@ export async function loadNeo4jConsolidationSpaces(
           }),
       });
     } catch (error) {
-      failed += 1;
-      getLogger().error("memory consolidate skipped a space", {
+      const reason = failureReason(error, "connection failed");
+      failures.push({ spaceId: config.spaceId, reason });
+      getLogger().error("memory consolidate skipped a space", error, {
         "memory.space_id": config.spaceId,
-        message: error instanceof Error ? error.message : "connection failed",
       });
     }
   }
-  return { spaces, failed };
+  return { spaces, failed: failures.length, failures };
+}
+
+function failureReason(error: unknown, fallback: string): string {
+  const text = error instanceof Error && error.message ? error.message : fallback;
+  return text.replace(/\s+/g, " ").slice(0, 300);
 }

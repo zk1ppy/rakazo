@@ -176,9 +176,8 @@ export async function backfillMemoryExtraction(
         }
       } catch (error) {
         counts.failed += 1;
-        getLogger().error("memory backfill could not realign fact times", {
+        getLogger().error("memory backfill could not realign fact times", error, {
           "memory.space_id": space.spaceId,
-          message: error instanceof Error ? error.message : "realign failed",
         });
       }
     }
@@ -194,9 +193,8 @@ export async function backfillMemoryExtraction(
         }
       } catch (error) {
         counts.failed += 1;
-        getLogger().error("memory backfill could not stamp extracted facts", {
+        getLogger().error("memory backfill could not stamp extracted facts", error, {
           "memory.space_id": space.spaceId,
-          message: error instanceof Error ? error.message : "stamp failed",
         });
       }
     }
@@ -205,9 +203,8 @@ export async function backfillMemoryExtraction(
         counts.skipped += await space.countExtractedFacts();
       } catch (error) {
         counts.failed += 1;
-        getLogger().error("memory backfill could not count extracted facts", {
+        getLogger().error("memory backfill could not count extracted facts", error, {
           "memory.space_id": space.spaceId,
-          message: error instanceof Error ? error.message : "count failed",
         });
       }
     }
@@ -264,22 +261,29 @@ export async function loadNeo4jBackfillSpaces(
   prisma: Pick<PrismaClient, "spaceMemoryConfig">,
   secrets: Pick<SecretStore, "load">,
   spaceId?: string,
-): Promise<{ spaces: BackfillSpace[]; failed: number }> {
+): Promise<{
+  spaces: BackfillSpace[];
+  failed: number;
+  failures: Array<{ spaceId: string; reason: string }>;
+}> {
   const configs = await prisma.spaceMemoryConfig.findMany({
     where: { provider: "neo4j", ...(spaceId ? { spaceId } : {}) },
     include: { secret: true },
   });
   const spaces: BackfillSpace[] = [];
-  let failed = 0;
+  const failures: Array<{ spaceId: string; reason: string }> = [];
   for (const config of configs) {
     try {
+      const secret = config.secret;
+      if (!secret?.ciphertext || !secret.id) {
+        throw new Error("memory secret is not visible");
+      }
       const settings = toStringRecord(config.settings);
-      const plaintext = await secrets.load(config.secret.ciphertext, config.secret.id);
+      const plaintext = await secrets.load(secret.ciphertext, secret.id);
       const credentials = toStringRecord(JSON.parse(plaintext) as unknown);
       const provider = createNeo4jProvider(settings, credentials);
       if (!(provider instanceof Neo4jMemoryProvider)) {
-        failed += 1;
-        continue;
+        throw new Error("provider is not neo4j");
       }
       spaces.push({
         spaceId: config.spaceId,
@@ -292,12 +296,17 @@ export async function loadNeo4jBackfillSpaces(
         stampExtractedFacts: () => provider.stampExtractedFacts(config.spaceId),
       });
     } catch (error) {
-      failed += 1;
-      getLogger().error("memory backfill skipped a space", {
+      const reason = failureReason(error, "connection failed");
+      failures.push({ spaceId: config.spaceId, reason });
+      getLogger().error("memory backfill skipped a space", error, {
         "memory.space_id": config.spaceId,
-        message: error instanceof Error ? error.message : "connection failed",
       });
     }
   }
-  return { spaces, failed };
+  return { spaces, failed: failures.length, failures };
+}
+
+function failureReason(error: unknown, fallback: string): string {
+  const text = error instanceof Error && error.message ? error.message : fallback;
+  return text.replace(/\s+/g, " ").slice(0, 300);
 }

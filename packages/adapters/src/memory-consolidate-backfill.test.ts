@@ -1,10 +1,16 @@
 import type { BackgroundJob, JobPublisher } from "@rakazo/adapter-kit";
-import { describe, expect, it, vi } from "vitest";
+import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConsolidateSpace } from "./memory-consolidate-backfill.js";
 import {
   backfillMemoryConsolidation,
+  loadNeo4jConsolidationSpaces,
   parseBackfillConsolidateArgs,
 } from "./memory-consolidate-backfill.js";
+
+afterEach(() => {
+  installLogger(createLogger({ service: "rakazo", level: "off", sinks: [] }));
+});
 
 function jobs(): JobPublisher & {
   enqueue: ReturnType<typeof vi.fn<(job: BackgroundJob) => Promise<void>>>;
@@ -38,6 +44,11 @@ describe("parseBackfillConsolidateArgs", () => {
       ]),
     ).toEqual({ spaceId: "space-9", ns: "shared", limit: 25, dryRun: true });
     expect(parseBackfillConsolidateArgs(["--", "--dry-run"])).toEqual({
+      limit: 100,
+      dryRun: true,
+    });
+    expect(parseBackfillConsolidateArgs(["--", "--space", "X", "--dry-run"])).toEqual({
+      spaceId: "X",
       limit: 100,
       dryRun: true,
     });
@@ -80,5 +91,47 @@ describe("backfillMemoryConsolidation", () => {
     });
     expect(counts.enqueued).toBe(1);
     expect(queue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("logs a space that has no id instead of dropping it quietly", async () => {
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "test", sinks: [sink] }));
+    const counts = await backfillMemoryConsolidation(
+      [space({ spaceId: " ", userId: "" })],
+      jobs(),
+      {
+        limit: 10,
+        dryRun: false,
+      },
+    );
+    expect(counts.failed).toBe(1);
+    expect(counts.enqueued).toBe(0);
+    expect(sink.events[0]?.error).toMatchObject({ message: "space id or user id is empty" });
+  });
+});
+
+describe("loadNeo4jConsolidationSpaces", () => {
+  it("records and logs a space whose secret row-level security hid", async () => {
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "test", sinks: [sink] }));
+    const loaded = await loadNeo4jConsolidationSpaces(
+      {
+        spaceMemoryConfig: {
+          findMany: async () => [
+            { spaceId: "space-1", userId: "user-1", settings: {}, secret: null },
+          ],
+        },
+      } as never,
+      { load: async () => "{}" },
+    );
+    expect(loaded.spaces).toEqual([]);
+    expect(loaded.failures).toEqual([
+      { spaceId: "space-1", reason: "memory secret is not visible" },
+    ]);
+    expect(sink.events[0]).toMatchObject({
+      message: "memory consolidate skipped a space",
+      "memory.space_id": "space-1",
+      error: { message: "memory secret is not visible" },
+    });
   });
 });

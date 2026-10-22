@@ -91,6 +91,7 @@ export {
 } from "./memory-consolidate.js";
 export {
   backfillMemoryConsolidation,
+  type ConsolidateSpace,
   loadNeo4jConsolidationSpaces,
   parseBackfillConsolidateArgs,
 } from "./memory-consolidate-backfill.js";
