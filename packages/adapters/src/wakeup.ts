@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import type {
   BackgroundJob,
   BackgroundJobHandlers,
@@ -7,11 +8,17 @@ import type {
 import { dispatchBackgroundJob } from "@rakazo/adapter-kit";
 import { isTooManyDatabaseConnections, runAsSystem } from "@rakazo/db";
 import { getLogger, runCorrelatedJob, unwrapJobPayload, wrapJobPayload } from "@rakazo/logging";
-import type { Runner, WorkerUtils } from "graphile-worker";
+import type { JobHelpers, Runner, WorkerEvents, WorkerUtils } from "graphile-worker";
 import { makeWorkerUtils, parseCronItems, run } from "graphile-worker";
 import type { Pool } from "pg";
 import { recordHistoryCompactAttemptsExhausted } from "./history-compaction.js";
+import { runWithJobAbort } from "./job-abort.js";
 import { DREAM_CRON_ITEM } from "./memory-dream.js";
+import {
+  DEFAULT_WORKER_SHUTDOWN_GRACE_MS,
+  releaseOwnWorkerLocks,
+  WORKER_SHUTDOWN_SETTLE_MS,
+} from "./worker-locks.js";
 
 // Share the caller's pg.Pool instead of opening a separate connectionString-based
 // pool per graphile-worker component: three independent pools per worker process
@@ -120,13 +127,26 @@ export class GraphileJobWorkerHost implements JobWorkerHost {
   private stopping = false;
   private superviseTask: Promise<void> | undefined;
   private wakeSleep: (() => void) | undefined;
+  /** Pool ids graphile stored in locked_by. One per runner, including a 53300 relaunch. */
+  private readonly poolIds = new Set<string>();
+  /** Jobs whose abort signal fired, so a shutdown failJobs can still be refunded. */
+  private readonly interruptedJobIds = new Set<string>();
+  /** stop() can overlap a signal and an uncaught error. Refund the attempt once. */
+  private releasedLocks = false;
 
   constructor(
     private readonly pgPool: Pool,
     private readonly options: {
       concurrency?: number;
       pollInterval?: number;
+      /**
+       * Graphile installs SIGTERM handlers and then re-kills the process when
+       * they finish, which skips our unlock. Default true: this process owns
+       * the signal and calls runner.stop().
+       */
       noHandleSignals?: boolean;
+      /** Passed to graphile as gracefulShutdownAbortTimeout. */
+      shutdownGraceMs?: number;
       /** Test seam: delay between 53300 restart attempts. */
       sleep?: (ms: number) => Promise<void>;
     } = {},
@@ -146,14 +166,52 @@ export class GraphileJobWorkerHost implements JobWorkerHost {
   async stop(): Promise<void> {
     this.stopping = true;
     this.wakeSleep?.();
+    const runner = this.runner;
+    const grace = this.options.shutdownGraceMs ?? DEFAULT_WORKER_SHUTDOWN_GRACE_MS;
     try {
-      await this.runner?.stop();
+      if (runner) {
+        // stop() is gracefulShutdown: no new jobs, then abort after shutdownGraceMs.
+        // If a task ignores the abort, do not wait forever — unlock anyway so
+        // the queue is free before the process is killed.
+        await Promise.race([
+          runner.stop().catch((error) => {
+            getLogger().error("graphile runner stop failed", error);
+          }),
+          new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, grace + WORKER_SHUTDOWN_SETTLE_MS);
+            timer.unref?.();
+          }),
+        ]);
+      }
     } finally {
+      const alreadyReleased = this.releasedLocks;
+      this.releasedLocks = true;
+      if (!alreadyReleased) {
+        // A second pass picks up an abort recorded while the first unlock was in flight.
+        await this.releaseStoppedLocks();
+        await this.releaseStoppedLocks();
+      }
       await this.superviseTask?.catch(() => undefined);
       this.runner = undefined;
       this.superviseTask = undefined;
       this.handlers = undefined;
     }
+  }
+
+  private async releaseStoppedLocks(): Promise<void> {
+    const poolIds = [...this.poolIds];
+    const interruptedJobIds = [...this.interruptedJobIds];
+    this.poolIds.clear();
+    this.interruptedJobIds.clear();
+    if (poolIds.length === 0 && interruptedJobIds.length === 0) return;
+    await releaseOwnWorkerLocks(this.pgPool, poolIds, interruptedJobIds).catch((error) => {
+      getLogger().error("graphile lock release failed", error);
+    });
+  }
+
+  private notePool(event: { worker?: { workerPool?: { id?: string } } }): void {
+    const id = event.worker?.workerPool?.id;
+    if (id) this.poolIds.add(id);
   }
 
   private async launchRunner(): Promise<void> {
@@ -162,24 +220,40 @@ export class GraphileJobWorkerHost implements JobWorkerHost {
     const taskList = Object.fromEntries(
       Object.keys(handlers).map((name) => [
         name,
-        async (payload: unknown) => {
+        async (payload: unknown, helpers: JobHelpers) => {
           const unpacked = unwrapJobPayload(payload);
-          await runCorrelatedJob({
-            name,
-            payload: unpacked.payload,
-            correlation: unpacked.correlation,
-            run: () => dispatchJob(handlers, name, unpacked.payload),
-          });
+          await runWithJobAbort(helpers.abortSignal, () =>
+            runCorrelatedJob({
+              name,
+              payload: unpacked.payload,
+              correlation: unpacked.correlation,
+              run: () => dispatchJob(handlers, name, unpacked.payload),
+            }).finally(() => {
+              if (helpers.abortSignal.aborted) this.interruptedJobIds.add(String(helpers.job.id));
+            }),
+          );
         },
       ]),
     );
+    // worker:create fires during run(), before it returns. Listen on an emitter
+    // we pass in so the pool id (locked_by) is recorded even if the event is early.
+    const events = new EventEmitter();
+    events.on("worker:create", (event: { worker?: { workerPool?: { id?: string } } }) => {
+      this.notePool(event);
+    });
     const runner = await run({
       pgPool: this.pgPool,
       concurrency: this.options.concurrency ?? 4,
       pollInterval: this.options.pollInterval ?? 500,
-      noHandleSignals: this.options.noHandleSignals,
+      noHandleSignals: this.options.noHandleSignals ?? true,
+      gracefulShutdownAbortTimeout:
+        this.options.shutdownGraceMs ?? DEFAULT_WORKER_SHUTDOWN_GRACE_MS,
       parsedCronItems: parseCronItems([DREAM_CRON_ITEM]),
       taskList,
+      events: events as WorkerEvents,
+    });
+    runner.events.on("worker:create", (event) => {
+      this.notePool(event);
     });
     runner.events.on("job:failed", ({ job, error }) => {
       recordHistoryCompactAttemptsExhausted(job, error);

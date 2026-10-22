@@ -461,6 +461,60 @@ describe("GraphileJobWorkerHost runner lifecycle", () => {
     await host.stop();
     expect(run).toHaveBeenCalledTimes(1);
   });
+
+  it("uses graphile graceful shutdown and unlocks its own pool after an abort", async () => {
+    const first = mockRunner();
+    run.mockResolvedValueOnce(first.runner);
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      queries.push({ sql, params });
+      if (sql.includes("force_unlock_workers") || sql === "begin" || sql === "commit") {
+        return { rows: [] };
+      }
+      return { rows: [{ id: "42" }] };
+    });
+    const pool = {
+      connect: async () => ({ query, release: () => undefined }),
+    } as unknown as Pool;
+    const host = new GraphileJobWorkerHost(pool, { shutdownGraceMs: 20_000 });
+    const jobHandlers = handlers();
+    const gate = deferred();
+    jobHandlers["memory.consolidate"] = vi.fn(async () => {
+      await gate.promise;
+    });
+    await host.start(jobHandlers);
+    const started = run.mock.calls[0]?.[0] as
+      | {
+          taskList: Record<string, (payload: unknown, helpers: unknown) => Promise<void>>;
+        }
+      | undefined;
+    if (!started) throw new Error("runner was not started");
+    expect(started).toMatchObject({
+      noHandleSignals: true,
+      gracefulShutdownAbortTimeout: 20_000,
+    });
+    const { taskList } = started;
+    const controller = new AbortController();
+    const running = taskList["memory.consolidate"]!(
+      { spaceId: "space-1", userId: "user-1", attempt: 0, scheduleGeneration: 0 },
+      { abortSignal: controller.signal, job: { id: "42" } },
+    );
+    await vi.waitFor(() => expect(jobHandlers["memory.consolidate"]).toHaveBeenCalled());
+    controller.abort();
+    gate.resolve();
+    await running;
+    const on = first.runner.events.on as ReturnType<typeof vi.fn>;
+    const created = on.mock.calls.find((call) => call[0] === "worker:create")?.[1] as
+      | ((event: { worker: { workerPool: { id: string } } }) => void)
+      | undefined;
+    created?.({ worker: { workerPool: { id: "pool-self" } } });
+    await host.stop();
+    expect(first.runner.stop).toHaveBeenCalled();
+    const refund = queries.find((query) => query.sql.includes("greatest(jobs.attempts - 1, 0)"));
+    expect(refund?.params).toEqual([["pool-self"], ["42"]]);
+    const unlock = queries.find((query) => query.sql.includes("force_unlock_workers"));
+    expect(unlock?.params).toEqual([["pool-self"]]);
+  });
 });
 
 describe("createRoutineRetryNoticeReconciler", () => {

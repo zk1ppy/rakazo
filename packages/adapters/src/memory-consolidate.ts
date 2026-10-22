@@ -10,6 +10,7 @@ import type { PrismaClient } from "@rakazo/db";
 import { recordUsage } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import { resolveDeploymentModel } from "./deployment-model.js";
+import { combineJobAbort, JobAbortedError, throwIfJobAborted } from "./job-abort.js";
 import type { Neo4jExtractionModel } from "./memory-extract.js";
 import {
   isMemoryModelTimeout,
@@ -806,6 +807,7 @@ export async function consolidateMemoryGraph(
   const timedOutKeys: string[] = [];
 
   for (const candidate of pairs) {
+    throwIfJobAborted();
     if (merges >= MAX_CONSOLIDATE_MERGES) {
       deferredMerge = true;
       break;
@@ -838,6 +840,7 @@ export async function consolidateMemoryGraph(
           decision.reason === "type-conflict" ? "type" : "same",
         );
       } catch (error) {
+        if (error instanceof JobAbortedError) throw error;
         if (!(error instanceof MemoryConsolidatePermanentError)) throw error;
         llmCalls += 1;
         rejectedPairs += 1;
@@ -1344,6 +1347,7 @@ async function confirmDuplicate(
   callIndex: number,
   mode: "same" | "type",
 ): Promise<boolean | Neo4jEntityType | "omit-type" | "rate_limit" | "timeout" | "unreadable"> {
+  throwIfJobAborted();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), settings.timeoutMs);
   timer.unref?.();
@@ -1378,7 +1382,7 @@ async function confirmDuplicate(
         traceId: operationId,
         spaceId: payload.spaceId,
         userId: payload.userId,
-        signal: controller.signal,
+        signal: combineJobAbort(controller.signal),
       },
     )) {
       if (event.type === "usage" && !event.accounted) {
@@ -1388,6 +1392,8 @@ async function confirmDuplicate(
       if (event.type === "done") finalText = event.text?.trim() || streamed.trim();
     }
   } catch (error) {
+    if (error instanceof JobAbortedError) throw error;
+    throwIfJobAborted();
     if (isRateLimitFailure(error)) return "rate_limit";
     const reason = error instanceof Error ? error.message : "model call failed";
     if (isMemoryModelTimeout(error, controller.signal)) {
@@ -1403,6 +1409,7 @@ async function confirmDuplicate(
   } finally {
     clearTimeout(timer);
   }
+  throwIfJobAborted();
   if (controller.signal.aborted) {
     logConfirmTimeout(payload.spaceId, settings.timeoutMs, "Request was aborted");
     return "timeout";

@@ -50,6 +50,7 @@ import { withCloudflareGatewayAuth } from "./cloudflare-ai-gateway.js";
 import { pruneForRebuild } from "./context-pruning.js";
 import { shortenToolResultText } from "./context-selection.js";
 import { DEFAULT_OPENROUTER_MODEL_ID } from "./deployment-model.js";
+import { combineJobAbort } from "./job-abort.js";
 import { estimateModelContextTokens } from "./model-context.js";
 import { IMAGE_RETURNING_COMPUTER_TOOLS } from "./model-vision.js";
 import {
@@ -244,9 +245,9 @@ export class PiAgentRuntime implements AgentRuntime {
     controller: AbortController,
     context?: Partial<AdapterContext>,
   ): AsyncGenerator<AgentRuntimeEvent, void> {
-    const signal = context?.signal
-      ? AbortSignal.any([controller.signal, context.signal])
-      : controller.signal;
+    const signal = combineJobAbort(
+      context?.signal ? AbortSignal.any([controller.signal, context.signal]) : controller.signal,
+    );
     const queue = createQueue();
 
     const work = withPiTelemetry(request, async (span) => {

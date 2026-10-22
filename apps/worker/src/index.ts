@@ -44,6 +44,8 @@ import {
   PipedreamConnector,
   PostgresRealtimeFanout,
   pipedreamConfigFromEnv,
+  readStaleLockAfterMs,
+  readWorkerShutdownGraceMs,
   reconcileCloudAgents,
   reconcileComputerUpdates,
   resolveDeploymentModel,
@@ -53,6 +55,7 @@ import {
   SpaceMemoryProviderResolver,
   sandboxProviderOptionsFromEnv,
   shutdownPiTelemetry,
+  unlockStaleWorkerLocks,
   withSecretPersistence,
 } from "@rakazo/adapters";
 import { resolveEncryptionKey, resolveSupervisorToken, uploadSizeFromEnv } from "@rakazo/core";
@@ -264,10 +267,22 @@ async function main() {
     cloudAgent,
   });
 
+  const shutdownGraceMs = readWorkerShutdownGraceMs(process.env.WORKER_SHUTDOWN_GRACE_MS);
+  const staleLockAfterMs = readStaleLockAfterMs(process.env.WORKER_UNLOCK_STALE_LOCKS_AFTER_MS);
+  // Before the runner locks anything. Off unless WORKER_UNLOCK_STALE_LOCKS_AFTER_MS
+  // is set: with more than one replica a short threshold can unlock a live job.
+  if (!inMemoryJobs && staleLockAfterMs) {
+    try {
+      await unlockStaleWorkerLocks(pool, staleLockAfterMs);
+    } catch (error) {
+      logger.error("stale graphile lock release failed", error);
+    }
+  }
   const jobHost: JobWorkerHost =
     inMemoryJobs ??
     new GraphileJobWorkerHost(pool, {
       concurrency: parsePositiveInteger(process.env.GRAPHILE_WORKER_CONCURRENCY, 4),
+      shutdownGraceMs,
     });
 
   const jobHandlers = createBackgroundJobHandlers({
@@ -345,8 +360,13 @@ async function main() {
       await logger.flush({ timeoutMs: 2_000 });
     }
   };
-  process.once("SIGTERM", () => void stop());
-  process.once("SIGINT", () => void stop());
+  // Graphile's own handlers are off (noHandleSignals). Without an exit here the
+  // listener swallows SIGTERM and the process stays up after the runner stops.
+  const exitAfterStop = (code: number) => {
+    void stop().finally(() => process.exit(code));
+  };
+  process.once("SIGTERM", () => exitAfterStop(0));
+  process.once("SIGINT", () => exitAfterStop(0));
   // graphile-worker fires completeJob() without awaiting it. When pool.connect()
   // then hits Postgres 53300, that rejection is unhandled. Exiting here is the
   // crash loop: Docker restarts the process before Postgres has reaped the old

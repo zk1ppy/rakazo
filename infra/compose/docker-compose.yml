@@ -377,12 +377,16 @@ services:
     # Directly, not through pnpm, so a stop reaches it (see the api command).
     working_dir: /app/apps/worker
     command: ["node", "--enable-source-maps", "dist/index.js"]
+    # Covers WORKER_SHUTDOWN_GRACE_MS (default 10s) plus the abort settle.
+    stop_grace_period: 45s
     environment:
       <<: *app-environment
       GRAPHILE_WORKER_CONCURRENCY:
       WORKER_SCHEMA_READY_TIMEOUT_MS:
       WORKER_SCHEMA_READY_DELAY_MS:
       WORKER_SCHEMA_READY_MAX_DELAY_MS:
+      WORKER_SHUTDOWN_GRACE_MS:
+      WORKER_UNLOCK_STALE_LOCKS_AFTER_MS:
     volumes:
       - ../../data:/data
     depends_on:
