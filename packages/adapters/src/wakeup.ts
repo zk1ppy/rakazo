@@ -7,6 +7,7 @@ import type {
 } from "@rakazo/adapter-kit";
 import { dispatchBackgroundJob } from "@rakazo/adapter-kit";
 import { isTooManyDatabaseConnections, runAsSystem } from "@rakazo/db";
+import type { JobCorrelation } from "@rakazo/logging";
 import { getLogger, runCorrelatedJob, unwrapJobPayload, wrapJobPayload } from "@rakazo/logging";
 import type { JobHelpers, Runner, WorkerEvents, WorkerUtils } from "graphile-worker";
 import { makeWorkerUtils, parseCronItems, run } from "graphile-worker";
@@ -14,6 +15,7 @@ import type { Pool } from "pg";
 import { recordHistoryCompactAttemptsExhausted } from "./history-compaction.js";
 import { runWithJobAbort } from "./job-abort.js";
 import { DREAM_CRON_ITEM } from "./memory-dream.js";
+import { withWorkerJobTelemetry } from "./pi-telemetry.js";
 import {
   DEFAULT_WORKER_SHUTDOWN_GRACE_MS,
   releaseOwnWorkerLocks,
@@ -102,6 +104,21 @@ function dispatchJob(handlers: BackgroundJobHandlers, name: string, payload: unk
   return runAsSystem(`background job ${name}`, () =>
     dispatchBackgroundJob(handlers, name, payload),
   );
+}
+
+/** Job handler only. Graphile's idle SQL poll never enters a task, so it stays untraced. */
+function runObservedJob<T>(options: {
+  name: string;
+  payload: unknown;
+  correlation?: JobCorrelation;
+  run: () => Promise<T>;
+}): Promise<T> {
+  return runCorrelatedJob({
+    name: options.name,
+    payload: options.payload,
+    correlation: options.correlation,
+    run: () => withWorkerJobTelemetry(options.run),
+  });
 }
 
 /**
@@ -228,7 +245,7 @@ export class GraphileJobWorkerHost implements JobWorkerHost {
         async (payload: unknown, helpers: JobHelpers) => {
           const unpacked = unwrapJobPayload(payload);
           await runWithJobAbort(helpers.abortSignal, () =>
-            runCorrelatedJob({
+            runObservedJob({
               name,
               payload: unpacked.payload,
               correlation: unpacked.correlation,
@@ -524,7 +541,7 @@ export class InMemoryJobQueue implements JobPublisher, JobWorkerHost {
 
   private dispatch(handlers: BackgroundJobHandlers, job: QueuedJob): Promise<void> {
     const unpacked = unwrapJobPayload(job.payload);
-    const active = runCorrelatedJob({
+    const active = runObservedJob({
       name: job.name,
       payload: unpacked.payload,
       correlation: unpacked.correlation,

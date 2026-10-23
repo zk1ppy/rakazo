@@ -13,6 +13,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearGraphileWorkerIds, graphileWorkerIds } from "./worker-locks.js";
 
 const run = vi.hoisted(() => vi.fn());
+const withWorkerJobTelemetry = vi.hoisted(() => vi.fn((work: () => Promise<unknown>) => work()));
+
+vi.mock("./pi-telemetry.js", async () => {
+  const actual = await vi.importActual<typeof import("./pi-telemetry.js")>("./pi-telemetry.js");
+  return { ...actual, withWorkerJobTelemetry };
+});
 
 vi.mock("graphile-worker", async () => {
   const actual = await vi.importActual<typeof import("graphile-worker")>("graphile-worker");
@@ -316,7 +322,43 @@ describe("GraphileJobPublisher.enqueue", () => {
 describe("GraphileJobWorkerHost runner lifecycle", () => {
   afterEach(() => {
     run.mockReset();
+    withWorkerJobTelemetry.mockClear();
     clearGraphileWorkerIds();
+  });
+
+  it("traces a locked job and leaves the idle runner untraced", async () => {
+    const first = mockRunner();
+    run.mockResolvedValueOnce(first.runner);
+    const host = new GraphileJobWorkerHost({} as Pool);
+    await host.start(handlers());
+    expect(withWorkerJobTelemetry).not.toHaveBeenCalled();
+    const started = run.mock.calls[0]?.[0] as
+      | {
+          taskList: Record<string, (payload: unknown, helpers: unknown) => Promise<void>>;
+        }
+      | undefined;
+    if (!started) throw new Error("runner was not started");
+    const helpers = { abortSignal: new AbortController().signal, job: { id: "7" } };
+    await started.taskList["memory.extract"]!(
+      {
+        spaceId: "space-1",
+        userId: "user-1",
+        botId: "bot-1",
+        factId: "fact-1",
+        ns: "shared",
+        maxChunkChars: 4_000,
+        chunkIndex: 0,
+        attempt: 0,
+        scheduleGeneration: 0,
+      },
+      helpers,
+    );
+    await started.taskList["memory.consolidate"]!(
+      { spaceId: "space-1", userId: "user-1", attempt: 0, scheduleGeneration: 0 },
+      { ...helpers, job: { id: "8" } },
+    );
+    expect(withWorkerJobTelemetry).toHaveBeenCalledTimes(2);
+    await host.stop();
   });
 
   it("backs off then restarts when runner.promise rejects with 53300", async () => {

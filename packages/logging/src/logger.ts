@@ -98,6 +98,10 @@ class LoggerImpl implements Logger {
       if (RESERVED.has(key) || value === undefined) continue;
       event[key] = value;
     }
+    // Grafana Cloud's grafanacloud-logs derived field matches trace_id / traceId
+    // ([tT]race_?[iI][dD]), not dotted trace.id. Keep the dotted fields and mirror them.
+    copyTraceAlias(event, "trace.id", "trace_id");
+    copyTraceAlias(event, "span.id", "span_id");
     if (error !== undefined) event.error = serializeError(error);
     for (const sink of this.sinks) {
       guardedWrite(() => sink.write(event));
@@ -107,6 +111,11 @@ class LoggerImpl implements Logger {
 
 export function createLogger(options: CreateLoggerOptions): Logger {
   return new LoggerImpl(options);
+}
+
+function copyTraceAlias(event: LogEvent, source: string, alias: string): void {
+  const value = event[source];
+  if (typeof value === "string") event[alias] = value;
 }
 
 function isPlainBindings(value: unknown): value is LogBindings {
