@@ -326,6 +326,10 @@ import {
 } from "./model-vision.js";
 import { nativeShellCommandArgv } from "./native-shell.js";
 import { assertAllowedOpenAiCompatibleUrl } from "./openai-compatible-url.js";
+import {
+  applyOpencodeShellEnvironment,
+  applyOpencodeShellUrls,
+} from "./opencode-shell-environment.js";
 import type { CodexLiveCatalog } from "./pi-codex-catalog.js";
 import { codexLiveListsModel } from "./pi-codex-catalog.js";
 import { toOAuthCredential } from "./pi-credentials.js";
@@ -3779,7 +3783,18 @@ export function createRunExecutor(deps: ExecutorDeps) {
               thread.nextMessageSeq)
             : thread.nextMessageSeq;
         const agentEnvironment = await decryptAgentEnvironment(agentSecretRows, deps.secretStore);
+        // The worker password is a secret. Server URLs are applied after this
+        // snapshot so command output can still show them. A saved AgentSecret
+        // or bot command variable keeps the name.
+        const opencodeRedactions = applyOpencodeShellEnvironment(
+          agentEnvironment,
+          initialBotCommandEnvironment,
+        );
         runSecrets.push(...Object.values(agentEnvironment));
+        for (const value of opencodeRedactions) {
+          if (value && !runSecrets.includes(value)) runSecrets.push(value);
+        }
+        applyOpencodeShellUrls(agentEnvironment, initialBotCommandEnvironment);
         // Encoded forms too: read_file redacts with these values before any shell command runs.
         runSecrets.push(...commandCredentialRedactions(initialBotCommandEnvironment));
         const agentEnvironmentInstruction = formatAgentEnvironmentInstruction({

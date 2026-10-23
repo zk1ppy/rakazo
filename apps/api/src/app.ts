@@ -523,6 +523,13 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     CLOUD_AGENT_PROVIDER: env.cloudAgentProvider,
     CURSOR_API_KEY: env.cursorApiKey,
     CLOUD_AGENT_SPACE_ID: env.cloudAgentSpaceId,
+    OPENCODE_SERVER_URL: process.env.OPENCODE_SERVER_URL,
+    OPENCODE_PUBLIC_URL: process.env.OPENCODE_PUBLIC_URL,
+    OPENCODE_USERNAME: process.env.OPENCODE_USERNAME,
+    OPENCODE_PASSWORD: process.env.OPENCODE_PASSWORD,
+    OPENCODE_SERVER_PASSWORD: process.env.OPENCODE_SERVER_PASSWORD,
+    OPENCODE_WORKSPACE_ROOT: process.env.OPENCODE_WORKSPACE_ROOT,
+    OPENCODE_DEFAULT_MODEL: process.env.OPENCODE_DEFAULT_MODEL,
   });
   const shutdown = new AbortController();
   // One cache serves models.list, selection validation, and run-time model

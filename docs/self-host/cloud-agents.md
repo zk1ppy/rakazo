@@ -14,7 +14,26 @@ CLOUD_AGENT_SPACE_ID=example-space-id
 CURSOR_API_KEY=replace-with-your-key
 ```
 
-The key and explicit Space ID are both required. Use a credential whose connected repositories may be accessed by members of that Space. Each created agent is additionally bound to its initiating user; another user cannot inspect, reply to, or cancel it by supplying an agent ID. The deployment key is never a model tool argument.
+The key and explicit Space ID are both required. Use a credential whose connected repositories may be accessed by members of that Space.
+
+## Enable OpenCode
+
+`CLOUD_AGENT_PROVIDER=opencode` delegates the same tools to a self-hosted `opencode serve` (v2). Configure the API and worker with the same values:
+
+```dotenv
+CLOUD_AGENT_PROVIDER=opencode
+OPENCODE_SERVER_URL=http://opencode.example:5003
+OPENCODE_PUBLIC_URL=https://opencode.example
+OPENCODE_PASSWORD=replace-with-the-server-password
+```
+
+`OPENCODE_SERVER_PASSWORD` is accepted as an alias of the password. `OPENCODE_USERNAME` defaults to `opencode`. `OPENCODE_PUBLIC_URL` is the Web UI origin used for the session link; it should be `https` so the chat card can show it. When it is unset, the server URL's origin is used.
+
+Leave `CLOUD_AGENT_SPACE_ID` unset, or set it to `*`, to allow every Space on this instance. Set it to one Space id to bind the server to that Space only. Sessions are created in `/workspace`. Repositories are cloned under `OPENCODE_WORKSPACE_ROOT`, which defaults to `/workspace/repos`; the agent creates that parent when it is missing. `OPENCODE_DEFAULT_MODEL` is optional (`provider/model` or `provider/model#variant`).
+
+When `OPENCODE_SERVER_URL`, `OPENCODE_PUBLIC_URL`, or `OPENCODE_PASSWORD` is set on the worker, shell commands inside a bot computer receive them. A Space or bot credential with the same name wins. Only the password is redacted from command output. The computer image includes the `opencode` CLI.
+
+The deployment password is never a model tool argument, a session URL, or an error message. Each created agent is additionally bound to its initiating user; another user cannot inspect, reply to, or cancel it by supplying an agent ID. The deployment key is never a model tool argument.
 
 The tools are `cloud_agent_launch`, `cloud_agent_status`, `cloud_agent_reply`, and `cloud_agent_cancel`. All three mutations participate in the existing action-approval rules and auto-review policy. As with other consequential tools, an empty rule set and disabled auto-review permit execution by default.
 
