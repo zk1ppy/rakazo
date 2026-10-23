@@ -13,8 +13,30 @@ export function resolveCloudAgentProvider(source: NodeJS.ProcessEnv = process.en
       ? "cursor"
       : "none";
   }
+  if (requested === "opencode") {
+    return opencodeConfigured(source) ? "opencode" : "none";
+  }
   // Soft-fall: do not throw at API boot for typos / future vendor names.
   return "none";
+}
+
+/** URL plus HTTP Basic password. A credential stuffed into the URL does not count. */
+function opencodeConfigured(source: NodeJS.ProcessEnv) {
+  const password = optional(source.OPENCODE_PASSWORD) ?? optional(source.OPENCODE_SERVER_PASSWORD);
+  return Boolean(password && opencodeHttpUrl(source.OPENCODE_SERVER_URL));
+}
+
+function opencodeHttpUrl(value: string | undefined) {
+  const trimmed = optional(value);
+  if (!trimmed) return undefined;
+  try {
+    const url = new URL(trimmed);
+    if (url.username || url.password) return undefined;
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    return trimmed;
+  } catch {
+    return undefined;
+  }
 }
 
 function optional(value: string | undefined): string | undefined {

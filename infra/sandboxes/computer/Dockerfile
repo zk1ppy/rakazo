@@ -94,6 +94,22 @@ RUN set -eux; \
   tar -xzf "$archive" -C /usr/local/bin --strip-components=2 "gh_${GH_VERSION}_linux_${gh_arch}/bin/gh"; \
   rm -f "$archive"; \
   gh --version
+# OpenCode v2 CLI (npm @opencode/cli-*). One libc binary. The x64 build is the
+# baseline variant so it runs on CPUs without AVX2. Pin and verify sha256.
+ARG OPENCODE_VERSION=2.1.4
+RUN set -eux; \
+  case "$TARGETARCH" in \
+    amd64) oc_target=linux-x64-baseline; oc_sha256=bfcb5c1931063e9835179ef4f1ee35eb3598d23ec77c31f0d5beedb45419fd25 ;; \
+    arm64) oc_target=linux-arm64; oc_sha256=e9acb4e23a9ac432139693aa166455a6add8946533394cbe083459a48e788861 ;; \
+    *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+  esac; \
+  archive="$(mktemp)"; \
+  curl -fsSL "https://registry.npmjs.org/@opencode/cli-${oc_target}/-/cli-${oc_target}-${OPENCODE_VERSION}.tgz" -o "$archive"; \
+  echo "$oc_sha256  $archive" | sha256sum -c -; \
+  tar -xzf "$archive" -C /usr/local/bin --strip-components=2 "package/bin/opencode"; \
+  rm -f "$archive"; \
+  chmod 755 /usr/local/bin/opencode; \
+  opencode --version
 ENV DISPLAY=:1
 ENV HOME=/home/rakazo
 # Keep UTF-8 explicit (an empty LANG broke non-ASCII file handling in the
