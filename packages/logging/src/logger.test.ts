@@ -139,6 +139,32 @@ describe("error serialization", () => {
     expect(serialized.message).toContain("[Redacted]");
   });
 
+  it("mirrors dotted trace ids so Grafana can link the log to a trace", () => {
+    const sink = createTestSink();
+    const logger = createLogger({ service: "rakazo-api", sinks: [sink] });
+    const traceId = "a".repeat(32);
+    const spanId = "b".repeat(16);
+    logger.withContext({ "trace.id": traceId, "span.id": spanId }, () => {
+      logger.info("http.request.completed", { trace_id: "stale", span_id: "stale" });
+    });
+    const event = sink.events[0]!;
+    expect(event["trace.id"]).toBe(traceId);
+    expect(event["span.id"]).toBe(spanId);
+    expect(event.trace_id).toBe(traceId);
+    expect(event.span_id).toBe(spanId);
+    const line = JSON.stringify(event);
+    // grafanacloud-logs derived field: [tT]race_?[iI][dD], which misses "trace.id".
+    const linked = line.match(/[tT]race_?[iI][dD]"?\s*[:=]\s*"?([0-9a-f]{32})/);
+    expect(linked?.[1]).toBe(traceId);
+    const dottedOnly = line.replace(/,"trace_id":"[0-9a-f]{32}"/, "");
+    expect(dottedOnly.match(/[tT]race_?[iI][dD]"?\s*[:=]\s*"?([0-9a-f]{32})/)).toBeNull();
+    expect(line).toMatch(/[sS]pan_?[iI][dD]"?\s*[:=]\s*"?([0-9a-f]{16})/);
+
+    logger.info("explicit alias only", { trace_id: traceId });
+    expect(sink.events[1]?.trace_id).toBe(traceId);
+    expect(sink.events[1]?.["trace.id"]).toBeUndefined();
+  });
+
   it("redacts secrets interpolated into the log message", () => {
     const sink = createTestSink();
     const logger = createLogger({ service: "rakazo-api", sinks: [sink] });

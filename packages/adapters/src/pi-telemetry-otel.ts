@@ -1,9 +1,18 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { SpanAttributes, TelemetryContext, TelemetrySpan } from "@earendil-works/pi-telemetry";
 import type { Attributes, Context, Span, Tracer } from "@opentelemetry/api";
-import { ROOT_CONTEXT, SpanStatusCode, trace } from "@opentelemetry/api";
+import {
+  isValidSpanId,
+  isValidTraceId,
+  ROOT_CONTEXT,
+  SpanStatusCode,
+  TraceFlags,
+  trace,
+} from "@opentelemetry/api";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BatchSpanProcessor, NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
+import { getLogContext } from "@rakazo/logging";
 
 // Allowlist metadata: unknown attributes (including future Pi payload fields) stay private.
 const safeAttributes = new Set([
@@ -25,6 +34,8 @@ const safeAttributes = new Set([
   "pi.ai.usage.cost",
   "pi.agent.tool.name",
   "pi.agent.tool.success",
+  "rakazo.job.type",
+  "rakazo.job.id",
 ]);
 const contentAttributes = new Set([
   "pi.ai.prompt",
@@ -32,6 +43,8 @@ const contentAttributes = new Set([
   "pi.agent.tool.arguments",
   "pi.agent.tool.result",
 ]);
+// Wins over the log context when a caller passes an explicit W3C parent.
+const explicitParent = new AsyncLocalStorage<Context>();
 
 function attributes(values: SpanAttributes = {}, captureContent: boolean): Attributes {
   return Object.fromEntries(
@@ -45,6 +58,37 @@ function attributes(values: SpanAttributes = {}, captureContent: boolean): Attri
   ) as Attributes;
 }
 
+/**
+ * A remote parent so an exported span keeps the W3C ids already on the log line.
+ * Invalid or all-zero ids return undefined and the span starts a new trace.
+ */
+export function remoteParentContext(traceId: string, spanId: string): Context | undefined {
+  if (!isValidTraceId(traceId) || !isValidSpanId(spanId)) return undefined;
+  return trace.setSpanContext(ROOT_CONTEXT, {
+    traceId,
+    spanId,
+    traceFlags: TraceFlags.SAMPLED,
+    isRemote: true,
+  });
+}
+
+export function runWithRemoteParent<T>(parent: Context, fn: () => T): T {
+  return explicitParent.run(parent, fn);
+}
+
+/** An explicit parent passed into `withPiTelemetry` wins; otherwise use the log context. */
+function adoptedRootParent(): Context {
+  return explicitParent.getStore() ?? parentFromLogContext() ?? ROOT_CONTEXT;
+}
+
+function parentFromLogContext(): Context | undefined {
+  const ctx = getLogContext();
+  const traceId = ctx["trace.id"];
+  const spanId = ctx["span.id"];
+  if (typeof traceId !== "string" || typeof spanId !== "string") return undefined;
+  return remoteParentContext(traceId, spanId);
+}
+
 /** Explicit parent contexts preserve concurrent run/tool hierarchy without global registration. */
 export function otelPiContext(
   tracer: Tracer,
@@ -54,6 +98,7 @@ export function otelPiContext(
 ): TelemetryContext {
   return {
     async startSpan(options, callback) {
+      const spanParent = parent === ROOT_CONTEXT ? adoptedRootParent() : parent;
       const correlation = {
         ...ids,
         ...Object.fromEntries(
@@ -63,9 +108,14 @@ export function otelPiContext(
       const span: Span = tracer.startSpan(
         options.name,
         { attributes: attributes({ ...options.attributes, ...correlation }, captureContent) },
-        parent,
+        spanParent,
       );
-      const child = otelPiContext(tracer, captureContent, correlation, trace.setSpan(parent, span));
+      const child = otelPiContext(
+        tracer,
+        captureContent,
+        correlation,
+        trace.setSpan(spanParent, span),
+      );
       const bridge: TelemetrySpan = {
         ...child,
         addEvent: (name, values) => {
@@ -94,6 +144,8 @@ export function otelPiContext(
 }
 
 export function createPiTelemetryExporter() {
+  // Not registered globally. GET /health and Graphile's idle SQL polls must not
+  // become spans; only explicit job and Pi spans are exported.
   const provider = new NodeTracerProvider({
     resource: resourceFromAttributes({
       "service.name": process.env.OTEL_SERVICE_NAME?.trim() || "rakazo-worker",

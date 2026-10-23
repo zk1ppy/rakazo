@@ -90,8 +90,10 @@ describe("job correlation envelope", () => {
       "job.id": "job-9",
       "run.id": "run-9",
       "trace.id": "e".repeat(32),
+      trace_id: "e".repeat(32),
       "parent.span.id": "f".repeat(16),
     });
+    expect(sink.events[0]?.span_id).toBe(sink.events[0]?.["span.id"]);
 
     await expect(
       runCorrelatedJob({

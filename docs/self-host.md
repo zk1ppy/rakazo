@@ -410,6 +410,11 @@ Traces contain a `rakazo.agent.run` span with `pi.ai.request` model-call spans a
 `pi.agent.tool` steps, including duration, token usage, cost when known, and success/error
 status. Each span carries `rakazo.bot.id`, `rakazo.run.id`, and `rakazo.routine.id`
 when the run belongs to a routine. Helper model calls inherit the same correlation.
+When the log context already has a W3C trace id and span id, exported spans use that
+trace, so Tempo matches `trace.id` / `trace_id` in Loki. Each locked background job
+also exports `rakazo.worker.job` (`rakazo.job.type`, `rakazo.job.id`); model calls from
+memory extraction, consolidation, and other jobs are children of that span. Graphile
+Worker's idle SQL polls are not spans.
 Pi 0.87.1 exposes built-in telemetry through its newer harness; Rakazo’s legacy Agent
 adapter maps its model and tool lifecycle through the same Pi telemetry contract.
 
@@ -450,7 +455,9 @@ durable audit trail, and events from before enablement are not backfilled.
 
 Backend services write structured logs to stdout. `LOG_LEVEL` is `debug`, `info`, `warn`, `error`,
 or `off` (default `info`). Production defaults to `LOG_FORMAT=json`; development defaults to pretty
-unless you set `json` or `pretty`.
+unless you set `json` or `pretty`. Request and job lines keep `trace.id` and `span.id`, and repeat
+them as `trace_id` and `span_id` so Grafana Cloud Loki's built-in derived field can open the Tempo
+trace. `GET /health` is liveness only and is not an OpenTelemetry span.
 
 Axiom is optional. Set both `AXIOM_TOKEN` and `AXIOM_DATASET` for ingest to one shared dataset.
 Services set `service.name` (`rakazo-api`, `rakazo-worker`, `rakazo-sandbox-supervisor`,

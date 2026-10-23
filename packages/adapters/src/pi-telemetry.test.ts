@@ -3,12 +3,14 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
-import { SpanStatusCode } from "@opentelemetry/api";
+import { SpanStatusCode, TraceFlags } from "@opentelemetry/api";
 import {
   InMemorySpanExporter,
   NodeTracerProvider,
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-node";
+import type { BackgroundJobHandlers } from "@rakazo/adapter-kit";
+import { createLogger, createTestSink, installLogger, runWithLogContext } from "@rakazo/logging";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MISSING_TOOL_FINAL_RESPONSE_ERROR, PiAgentRuntime } from "./pi-runtime.js";
 import {
@@ -19,6 +21,7 @@ import {
 } from "./pi-telemetry.js";
 import { otelPiContext } from "./pi-telemetry-otel.js";
 import { observedPiStream } from "./pi-usage.js";
+import { InMemoryJobQueue } from "./wakeup.js";
 
 const factory = vi.hoisted(() => vi.fn());
 vi.mock("./pi-telemetry-otel.js", async (original) => ({
@@ -428,4 +431,202 @@ describe("Pi OpenTelemetry", () => {
       );
     }
   });
+
+  it("uses a log or explicit W3C parent for the agent run and its model call", async () => {
+    const { output, provider } = setup();
+    const traceId = "ab".repeat(16);
+    const spanId = "cd".repeat(8);
+    await runWithLogContext({ "trace.id": traceId, "span.id": spanId }, () =>
+      withPiTelemetry(ids, () =>
+        withPiTelemetrySpan("pi.ai.request", { "pi.ai.model": "fixture" }, async () => undefined),
+      ),
+    );
+    const explicitTrace = "12".repeat(16);
+    const explicitSpan = "34".repeat(8);
+    await runWithLogContext({ "trace.id": traceId, "span.id": spanId }, () =>
+      withPiTelemetry(ids, async () => undefined, {
+        traceId: explicitTrace,
+        spanId: explicitSpan,
+      }),
+    );
+    await runWithLogContext({ "trace.id": "not-a-trace", "span.id": "short" }, () =>
+      withPiTelemetry(ids, async () => undefined),
+    );
+    await provider.forceFlush();
+    const spans = output.getFinishedSpans();
+    const linked = spans.find(
+      (span) => span.name === "rakazo.agent.run" && span.spanContext().traceId === traceId,
+    )!;
+    const model = spans.find((span) => span.name === "pi.ai.request")!;
+    expect(linked.parentSpanContext).toMatchObject({
+      traceId,
+      spanId,
+      isRemote: true,
+      traceFlags: TraceFlags.SAMPLED,
+    });
+    expect(model.spanContext().traceId).toBe(traceId);
+    expect(model.parentSpanContext?.spanId).toBe(linked.spanContext().spanId);
+    const explicit = spans.find((span) => span.spanContext().traceId === explicitTrace)!;
+    expect(explicit.parentSpanContext).toMatchObject({
+      spanId: explicitSpan,
+      isRemote: true,
+    });
+    const fresh = spans.find(
+      (span) =>
+        span.name === "rakazo.agent.run" &&
+        span.spanContext().traceId !== traceId &&
+        span.spanContext().traceId !== explicitTrace,
+    )!;
+    expect(fresh.parentSpanContext).toBeUndefined();
+  });
+
+  it("traces pi.ai.request inside memory jobs on the log trace", async () => {
+    const { output, provider } = setup();
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "rakazo-worker", sinks: [sink] }));
+    const queue = new InMemoryJobQueue();
+    const handlers = jobHandlers();
+    const extractTrace = "a1".repeat(16);
+    const consolidateTrace = "b2".repeat(16);
+    handlers["memory.extract"] = async () => {
+      await withPiTelemetry({ botId: "bot-1", runId: "memory-extract:fact-1:0" }, () =>
+        withPiTelemetrySpan("pi.ai.request", { "pi.ai.model": "fixture" }, async (span) => {
+          expect(span).toBeDefined();
+        }),
+      );
+    };
+    handlers["memory.consolidate"] = async () => {
+      await withPiTelemetrySpan("pi.ai.request", { "pi.ai.model": "fixture" }, async (span) => {
+        expect(span).toBeDefined();
+      });
+    };
+    await queue.start(handlers);
+    try {
+      await runWithLogContext({ "trace.id": extractTrace, "span.id": "c3".repeat(8) }, () =>
+        queue.enqueue({
+          name: "memory.extract",
+          payload: {
+            spaceId: "space-1",
+            userId: "user-1",
+            botId: "bot-1",
+            factId: "fact-1",
+            ns: "shared",
+            maxChunkChars: 4_000,
+            chunkIndex: 0,
+            attempt: 0,
+            scheduleGeneration: 0,
+          },
+        }),
+      );
+      await runWithLogContext({ "trace.id": consolidateTrace, "span.id": "d4".repeat(8) }, () =>
+        queue.enqueue({
+          name: "memory.consolidate",
+          payload: { spaceId: "space-1", userId: "user-1", attempt: 0, scheduleGeneration: 0 },
+        }),
+      );
+      await queue.awaitIdle();
+      await provider.forceFlush();
+      expectJobTrace(output.getFinishedSpans(), sink.events, {
+        type: "memory.extract",
+        traceId: extractTrace,
+        modelParent: "rakazo.agent.run",
+      });
+      expectJobTrace(output.getFinishedSpans(), sink.events, {
+        type: "memory.consolidate",
+        traceId: consolidateTrace,
+        modelParent: "rakazo.worker.job",
+      });
+    } finally {
+      await queue.close();
+      installLogger(createLogger({ service: "rakazo", level: "off", sinks: [] }));
+    }
+  });
+
+  it("does not trace a worker job when the exporter endpoint is unset", async () => {
+    const queue = new InMemoryJobQueue();
+    const handlers = jobHandlers();
+    handlers["memory.extract"] = async () => {
+      await withPiTelemetrySpan("pi.ai.request", {}, async (span) => {
+        expect(span).toBeUndefined();
+      });
+    };
+    await queue.start(handlers);
+    try {
+      await queue.enqueue({
+        name: "memory.extract",
+        payload: {
+          spaceId: "space-1",
+          userId: "user-1",
+          botId: "bot-1",
+          factId: "fact-1",
+          ns: "shared",
+          maxChunkChars: 4_000,
+          chunkIndex: 0,
+          attempt: 0,
+          scheduleGeneration: 0,
+        },
+      });
+      await queue.awaitIdle();
+      expect(factory).not.toHaveBeenCalled();
+    } finally {
+      await queue.close();
+    }
+  });
 });
+
+function jobHandlers(): BackgroundJobHandlers {
+  return {
+    "run.continue": vi.fn(async () => undefined),
+    "routine.wakeup": vi.fn(async () => undefined),
+    "routine.retry": vi.fn(async () => undefined),
+    "computer.update": vi.fn(async () => undefined),
+    "computer.sleep": vi.fn(async () => undefined),
+    "computer.control-expire": vi.fn(async () => undefined),
+    "skill.teaching-expire": vi.fn(async () => undefined),
+    "call.expire": vi.fn(async () => undefined),
+    "history.compact": vi.fn(async () => undefined),
+    "messaging.deliver": vi.fn(async () => undefined),
+    "cloud_agent.poll": vi.fn(async () => undefined),
+    "memory.extract": vi.fn(async () => undefined),
+    "memory.consolidate": vi.fn(async () => undefined),
+    "memory.dream": vi.fn(async () => undefined),
+    "push.receipt": vi.fn(async () => undefined),
+  };
+}
+
+function expectJobTrace(
+  spans: ReturnType<InMemorySpanExporter["getFinishedSpans"]>,
+  events: Array<Record<string, unknown>>,
+  expected: { type: string; traceId: string; modelParent: string },
+) {
+  const job = spans.find(
+    (span) =>
+      span.name === "rakazo.worker.job" && span.attributes["rakazo.job.type"] === expected.type,
+  )!;
+  const completed = events.find(
+    (event) => event.message === "job.completed" && event["job.type"] === expected.type,
+  )!;
+  expect(job.spanContext().traceId).toBe(expected.traceId);
+  expect(job.parentSpanContext).toMatchObject({
+    traceId: expected.traceId,
+    spanId: completed["span.id"],
+    isRemote: true,
+  });
+  expect(completed["trace.id"]).toBe(expected.traceId);
+  expect(completed.trace_id).toBe(expected.traceId);
+  expect(job.attributes["rakazo.job.id"]).toBe(completed["job.id"]);
+  const parent = spans.find(
+    (span) => span.name === expected.modelParent && span.spanContext().traceId === expected.traceId,
+  )!;
+  const model = spans.find(
+    (span) => span.name === "pi.ai.request" && span.spanContext().traceId === expected.traceId,
+  )!;
+  expect(model.parentSpanContext?.spanId).toBe(
+    expected.modelParent === "rakazo.worker.job"
+      ? job.spanContext().spanId
+      : parent.spanContext().spanId,
+  );
+  if (expected.modelParent === "rakazo.agent.run") {
+    expect(parent.parentSpanContext?.spanId).toBe(job.spanContext().spanId);
+  }
+}

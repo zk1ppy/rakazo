@@ -51,8 +51,10 @@ describe("hono request logging", () => {
     expect(outgoing?.spanId).not.toBe(parent);
     expect(sink.events[0]).toMatchObject({
       "trace.id": traceId,
+      trace_id: traceId,
       "parent.span.id": parent,
     });
+    expect(sink.events[0]?.span_id).toBe(sink.events[0]?.["span.id"]);
   });
 
   it("normalizes matched routes and records duration", async () => {
