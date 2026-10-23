@@ -233,7 +233,7 @@ describe("OpenCode cloud agent", () => {
     expect(create?.body).toMatchObject({
       id: sessionId,
       title: "Add a README",
-      location: { directory: "/workspace/repos" },
+      location: { directory: "/workspace" },
       permissions: [{ action: "*", resource: "*", effect: "allow" }],
       metadata: {
         rakazoDirectory: "/workspace/repos/rakazo",
@@ -252,6 +252,7 @@ describe("OpenCode cloud agent", () => {
     });
     const text = promptText(wire);
     expect(text).toContain("Working directory: /workspace/repos/rakazo");
+    expect(text).toContain("mkdir -p /workspace/repos");
     expect(text).toContain("gh pr create");
     expect(text).toContain("Never merge");
     expect(text).toContain("Add a README");
@@ -389,19 +390,23 @@ describe("OpenCode cloud agent", () => {
     );
     const text = promptText(wire);
     expect(text).toContain("Working directory: /workspace/repos/servers-config");
+    expect(text).toContain("mkdir -p /workspace/repos");
     expect(text).toContain("Do not open a pull request.");
     expect(text).not.toContain("gh pr create");
   });
 
-  it("sends the configured model and a custom workspace root", async () => {
+  it("sends the configured model and keeps the session directory on /workspace", async () => {
     const wire = new OpenCodeWire();
     await provider(wire, {
-      workspaceRoot: "/workspace/repos",
+      workspaceRoot: "/var/src",
       defaultModel: "anthropic/claude#fast",
-    }).launch({ idempotencyKey: "model", prompt: "Task" }, context);
+    }).launch({ idempotencyKey: "model", prompt: "Task", repository: "example/rakazo" }, context);
     expect(wire.requests[0]?.body).toMatchObject({
+      location: { directory: "/workspace" },
       model: { providerID: "anthropic", id: "claude", variant: "fast" },
+      metadata: { rakazoDirectory: "/var/src/rakazo" },
     });
+    expect(promptText(wire)).toContain("mkdir -p /var/src");
   });
 
   it("refuses a follow-up to an archived session before sending a prompt", async () => {

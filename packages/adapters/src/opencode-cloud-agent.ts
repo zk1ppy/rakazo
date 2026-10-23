@@ -13,7 +13,10 @@ import { CloudAgentRequestRejected, CloudAgentRetryLater } from "@rakazo/adapter
 import { z } from "zod";
 import { readBodyCapped } from "./web-ssrf.js";
 
-const DEFAULT_WORKSPACE_ROOT = "/workspace/repos";
+/** Session create requires a directory that already exists on the OpenCode server. */
+const SESSION_DIRECTORY = "/workspace";
+/** Repositories are cloned under this parent. The prompt creates it when missing. */
+const DEFAULT_REPOSITORY_ROOT = "/workspace/repos";
 const PROMPT_ADMIT_MS = 15_000;
 const PROMPT_TIMEOUT_MS = 15 * 60_000;
 
@@ -188,7 +191,7 @@ export class OpenCodeCloudAgentProvider implements CloudAgentProvider {
       {
         id: sessionId,
         title,
-        location: { directory: this.server.workspaceRoot },
+        location: { directory: SESSION_DIRECTORY },
         permissions: [{ action: "*", resource: "*", effect: "allow" }],
         ...(directory
           ? { metadata: { rakazoDirectory: directory, rakazoRepository: request.repository } }
@@ -541,11 +544,11 @@ function publicOriginOf(publicUrl: string | undefined, apiBase: string) {
 }
 
 function workspaceRoot(value: string | undefined) {
-  const trimmed = value?.trim() || DEFAULT_WORKSPACE_ROOT;
+  const trimmed = value?.trim() || DEFAULT_REPOSITORY_ROOT;
   const parts = trimmed.split("/");
   if (!trimmed.startsWith("/") || parts.includes("..") || parts.includes("."))
-    return DEFAULT_WORKSPACE_ROOT;
-  return trimmed.replace(/\/+$/, "") || DEFAULT_WORKSPACE_ROOT;
+    return DEFAULT_REPOSITORY_ROOT;
+  return trimmed.replace(/\/+$/, "") || DEFAULT_REPOSITORY_ROOT;
 }
 
 function apiUrl(base: string, path: string) {
@@ -603,10 +606,11 @@ function taskPrompt(
       : openPr === false
         ? "Do not open a pull request."
         : "Open a pull request with `gh pr create` only if the task asks for one. Never merge a pull request.";
+  const parent = directory.slice(0, directory.lastIndexOf("/")) || directory;
   return [
     `Repository: ${repository.trim()}`,
     `Working directory: ${directory}`,
-    "If that directory is missing, clone the repository into it. If it already exists, fetch it.",
+    `If that directory is missing, run \`mkdir -p ${parent}\` and clone the repository into it. If it already exists, fetch it.`,
     "Create a dedicated branch for this task before changing files. Do not commit on the default branch.",
     pullRequest,
     "In the final message include a line `Branch: <name>` and, when a pull request exists, `Pull request: <https://github.com/org/repo/pull/N>`.",
