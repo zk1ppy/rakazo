@@ -3,7 +3,9 @@ import type { Actor } from "@rakazo/contracts";
 import { credentialForModel } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
 import { describe, expect, it, vi } from "vitest";
+import { selectConfiguredModel } from "./model-roles.js";
 import {
+  connectionServesModel,
   defaultCatalogModelId,
   enabledOpenAiCompatibleModelIds,
   findConnectedModelCredential,
@@ -15,23 +17,18 @@ import {
   readStoredModelAuth,
   routineRunModelPin,
   runModelChoice,
-  selectConfiguredModel,
   selectDefaultCredentialId,
   validateBotModelChange,
   validateConnectedModelChoice,
   validateModelAuthAvailability,
 } from "./model-selection.js";
 import { listAvailablePiCatalog } from "./pi-catalog-availability.js";
+import type { CodexLiveCatalog } from "./pi-codex-catalog.js";
 import { providerCatalogCache } from "./pi-live-catalog.js";
 import { listPiCatalog } from "./pi-models.js";
+import { serializeModelSecret } from "./pi-oauth.js";
 
-type SelectionInput = Parameters<typeof selectConfiguredModel>[0];
-
-function credential(
-  provider: string,
-  defaultModel: string | null,
-  thinkingLevel: string | null = null,
-) {
+function credential(provider: string, defaultModel: string | null) {
   return {
     id: `credential-${provider}`,
     userId: "user-1",
@@ -42,174 +39,11 @@ function credential(
     updatedAt: new Date(0),
     isDefault: false,
     defaultModel,
-    thinkingLevel,
+    thinkingLevel: null,
   };
 }
 
-const spaceCredential = credential("space-provider", "space-model");
-const overrideCredential = credential("bot-provider", "stored-model");
 const bot = { modelProvider: "bot-provider", modelId: "bot-model", thinkingLevel: "high" };
-const defaults: SelectionInput = {
-  override: null,
-  overrideCredential: null,
-  defaultCredential: spaceCredential,
-  settings: { defaultModelProvider: "settings-provider", defaultModelId: "settings-model" },
-  deployment: { provider: "deployment-provider", model: "deployment-model" },
-};
-
-describe("configured model selection", () => {
-  it.each<{
-    name: string;
-    input: Partial<SelectionInput>;
-    expected: ReturnType<typeof selectConfiguredModel>;
-  }>([
-    {
-      name: "uses the bot's model with its own credential",
-      input: { override: bot, overrideCredential },
-      expected: {
-        provider: "bot-provider",
-        id: "bot-model",
-        credential: overrideCredential,
-        thinkingLevel: "high",
-      },
-    },
-    {
-      name: "drops override thinking when its provider has no credential",
-      input: { override: bot },
-      expected: {
-        provider: "space-provider",
-        id: "space-model",
-        credential: spaceCredential,
-        thinkingLevel: null,
-      },
-    },
-    {
-      name: "keeps bot thinking with the Space default",
-      input: { override: { modelProvider: null, modelId: null, thinkingLevel: "high" } },
-      expected: {
-        provider: "space-provider",
-        id: "space-model",
-        credential: spaceCredential,
-        thinkingLevel: "high",
-      },
-    },
-    {
-      name: "does not select an incomplete bot override",
-      input: { override: { ...bot, modelId: null }, overrideCredential },
-      expected: {
-        provider: "space-provider",
-        id: "space-model",
-        credential: spaceCredential,
-        thinkingLevel: "high",
-      },
-    },
-    {
-      name: "uses settings before deployment defaults without inventing a credential",
-      input: { defaultCredential: null },
-      expected: {
-        provider: "settings-provider",
-        id: "settings-model",
-        credential: null,
-        thinkingLevel: null,
-      },
-    },
-    {
-      name: "uses deployment defaults when no stored configuration exists",
-      input: { defaultCredential: null, settings: null },
-      expected: {
-        provider: "deployment-provider",
-        id: "deployment-model",
-        credential: null,
-        thinkingLevel: null,
-      },
-    },
-    {
-      name: "leaves missing configuration for the caller's runtime fallback or failure path",
-      input: { defaultCredential: null, settings: null, deployment: null },
-      expected: {
-        provider: undefined,
-        id: null,
-        credential: null,
-        thinkingLevel: null,
-      },
-    },
-    {
-      name: "skips a literal null model id and uses the provider catalog instead",
-      input: {
-        defaultCredential: credential("anthropic", "null"),
-        settings: null,
-        deployment: null,
-      },
-      expected: {
-        provider: "anthropic",
-        id: defaultCatalogModelId("anthropic"),
-        credential: credential("anthropic", "null"),
-        thinkingLevel: null,
-      },
-    },
-    {
-      name: "applies the preference thinking level to the space default model",
-      input: { defaultCredential: credential("space-provider", "space-model", "low") },
-      expected: {
-        provider: "space-provider",
-        id: "space-model",
-        credential: credential("space-provider", "space-model", "low"),
-        thinkingLevel: "low",
-      },
-    },
-    {
-      name: "bot override thinking beats the preference level",
-      input: {
-        override: { modelProvider: null, modelId: null, thinkingLevel: "high" },
-        defaultCredential: credential("space-provider", "space-model", "low"),
-      },
-      expected: {
-        provider: "space-provider",
-        id: "space-model",
-        credential: credential("space-provider", "space-model", "low"),
-        thinkingLevel: "high",
-      },
-    },
-    {
-      name: "does not leak a preference level onto a different override model",
-      input: {
-        override: { modelProvider: "bot-provider", modelId: "other-model", thinkingLevel: null },
-        overrideCredential: credential("bot-provider", "stored-model", "xhigh"),
-      },
-      expected: {
-        provider: "bot-provider",
-        id: "other-model",
-        credential: credential("bot-provider", "stored-model", "xhigh"),
-        thinkingLevel: null,
-      },
-    },
-    {
-      name: "does not treat a sentinel bot override as a selected model",
-      input: { override: { ...bot, modelId: "null" }, overrideCredential },
-      expected: {
-        provider: "space-provider",
-        id: "space-model",
-        credential: spaceCredential,
-        thinkingLevel: "high",
-      },
-    },
-    {
-      name: "inherits the preference level when the override names its model",
-      input: {
-        override: { modelProvider: "bot-provider", modelId: "stored-model", thinkingLevel: null },
-        overrideCredential: credential("bot-provider", "stored-model", "xhigh"),
-      },
-      expected: {
-        provider: "bot-provider",
-        id: "stored-model",
-        credential: credential("bot-provider", "stored-model", "xhigh"),
-        thinkingLevel: "xhigh",
-      },
-    },
-  ])("$name", ({ input, expected }) => {
-    expect(selectConfiguredModel({ ...defaults, ...input })).toEqual(expected);
-  });
-});
 
 describe("routine model pin", () => {
   const routine = {
@@ -241,7 +75,8 @@ describe("routine model pin", () => {
     expect(choice).toEqual(routine);
     expect(
       selectConfiguredModel({
-        ...defaults,
+        main: null,
+        defaults: {},
         override: choice,
         overrideCredential: credential("routine-provider", "stored-model"),
       }),
@@ -397,6 +232,72 @@ describe("space catalog auth", () => {
       (entry) => entry.provider === "openai-codex" && entry.id === spark,
     );
   }
+
+  it.each(["credits", "byok"])("keeps saved keys while selecting %s funding", async (mode) => {
+    vi.stubEnv("PI_DEFAULT_PROVIDER", "openrouter");
+    vi.stubEnv("OPENROUTER_API_KEY", "fixture-deployment-key");
+    try {
+      const { prisma } = authPrisma({
+        credentials: [
+          {
+            ...storedCredential("personal", "personal-secret", "2026-01-01T00:00:00.000Z"),
+            provider: "openrouter",
+          },
+        ],
+        preferences: [],
+        secrets: [{ id: "personal-secret", ciphertext: "fixture-ciphertext" }],
+      });
+      Object.assign(prisma, {
+        space: {
+          findFirst: vi.fn().mockResolvedValue({ organization: { modelCredits: { mode } } }),
+        },
+      });
+      const load = vi.fn().mockResolvedValue("fixture-personal-key");
+      const auth = await modelCredentialAuthKindsForSpace(prisma, { load }, scope, "openrouter");
+      expect(auth.byProvider.openrouter).toBe("api_key");
+      if (mode === "credits") {
+        expect(auth.managedProvider).toBe("openrouter");
+        expect(auth.secretIdByProvider?.openrouter).toBeUndefined();
+        expect(load).not.toHaveBeenCalled();
+      } else {
+        expect(auth.managedProvider).toBeUndefined();
+        expect(auth.secretIdByProvider?.openrouter).toBe("personal-secret");
+        expect(load).toHaveBeenCalledOnce();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("retains hosted catalog access alongside a saved personal connection", async () => {
+    vi.stubEnv("PI_DEFAULT_PROVIDER", "openrouter");
+    vi.stubEnv("OPENROUTER_API_KEY", "fixture-deployment-key");
+    try {
+      const { prisma } = authPrisma({
+        credentials: [storedCredential("cred-oauth", "secret-oauth", "2026-01-01T00:00:00.000Z")],
+        preferences: [],
+        secrets: [{ id: "secret-oauth", ciphertext: "cipher-oauth" }],
+      });
+      Object.assign(prisma, {
+        space: {
+          findFirst: vi
+            .fn()
+            .mockResolvedValue({ organization: { modelCredits: { mode: "credits" } } }),
+        },
+      });
+      const auth = await modelCredentialAuthKindsForSpace(
+        prisma,
+        { load: vi.fn().mockResolvedValue(oauth) },
+        scope,
+        "openrouter",
+      );
+      expect(auth.managedProvider).toBe("openrouter");
+      expect(auth.byProvider.openrouter).toBe("api_key");
+      expect(auth.byProvider["openai-codex"]).toBe("oauth");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 
   it("uses the space preference instead of a newer account credential", async () => {
     const { prisma, preferenceFindMany } = authPrisma({
@@ -1484,7 +1385,7 @@ describe("live-only catalog validation", () => {
     const prisma = {
       bot: { findMany: savedBots },
       routine: { findMany: async () => [] },
-      spaceBackupModel: { findMany: async () => [] },
+      spaceModelRoleChoice: { findMany: async () => [] },
       deploymentSettings: { findFirst: async () => null },
       spaceModelPreference: { findFirst: async () => null, findMany: async () => [] },
       userModelCredential: { findMany: async () => [selected], findFirst: async () => selected },
@@ -1549,5 +1450,62 @@ describe("live-only catalog validation", () => {
       read.mockRestore();
       enabled.mockRestore();
     }
+  });
+});
+
+describe("connectionServesModel", () => {
+  const signedIn = (accountId: string) =>
+    serializeModelSecret({
+      kind: "oauth",
+      credential: {
+        type: "oauth",
+        access: `fake.${Buffer.from(JSON.stringify({ chatgpt_account_id: accountId })).toString("base64url")}.fake`,
+        refresh: "fake-refresh",
+        expires: Date.now() + 60_000,
+        accountId,
+      },
+    });
+  const plaintexts: Record<string, string> = {
+    "secret-pro": signedIn("acct-pro"),
+    "secret-plus": signedIn("acct-plus"),
+  };
+  const deps = {
+    prisma: {
+      secret: {
+        findFirst: vi.fn(async ({ where }: { where: { id: string } }) => ({
+          id: where.id,
+          ciphertext: where.id,
+        })),
+      },
+    } as unknown as PrismaClient,
+    secretStore: { load: vi.fn(async (ciphertext: string) => plaintexts[ciphertext]!) },
+    codexCatalog: {
+      read: vi.fn(async (_userId: string, account: { accountId: string }) =>
+        account.accountId === "acct-pro"
+          ? [
+              {
+                slug: "gpt-5.3-codex-spark",
+                reasoningEfforts: [],
+                supportsImages: false,
+                supportsFastTier: false,
+              },
+            ]
+          : [],
+      ),
+    } as unknown as CodexLiveCatalog,
+  };
+
+  it("offers a model only on the account whose own catalog lists it", async () => {
+    const serves = (secretId: string, modelId: string) =>
+      connectionServesModel(deps, "user-1", { secretId }, "openai-codex", modelId);
+    await expect(serves("secret-pro", "gpt-5.3-codex-spark")).resolves.toBe(true);
+    await expect(serves("secret-plus", "gpt-5.3-codex-spark")).resolves.toBe(false);
+    // Models every account can call need no lookup.
+    const shared = listPiCatalog().find(
+      (entry) => entry.provider === "openai-codex" && entry.id !== "gpt-5.3-codex-spark",
+    )!;
+    deps.secretStore.load.mockClear();
+    await expect(serves("secret-plus", shared.id)).resolves.toBe(true);
+    expect(deps.secretStore.load).not.toHaveBeenCalled();
   });
 });

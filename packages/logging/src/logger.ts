@@ -1,5 +1,6 @@
 import { enrichLogContext, getLogContext, runWithLogContext } from "./context.js";
 import { redactBindings, redactSensitiveText } from "./redaction.js";
+import { markReportedError } from "./reported-errors.js";
 import { serializeError } from "./serialize-error.js";
 import { guardedFlush, guardedWrite } from "./sink-guard.js";
 import type {
@@ -103,6 +104,10 @@ class LoggerImpl implements Logger {
     copyTraceAlias(event, "trace.id", "trace_id");
     copyTraceAlias(event, "span.id", "span_id");
     if (error !== undefined) event.error = serializeError(error);
+    if (level === "error" && merged["error.report"] !== false) {
+      markReportedError(error);
+      enrichLogContext({ "error.reported": true });
+    }
     for (const sink of this.sinks) {
       guardedWrite(() => sink.write(event));
     }

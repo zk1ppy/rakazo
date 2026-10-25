@@ -84,7 +84,7 @@ function historyMessages(): Array<{
 
 async function runWithModel(
   modelId: string,
-  switchModel?: { provider: string; modelId: string },
+  switchModel?: { provider: string; modelId: string; credentialId?: string },
   backupReadFails = false,
   scripted = false,
   finalizeSuccessfully = true,
@@ -193,12 +193,13 @@ async function runWithModel(
     },
     secret: { findFirst: vi.fn(async () => null) },
     userModelCredential: { findFirst: vi.fn(async () => null) },
-    spaceBackupModel: {
-      findMany: vi.fn(async () => {
-        if (backupReadFails) throw new Error("Backup list unavailable");
-        return switchModel
-          ? [{ provider: switchModel.provider, modelId: switchModel.modelId }]
-          : [];
+    spaceModelRoleChoice: {
+      findMany: vi.fn(async ({ where }: { where: { role: string } }) => {
+        if (where.role !== "main") return [];
+        // The run reads its main model first and its fallbacks just before the model call.
+        if (backupReadFails && prisma.spaceModelRoleChoice.findMany.mock.calls.length > 1)
+          throw new Error("Backup list unavailable");
+        return switchModel ? [{ ...switchModel, position: 1, thinkingLevel: null }] : [];
       }),
     },
 
@@ -325,16 +326,15 @@ describe("recent turn images follow model vision", () => {
     const { prisma, request } = await runWithModel(TEXT_ONLY_MODEL, undefined, true);
     expect(request.fallbackModels).toEqual([]);
     expect(request.resolveFallbackModel).toBeUndefined();
-    expect(prisma.spaceBackupModel.findMany).toHaveBeenCalledExactlyOnceWith({
-      where: { userId: "user-1", spaceId: "space-1" },
-      orderBy: { position: "asc" },
-      select: { provider: true, modelId: true },
-    });
+    expect(prisma.spaceModelRoleChoice.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: "user-1", spaceId: "space-1", role: "main" } }),
+    );
   });
 
   it("does not read or configure backups for scripted runs", async () => {
     const { prisma, request } = await runWithModel(TEXT_ONLY_MODEL, undefined, false, true);
-    expect(prisma.spaceBackupModel.findMany).not.toHaveBeenCalled();
+    // Only the main model itself is read.
+    expect(prisma.spaceModelRoleChoice.findMany).toHaveBeenCalledTimes(1);
     expect(request.fallbackModels).toEqual([]);
     expect(request.resolveFallbackModel).toBeUndefined();
   });
@@ -382,6 +382,47 @@ describe("recent turn images follow model vision", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("resolves a backup pinned to a connection on that connection only", async () => {
+    const backup = {
+      provider: "openrouter",
+      modelId: "openai/gpt-4o",
+      credentialId: "work-credential",
+    };
+    const { prisma, request } = await runWithModel(TEXT_ONLY_MODEL, backup);
+    expect(request.fallbackModels).toEqual([
+      { provider: backup.provider, id: backup.modelId, connectionId: "work-credential" },
+    ]);
+    const resolve = request.resolveFallbackModel;
+    if (!resolve) throw new Error("Backup resolver is missing");
+    prisma.userModelCredential.findFirst.mockResolvedValue({
+      id: "work-credential",
+      userId: "user-1",
+      provider: backup.provider,
+      label: "Work",
+      secretId: "work-secret",
+      createdAt: new Date(0),
+      updatedAt: new Date(0),
+      preferences: [],
+    } as never);
+    prisma.spaceModelPreference.findFirst.mockClear();
+    // The same model without its connection is not a configured backup.
+    await expect(resolve(backup.provider, backup.modelId)).rejects.toThrow(
+      "Backup model is not selected",
+    );
+    await expect(resolve(backup.provider, backup.modelId, "work-credential")).rejects.toThrow(
+      "Backup model credential is no longer available",
+    );
+    expect(prisma.userModelCredential.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "work-credential", userId: "user-1", provider: backup.provider },
+      }),
+    );
+    expect(prisma.spaceModelPreference.findFirst).not.toHaveBeenCalled();
+    expect(prisma.secret.findFirst).toHaveBeenCalledWith({
+      where: { id: "work-secret", userId: "user-1", spaceId: null },
+    });
   });
 
   it("persists the switched model against the current run lease", async () => {

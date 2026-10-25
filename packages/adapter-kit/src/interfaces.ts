@@ -11,6 +11,8 @@ import type {
   BackgroundJob,
   BackgroundJobHandlers,
   BillingCheckoutRequest,
+  BillingCreditCheckoutRequest,
+  BillingCreditPurchase,
   BillingPrice,
   BillingSubscriptionSnapshot,
   BrowserActRequest,
@@ -117,6 +119,12 @@ export interface SandboxProvider {
       homePath: string;
       providerRef?: string;
       providerKind?: ComputerRef["kind"];
+      /**
+       * When the saved workspace a replacement would restore was read from the computer. A
+       * provider that can only bring `providerRef` back from an older snapshot of its own
+       * reports it gone instead, so the newer save wins.
+       */
+      savedAt?: Date;
     },
     context: AdapterContext,
   ): Promise<ComputerRef>;
@@ -156,7 +164,7 @@ export interface SandboxProvider {
     computer: ComputerRef,
     request: TerminalRequest,
     context: AdapterContext,
-  ): Promise<{ url: string }>;
+  ): Promise<{ url: string; headers?: Record<string, string> }>;
   setScreenControl?(
     computer: ComputerRef,
     interactive: boolean,
@@ -329,6 +337,20 @@ export interface AgentHomeStore {
   ): Promise<Array<{ path: string; kind: "file" | "dir"; size: number }>>;
 }
 
+/**
+ * A bucket of opaque objects on an S3-compatible service (or a test fake). Only the API and
+ * worker hold one; sandboxes never receive its credentials or object URLs.
+ */
+export interface ObjectStorage {
+  /** Writes the whole stream as one object, replacing any object with that key. */
+  put(key: string, body: AsyncIterable<Uint8Array>): Promise<void>;
+  /** Throws when the object does not exist. */
+  get(key: string): AsyncIterable<Uint8Array>;
+  list(prefix: string): AsyncIterable<{ key: string; lastModified: Date }>;
+  /** Missing keys are not an error. */
+  delete(keys: readonly string[]): Promise<void>;
+}
+
 /** Identifies the data key being wrapped; implementations bind it into the wrap. */
 export interface KeyWrapContext {
   spaceId: string;
@@ -401,7 +423,11 @@ export interface TransactionalEmailProvider {
  * vendor API. Sync is pull-based: webhooks only say which customer changed.
  */
 export interface BillingProvider {
-  describe(): AdapterDescriptor<{ trials: boolean; portal: boolean }>;
+  /** Optional prepaid model usage capabilities; product code owns the balance ledger. */
+  createCreditCheckout?(input: BillingCreditCheckoutRequest): Promise<{ url: string }>;
+  listCreditPurchases?(customerId: string): Promise<BillingCreditPurchase[]>;
+  setMonthlyCredits?(customerId: string, amountCents: number): Promise<void>;
+  describe(): AdapterDescriptor<{ trials: boolean; portal: boolean; modelCredits?: boolean }>;
   getPrice(): Promise<BillingPrice>;
   createCustomer(input: { email: string; organizationId: string }): Promise<{ customerId: string }>;
   createCheckout(input: BillingCheckoutRequest): Promise<{ url: string }>;

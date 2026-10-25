@@ -96,6 +96,8 @@ function within<T>(context: DbContext, fn: () => T | PromiseLike<T>): Promise<T>
 
 /** Prisma models whose tables have row-level security enabled. */
 export const ROW_SECURITY_MODELS: ReadonlySet<string> = new Set([
+  "BillingAuditEvent",
+  "PushToken",
   "Thread",
   "Message",
   "Event",
@@ -109,6 +111,7 @@ export const ROW_SECURITY_MODELS: ReadonlySet<string> = new Set([
   "UserVoiceCredential",
   "TaughtSkill",
   "AgentSkill",
+  "AgentImport",
   "Bot",
   "Run",
   "Task",
@@ -129,6 +132,7 @@ export const ROW_SECURITY_MODELS: ReadonlySet<string> = new Set([
   "UsageRecord",
   "ScratchpadItem",
   "ActionApprovalRule",
+  "SpaceModelRoleChoice",
   "SecurityEvent",
 ]);
 

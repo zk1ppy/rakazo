@@ -1,5 +1,13 @@
 import { eventIterator, oc } from "@orpc/contract";
 import * as z from "zod";
+import {
+  AgentImportCreateInput,
+  AgentImportInfoSchema,
+  AgentImportPlanSchema,
+  AgentImportPreviewInput,
+  AgentImportUndoInput,
+} from "./agent-import.js";
+import { AgentImportSetupStateInput, AgentImportSetupStateSchema } from "./agent-import-setup.js";
 import { AiConsentQuerySchema, AiConsentStatusSchema } from "./ai-consent.js";
 import { AnalyticsScreenInput } from "./analytics.js";
 import {
@@ -40,6 +48,7 @@ import {
   BotSectionName,
   BotSectionSchema,
   CapabilityInstallSchema,
+  CONNECTION_LABEL_MAX_LENGTH,
   ComputerModeSchema,
   ComputerReleaseReasonSchema,
   ComputerStatusSchema,
@@ -70,7 +79,10 @@ import {
   ModelBackupListSchema,
   ModelCatalogEntrySchema,
   ModelConnectInputSchema,
+  ModelConnectionLabelSchema,
+  ModelConnectionTargetSchema,
   ModelCredentialSchema,
+  ModelCreditAmountSchema,
   ModelOAuthBeginSchema,
   OPENAI_COMPATIBLE_PROVIDER_ID,
   REPLY_QUOTE_MAX_LENGTH,
@@ -82,6 +94,7 @@ import {
   ServerUpdateRequestSchema,
   ServerUpdateRunSchema,
   ServerUpdateStatusSchema,
+  SignupSurveySchema,
   SkillPlaybookSchema,
   SpaceMemoryConfigSchema,
   SpaceNavigationSchema,
@@ -97,6 +110,7 @@ import {
   UpdateExternalConversationPolicyInput,
   UpdateGroupInput,
   UsageRecordSchema,
+  UsageSummarySchema,
   VoiceCatalogEntrySchema,
   VoiceCredentialSchema,
   VoiceInfoSchema,
@@ -108,6 +122,8 @@ import {
   IntegrationProviderConfigSchema,
   IntegrationSetupStateSchema,
 } from "./integration-settings.js";
+import { ModelHeadersSchema } from "./model-headers.js";
+import { ModelRoleSchema, ModelRoleUpdateSchema, ModelRoleViewSchema } from "./model-roles.js";
 import { MessageReactionSchema } from "./reactions.js";
 import { RoutineWatchSchema } from "./routine-watch.js";
 import { RoutineHistorySchema, RoutineRunCursorSchema, RunsListOutputSchema } from "./runs.js";
@@ -194,6 +210,15 @@ export const appContract = {
   me: oc.output(MeSchema),
   billing: {
     status: oc.output(BillingStatusSchema),
+    selectFunding: oc
+      .input(z.object({ funding: z.enum(["byok", "credits"]) }))
+      .output(z.object({ ok: z.literal(true) })),
+    purchaseCredits: oc
+      .input(z.object({ amountCents: ModelCreditAmountSchema, monthly: z.boolean() }))
+      .output(z.object({ url: z.string().url() })),
+    setMonthlyCredits: oc
+      .input(z.object({ amountCents: ModelCreditAmountSchema }))
+      .output(z.object({ ok: z.literal(true) })),
     checkout: oc.output(z.object({ url: z.string().url() })),
     portal: oc.output(z.object({ url: z.string().url() })),
   },
@@ -251,6 +276,15 @@ export const appContract = {
     apply: oc.input(ServerUpdateRequestSchema).output(ServerUpdateRunSchema),
   },
   models: {
+    forRole: oc
+      .input(z.object({ role: ModelRoleSchema, expectedUserId: Id.optional() }))
+      .output(z.array(ModelCatalogEntrySchema)),
+    role: oc
+      .input(z.object({ role: ModelRoleSchema, expectedUserId: Id.optional() }))
+      .output(ModelRoleViewSchema),
+    setRole: oc
+      .input(ModelRoleUpdateSchema.extend({ role: ModelRoleSchema, expectedUserId: Id.optional() }))
+      .output(ModelRoleViewSchema),
     list: oc.output(z.array(ModelCatalogEntrySchema)),
     credentials: oc.output(z.array(ModelCredentialSchema)),
     backups: oc.output(z.array(ModelBackupChoiceSchema)),
@@ -260,6 +294,8 @@ export const appContract = {
       .input(
         z.object({
           baseUrl: z.string(),
+          credentialId: z.string().optional(),
+          headers: ModelHeadersSchema.optional(),
           apiKey: z.string().optional(),
         }),
       )
@@ -277,8 +313,11 @@ export const appContract = {
         z.object({
           provider: z.string(),
           label: z.string().optional(),
+          /** Signs an existing connection in again; null adds another, as connect does. */
+          credentialId: ModelConnectionTargetSchema,
           modelId: z.string().optional(),
           thinkingLevel: ThinkingLevelSchema.nullable().optional(),
+          makeDefault: z.boolean().optional(),
         }),
       )
       .output(ModelOAuthBeginSchema),
@@ -307,8 +346,12 @@ export const appContract = {
         }),
       )
       .output(z.object({ ok: z.literal(true) })),
+    rename: oc
+      .input(z.object({ credentialId: Id, label: ModelConnectionLabelSchema }))
+      .output(z.object({ ok: z.literal(true) })),
+    /** Removes one connection, or every connection of the provider when older apps omit it. */
     disconnect: oc
-      .input(z.object({ provider: z.string().trim().min(1) }))
+      .input(z.object({ provider: z.string().trim().min(1), credentialId: Id.optional() }))
       .output(z.object({ ok: z.literal(true) })),
   },
   bots: {
@@ -316,6 +359,11 @@ export const appContract = {
     listArchived: oc.output(z.array(BotSchema)),
     get: oc.input(botId).output(BotSchema),
     create: oc.input(CreateBotInput).output(BotSchema),
+    importPreview: oc.input(AgentImportPreviewInput).output(AgentImportPlanSchema),
+    importCreate: oc.input(AgentImportCreateInput).output(BotSchema),
+    importInfo: oc.input(botId).output(AgentImportInfoSchema.nullable()),
+    importSetupState: oc.input(AgentImportSetupStateInput).output(AgentImportSetupStateSchema),
+    importUndo: oc.input(AgentImportUndoInput).output(AgentImportInfoSchema),
     duplicate: oc.input(botId).output(BotSchema),
     reorder: oc.input(ReorderBotsInput).output(z.object({ ok: z.literal(true) })),
     update: oc.input(UpdateBotInput).output(BotSchema),
@@ -488,8 +536,14 @@ export const appContract = {
           ),
       )
       .output(z.object({ ok: z.literal(true) })),
-    markRead: oc.input(threadTarget).output(z.object({ ok: z.literal(true) })),
-    markUnread: oc.input(threadTarget).output(z.object({ ok: z.literal(true) })),
+    /** `unreadAfterSeq`: the seq read up to before this call, null when nothing was unread. */
+    markRead: oc
+      .input(threadTarget)
+      .output(z.object({ ok: z.literal(true), unreadAfterSeq: z.number().int().nullable() })),
+    /** With `messageId`, the chat reads as unread from that message: the next open puts New above it. */
+    markUnread: oc
+      .input(threadTarget.and(z.object({ messageId: Id.optional() })))
+      .output(z.object({ ok: z.literal(true) })),
   },
   computer: {
     status: oc.input(botId).output(ComputerStatusSchema),
@@ -833,6 +887,8 @@ export const appContract = {
     },
   },
   onboarding: {
+    /** Record the optional signup survey; an empty submission marks it skipped. */
+    signupSurvey: oc.input(SignupSurveySchema).output(z.object({ ok: z.literal(true) })),
     /** Seed the first-run greeting into the bot's thread (focus card is separate). */
     start: oc.input(z.object({ botId: Id })).output(z.object({ ok: z.literal(true) })),
     /** Post the focus choice card when the thread is still idle. */
@@ -879,7 +935,12 @@ export const appContract = {
       .input(z.object({ connectionId: Id, code: z.string().optional() }))
       .output(ConnectionSchema),
     rename: oc
-      .input(z.object({ connectionId: Id, displayName: z.string().trim().min(1).max(80) }))
+      .input(
+        z.object({
+          connectionId: Id,
+          displayName: z.string().trim().min(1).max(CONNECTION_LABEL_MAX_LENGTH),
+        }),
+      )
       .output(ConnectionSchema),
     revoke: oc.input(z.object({ connectionId: Id })).output(z.object({ ok: z.literal(true) })),
     /** Tools the connected provider exposes. Read-only; no per-tool allowlist yet. */
@@ -939,7 +1000,9 @@ export const appContract = {
   },
   autoReview: {
     get: oc.output(ActionAutoReviewSettingsSchema),
-    set: oc.input(z.object({ enabled: z.boolean() })).output(ActionAutoReviewSettingsSchema),
+    set: oc
+      .input(z.object({ enabled: z.boolean().optional(), skipApprovals: z.boolean().optional() }))
+      .output(ActionAutoReviewSettingsSchema),
   },
   artifacts: {
     list: oc.input(botId).output(z.array(ArtifactSchema)),
@@ -978,15 +1041,7 @@ export const appContract = {
   },
   usage: {
     list: oc.output(z.array(UsageRecordSchema)),
-    summary: oc.output(
-      z.object({
-        inputTokens: z.number().nullable(),
-        outputTokens: z.number().nullable(),
-        totalTokens: z.number().nullable().optional(),
-        modelCalls: z.number().optional(),
-        runs: z.number(),
-      }),
-    ),
+    summary: oc.output(UsageSummarySchema),
   },
   export: {
     bot: oc.input(botId).output(ExportManifestSchema),

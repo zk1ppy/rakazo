@@ -17,6 +17,7 @@ function tx(options?: {
   const events: Array<Record<string, unknown>> = [];
   const client = {
     $queryRaw: vi.fn(async () => []),
+    externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
     run: {
       updateMany: vi.fn(async () => ({ count: options?.cancelled ?? 1 })),
       findUnique: vi.fn(async () => {
@@ -28,6 +29,7 @@ function tx(options?: {
       }),
       findUniqueOrThrow: vi.fn(async () => ({
         spaceId: "space-1",
+        userId: "user-1",
         threadId: "thread-1",
         botId: "bot-1",
         taskId: "task-1",
@@ -60,6 +62,7 @@ function tx(options?: {
     },
     computerExecutionLease: { updateMany: vi.fn(async () => ({ count: 1 })) },
     computer: { updateMany: vi.fn(async () => ({ count: 1 })) },
+    secret: { deleteMany: vi.fn(async () => ({ count: 0 })) },
     steeringMessage: {
       updateMany: vi.fn(async () => ({ count: 1 })),
       findMany: vi.fn(async () =>
@@ -144,6 +147,9 @@ describe("expireStuckRun", () => {
       where: { id: "task-1" },
       data: { status: "cancelled" },
     });
+    expect(client.secret.deleteMany).toHaveBeenCalledWith({
+      where: { OR: [{ userId: "user-1", spaceId: "space-1", kind: "run-secret:run-1" }] },
+    });
   });
 
   it("does nothing when the run already moved on", async () => {
@@ -157,6 +163,7 @@ describe("expireStuckRun", () => {
     });
     expect(result).toBeNull();
     expect(client.message.create).not.toHaveBeenCalled();
+    expect(client.secret.deleteMany).not.toHaveBeenCalled();
   });
 
   it("leaves the task running when a sibling attempt is still active", async () => {

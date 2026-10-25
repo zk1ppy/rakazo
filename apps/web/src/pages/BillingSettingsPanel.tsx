@@ -2,6 +2,7 @@ import { Plural, Trans, useLingui } from "@lingui/react/macro";
 import type { BillingStatus } from "@rakazo/contracts";
 import { Button, Skeleton } from "@rakazo/ui-web";
 import { useEffect, useState } from "react";
+import { ModelCreditsSettings } from "../components/ModelCredits";
 import { formatBillingDate, formatBillingPrice } from "../lib/billing";
 import { rpc } from "../lib/rpc";
 
@@ -67,12 +68,20 @@ export function BillingSettingsPanel() {
   const price = status?.price ? formatBillingPrice(status.price, locale) : null;
   const seats = status?.seats ?? 0;
 
+  if (status?.funding !== undefined)
+    return (
+      <ModelCreditsSettings
+        status={status}
+        refresh={async () => setStatus(await rpc.billing.status())}
+      />
+    );
+
   return (
     <div data-testid="billing-settings" className="rounded-xl border border-border px-4 py-4">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           {status ? (
-            <h3 className="text-[15px] font-medium text-foreground">{stateLabel}</h3>
+            <h3 className="text-heading3 font-medium text-foreground">{stateLabel}</h3>
           ) : error ? null : (
             <Skeleton className="h-5 w-24" />
           )}

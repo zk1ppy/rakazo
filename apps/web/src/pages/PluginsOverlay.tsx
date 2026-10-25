@@ -5,7 +5,9 @@ import type {
   ConnectionCatalogItem,
   IntegrationCatalogResult,
   IntegrationCatalogSurface,
+  McpServer,
 } from "@rakazo/contracts";
+import { CONNECTION_LABEL_MAX_LENGTH } from "@rakazo/contracts";
 import {
   buildFeaturedConnectorTiles,
   CONNECTION_CATALOG_PAGE_SIZE,
@@ -41,6 +43,22 @@ import { connectedAppMarks } from "../lib/connected-apps";
 import { optionalCatalogFeedProbe } from "../lib/optional-catalog-feed";
 import { rpc } from "../lib/rpc";
 import { errorText } from "../lib/user-error";
+
+function ConnectorIcon({ name, logo }: { name: string; logo?: string | null }) {
+  return logo ? (
+    <img
+      src={logo}
+      alt=""
+      loading="lazy"
+      decoding="async"
+      className="h-9 w-9 shrink-0 rounded-xl bg-accent object-contain"
+    />
+  ) : (
+    <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent text-sm font-semibold text-foreground">
+      {name[0]}
+    </div>
+  );
+}
 
 type SourceKind = "treg" | "executor" | "mcp" | "api" | "graphql";
 
@@ -84,6 +102,8 @@ export function PluginsOverlay({
   const [catalog, setCatalog] = useState<ConnectionCatalogItem[]>([]);
   const [connections, setConnections] = useState<Connection[]>([]);
   const [labelDrafts, setLabelDrafts] = useState<Record<string, string>>({});
+  const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
+  const [mcpError, setMcpError] = useState<string | null>(null);
   const [sources, setSources] = useState<CapabilityInstall[]>([]);
   const [sourceKind, setSourceKind] = useState<SourceKind | null>(null);
   const [sourceName, setSourceName] = useState("");
@@ -108,8 +128,23 @@ export function PluginsOverlay({
   const [toolsLoading, setToolsLoading] = useState(false);
   const [toolsTick, setToolsTick] = useState(0);
   const connectionAttempt = useRef<AbortController | null>(null);
+  const mcpRefreshGeneration = useRef(0);
+
+  async function refreshMcp() {
+    const generation = ++mcpRefreshGeneration.current;
+    try {
+      const servers = await rpc.mcp.servers.list();
+      if (generation !== mcpRefreshGeneration.current) return;
+      setMcpServers(servers);
+      setMcpError(null);
+    } catch (reason) {
+      if (generation === mcpRefreshGeneration.current)
+        setMcpError(errorText(reason, t`Could not load MCP servers`));
+    }
+  }
 
   async function refresh() {
+    void refreshMcp();
     // The catalog call reconciles connection rows, so list them after it settles.
     const catalog = rpc.connections.catalog({});
     const [items, installs, rows, catalogFeed] = await Promise.all([
@@ -149,7 +184,10 @@ export function PluginsOverlay({
 
   useEffect(() => {
     load();
-    return () => connectionAttempt.current?.abort();
+    return () => {
+      mcpRefreshGeneration.current += 1;
+      connectionAttempt.current?.abort();
+    };
   }, []);
 
   useEffect(() => {
@@ -429,7 +467,6 @@ export function PluginsOverlay({
         <Button
           type="button"
           variant="secondary"
-          className="rounded-full"
           size="sm"
           disabled={connecting}
           onClick={(event) => {
@@ -445,7 +482,6 @@ export function PluginsOverlay({
       <Button
         type="button"
         variant="secondary"
-        className="rounded-full"
         size="sm"
         disabled={connecting}
         onClick={(event) => {
@@ -466,19 +502,7 @@ export function PluginsOverlay({
   ) {
     const connected = itemConnected(item);
     const tileTestId = opts?.tileTestId !== false && connected;
-    const icon = logo ? (
-      <img
-        src={logo}
-        alt=""
-        loading="lazy"
-        decoding="async"
-        className="h-9 w-9 shrink-0 rounded-xl bg-accent object-contain"
-      />
-    ) : (
-      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent text-sm font-semibold text-foreground">
-        {label[0]}
-      </div>
-    );
+    const icon = <ConnectorIcon name={label} logo={logo} />;
     const title = (
       <div className="min-w-0 flex-1 text-start">
         <div className="truncate text-[15px] font-medium text-foreground">{label}</div>
@@ -549,7 +573,6 @@ export function PluginsOverlay({
           <Button
             type="button"
             variant="secondary"
-            className="rounded-full"
             size="sm"
             disabled={uninstalling || connecting}
             onClick={() => void uninstall(item)}
@@ -564,6 +587,7 @@ export function PluginsOverlay({
               <Input
                 value={labelDrafts[row.id] ?? row.displayName}
                 aria-label={t`Account label`}
+                maxLength={CONNECTION_LABEL_MAX_LENGTH}
                 className="h-9 rounded-lg border-transparent bg-transparent px-2 text-[14px] shadow-none hover:bg-accent/60 focus-visible:bg-background dark:bg-transparent"
                 onChange={(event) =>
                   setLabelDrafts((current) => ({ ...current, [row.id]: event.target.value }))
@@ -578,7 +602,7 @@ export function PluginsOverlay({
               <Button
                 type="button"
                 variant="ghost"
-                className="h-8 shrink-0 rounded-full px-2.5 text-[12px] text-muted-foreground pointer-fine:opacity-0 pointer-fine:group-focus-within/account:opacity-100 pointer-fine:group-hover/account:opacity-100"
+                className="h-8 shrink-0 px-2.5 text-[12px] text-muted-foreground pointer-fine:opacity-0 pointer-fine:group-focus-within/account:opacity-100 pointer-fine:group-hover/account:opacity-100"
                 size="sm"
                 disabled={pending === row.id || uninstalling}
                 onClick={() => void revokeAccount(row, item)}
@@ -590,7 +614,7 @@ export function PluginsOverlay({
           <Button
             type="button"
             variant="ghost"
-            className="h-9 rounded-lg px-2 text-[14px] text-muted-foreground"
+            className="h-9 px-2 text-[14px] text-muted-foreground"
             size="sm"
             disabled={connecting || uninstalling}
             onClick={() => void connect(item)}
@@ -643,7 +667,7 @@ export function PluginsOverlay({
         className="flex h-[760px] max-h-[calc(100%-2rem)] w-[1080px] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden rounded-2xl bg-card p-0 sm:max-w-[1080px]"
       >
         <DialogHeader className="flex-row items-start justify-between px-8 pt-7">
-          <DialogTitle className="text-2xl text-foreground">
+          <DialogTitle className="text-heading2 text-foreground">
             <Trans>Integrations</Trans>
           </DialogTitle>
           <DialogClose
@@ -692,6 +716,60 @@ export function PluginsOverlay({
                 </Button>
               ) : null}
             </div>
+          ) : null}
+
+          {!detailItem && (mcpServers.length > 0 || mcpError) ? (
+            <section data-testid="registered-mcp-servers" className="mb-6">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <h2 className="text-sm font-medium">
+                  <Trans>MCP servers</Trans>
+                </h2>
+                {onOpenMcp ? (
+                  <Button variant="link" size="xs" onClick={onOpenMcp}>
+                    <Trans>Manage MCP servers</Trans>
+                  </Button>
+                ) : null}
+              </div>
+              {mcpError ? (
+                <div role="alert" className="flex items-center gap-2 text-sm text-destructive">
+                  {mcpError}
+                  <Button variant="link" size="xs" onClick={() => void refreshMcp()}>
+                    <Trans>Retry</Trans>
+                  </Button>
+                </div>
+              ) : null}
+              {mcpServers
+                .filter((server) =>
+                  `${server.name} ${server.description}`
+                    .toLowerCase()
+                    .includes(query.trim().toLowerCase()),
+                )
+                .map((server) => (
+                  <div
+                    key={server.id}
+                    data-testid="registered-mcp-server"
+                    className="flex min-w-0 items-center gap-3 rounded-xl px-2.5 py-2"
+                  >
+                    <ConnectorIcon name={server.name} />
+                    <span className="min-w-0 flex-1 truncate text-[15px] font-medium">
+                      {server.name}
+                    </span>
+                    <span className="shrink-0 text-[12.5px] text-muted-foreground">
+                      {!server.enabled ? (
+                        <Trans>Disabled</Trans>
+                      ) : server.oauthStatus === "reconnect" ? (
+                        <Trans>OAuth expired</Trans>
+                      ) : server.oauthStatus === "connected" ? (
+                        <Trans>OAuth connected</Trans>
+                      ) : server.hasSecret ? (
+                        <Trans>Credential saved</Trans>
+                      ) : (
+                        <Trans>No auth</Trans>
+                      )}
+                    </span>
+                  </div>
+                ))}
+            </section>
           ) : null}
 
           {detailItem ? (
@@ -769,7 +847,6 @@ export function PluginsOverlay({
                   <Button
                     type="button"
                     variant="secondary"
-                    className="rounded-full"
                     size="sm"
                     onClick={() => setVisibleCount((count) => count + CONNECTION_CATALOG_PAGE_SIZE)}
                   >
@@ -828,7 +905,6 @@ export function PluginsOverlay({
                           <Button
                             type="submit"
                             variant="secondary"
-                            className="rounded-full"
                             size="sm"
                             disabled={!catalogFeedQuery.trim() || catalogFeedPending}
                           >
@@ -880,7 +956,6 @@ export function PluginsOverlay({
                                     key={`${result.domain}:${surface.slug}`}
                                     type="button"
                                     variant="secondary"
-                                    className="rounded-full"
                                     size="sm"
                                     disabled={!canAdd}
                                     title={canAdd ? undefined : t`Manual setup required`}
@@ -900,7 +975,6 @@ export function PluginsOverlay({
                   <Button
                     type="button"
                     variant="secondary"
-                    className="rounded-full"
                     size="sm"
                     aria-expanded={setupOpen}
                     onClick={() => setSetupOpen((current) => !current)}
@@ -923,7 +997,6 @@ export function PluginsOverlay({
                     <Button
                       type="button"
                       variant="secondary"
-                      className="rounded-full"
                       size="sm"
                       onClick={() => beginSource("mcp")}
                     >
@@ -932,7 +1005,6 @@ export function PluginsOverlay({
                     <Button
                       type="button"
                       variant="secondary"
-                      className="rounded-full"
                       size="sm"
                       onClick={() => beginSource("api")}
                     >
@@ -941,7 +1013,6 @@ export function PluginsOverlay({
                     <Button
                       type="button"
                       variant="secondary"
-                      className="rounded-full"
                       size="sm"
                       onClick={() => beginSource("graphql")}
                     >
@@ -950,7 +1021,6 @@ export function PluginsOverlay({
                     <Button
                       type="button"
                       variant="secondary"
-                      className="rounded-full"
                       size="sm"
                       onClick={() => beginSource("executor")}
                     >
@@ -959,7 +1029,6 @@ export function PluginsOverlay({
                     <Button
                       type="button"
                       variant="secondary"
-                      className="rounded-full"
                       size="sm"
                       onClick={() => beginSource("treg")}
                     >
@@ -1060,7 +1129,6 @@ export function PluginsOverlay({
                           <Button
                             type="button"
                             variant="secondary"
-                            className="rounded-full"
                             size="sm"
                             disabled={pending === "install-source"}
                             onClick={() => void installSource()}
@@ -1074,7 +1142,6 @@ export function PluginsOverlay({
                           <Button
                             type="button"
                             variant="secondary"
-                            className="rounded-full"
                             size="sm"
                             onClick={() => setSourceKind(null)}
                           >
@@ -1109,16 +1176,15 @@ export function PluginsOverlay({
                           <div className="truncate text-[13.5px] text-muted-foreground/70">
                             {source.kind.toUpperCase()} · {source.source} ·{" "}
                             {source.secretConfigured ? (
-                              <Trans>credential saved</Trans>
+                              <Trans>Credential saved</Trans>
                             ) : (
-                              <Trans>no auth</Trans>
+                              <Trans>No auth</Trans>
                             )}
                           </div>
                         </div>
                         <Button
                           type="button"
                           variant="secondary"
-                          className="rounded-full"
                           size="sm"
                           disabled={pending === source.id}
                           onClick={() => void removeSource(source)}
@@ -1127,7 +1193,7 @@ export function PluginsOverlay({
                         </Button>
                       </div>
                     ))}
-                    {onOpenMcp ? (
+                    {onOpenMcp && mcpServers.length === 0 && !mcpError ? (
                       <Button
                         type="button"
                         variant="link"

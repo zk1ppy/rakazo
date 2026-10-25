@@ -32,7 +32,7 @@ export async function completeOnboarding(page: Page, testInfo?: TestInfo) {
   // first bot is created automatically — land in Chief's chat with no form.
   const integrations = page.getByRole("heading", { name: "Server integrations", exact: true });
   const chief = page.getByText("Chief").first();
-  await integrations.or(chief).or(page.getByText("Opening chat…")).waitFor({ timeout: 20_000 });
+  await integrations.or(chief).waitFor({ timeout: 20_000 });
   if ((await chief.isVisible().catch(() => false)) && page.url().includes("/app")) {
     if (testInfo) {
       await captureScreenshot(page, testInfo, "03-create-first-bot");
@@ -162,8 +162,7 @@ export async function captureScreenshot(page: Page, testInfo: TestInfo, name: st
 export async function openNewBot(page: Page) {
   await page.getByTestId("create-menu-trigger").click();
   await page.getByTestId("create-new-bot").click();
-  await expect(page.getByTestId("side-panel")).toHaveAttribute("data-panel", "create");
-  await expect(page.getByTestId("create-bot-form")).toBeVisible();
+  await expect(page.getByTestId("create-bot-dialog")).toBeVisible();
 }
 
 export async function openNewGroup(page: Page) {
@@ -176,33 +175,17 @@ export async function openNewSpace(page: Page) {
   await page.getByTestId("create-new-space").click();
 }
 
-/** Open the create form from the + picker, submit, and wait for the new chat. */
+/** Open the create dialog from the + picker, name the bot, and wait for the new chat. */
 export async function createBotFromPicker(
   page: Page,
-  options: {
-    name?: string;
-    title?: string;
-    description?: string;
-    computerMode?: "team" | "dedicated";
-  } = {},
+  { name = "New Bot" }: { name?: string } = {},
 ) {
-  const name = options.name ?? "New Bot";
   await openNewBot(page);
-  const form = page.getByTestId("create-bot-form");
-  await form.locator("label:has-text('Name') input").fill(name);
-  if (options.title != null) {
-    await form.locator("label:has-text('Title') input").fill(options.title);
-  }
-  if (options.description != null) {
-    await form.locator("label:has-text('Description') textarea").fill(options.description);
-  }
-  if (options.computerMode === "dedicated") {
-    await form.getByTestId("create-bot-private").click();
-  } else if (options.computerMode === "team") {
-    await form.getByTestId("create-bot-team").click();
-  }
-  await form.getByRole("button", { name: "Create", exact: true }).click();
+  const dialog = page.getByTestId("create-bot-dialog");
+  await dialog.getByPlaceholder("Name your Bot").fill(name);
+  await dialog.getByRole("button", { name: "Create", exact: true }).click();
   await page.waitForURL(/\/app\/[^/]+$/);
+  await expect(dialog).toBeHidden();
   await expect(page.getByTestId("side-panel")).toHaveAttribute("data-panel", "closed");
 }
 
@@ -219,14 +202,92 @@ export async function openUserSettings(
     | "billing"
     | "updates",
 ) {
-  await page.getByTestId("user-menu-trigger").click();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  // A reload keeps settings open because the URL holds them; closing clears the URL at once.
+  if (!new URL(page.url()).searchParams.has("settings")) {
+    await page.getByTestId("user-menu-trigger").click();
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+  }
   const settings = page.getByTestId("user-settings");
   await expect(settings).toBeVisible();
   if (section && section !== "general") {
     await settings.getByTestId(`settings-nav-${section}`).click();
   }
   return settings;
+}
+
+/** The connection page for a provider, titled "Connect X" until it is connected and "X" after. */
+export function modelConnectionDialog(page: Page, provider: string) {
+  const name = provider.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return page
+    .getByTestId("model-connection")
+    .filter({ has: page.getByRole("heading", { name: new RegExp(`^(Connect )?${name}$`) }) });
+}
+
+/** A picker option that connects a provider, listed after the connected models with a "Connect" shortcut. */
+export function modelConnectOption(page: Page, provider: string) {
+  return page
+    .locator('[role="option"][data-value^="connect:"]')
+    .filter({ has: page.getByText(provider, { exact: true }) });
+}
+
+/**
+ * Opens a model list's picker on the Models settings page and chooses a provider that still
+ * needs connecting. The "main" slot is the list's first row, so connecting there sets the
+ * role's primary model; "fallback" appends through "Add fallback".
+ */
+export async function openModelConnection(
+  page: Page,
+  provider: string,
+  {
+    slot = "main",
+    role = "main",
+    search = provider,
+  }: { slot?: "main" | "fallback"; role?: "main" | "approval"; search?: string } = {},
+) {
+  const section = page.getByTestId(`model-role-${role}`);
+  await (slot === "main"
+    ? section.getByRole("button", { name: /^Change / }).first()
+    : section.getByRole("button", { name: "Add fallback", exact: true })
+  ).click();
+  await page.getByRole("combobox", { name: "Search models" }).fill(search);
+  await modelConnectOption(page, provider).click();
+  const dialog = modelConnectionDialog(page, provider);
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+/**
+ * After a connection the slot's picker reopens on that provider's models. Picks `model`
+ * there, or closes the picker when the test keeps whatever the connection placed.
+ */
+export async function pickReopenedModel(page: Page, model?: string) {
+  const search = page.getByRole("combobox", { name: "Search models" });
+  await expect(search).toBeVisible();
+  if (model === undefined) await search.press("Escape");
+  else
+    await page
+      .getByRole("listbox", { name: "Model options" })
+      .getByRole("option", { name: model, exact: true })
+      .first()
+      .click();
+  await expect(search).toBeHidden();
+}
+
+/** Opens "Manage X" from a model row's options menu and returns the connection dialog. */
+export async function manageModelConnection(
+  page: Page,
+  provider: string,
+  { role = "main", row = 1 }: { role?: "main" | "approval"; row?: number } = {},
+) {
+  await page
+    .getByTestId(`model-role-${role}`)
+    .getByTestId(`model-role-row-${row}`)
+    .getByRole("button", { name: / options$/ })
+    .click();
+  await page.getByRole("menuitem", { name: `Manage ${provider}`, exact: true }).click();
+  const dialog = modelConnectionDialog(page, provider);
+  await expect(dialog).toBeVisible();
+  return dialog;
 }
 
 /** Create a named bot via RPC for test setup (skips the + picker). */
@@ -258,4 +319,35 @@ export async function chooseOption(trigger: Locator, option: string | { index: n
     ? trigger.page().getByRole("option", { name: option, exact: true })
     : options.nth(option.index)
   ).click();
+}
+
+/**
+ * Clicks a button and waits for the RPC it sends to succeed, so what the test reads next
+ * reflects it. The wait starts before the click, so a fast reply is never missed.
+ */
+export async function clickAndWaitForRpc(page: Page, button: Locator, path: string) {
+  const [reply] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === `/rpc/${path}` &&
+        response.request().method() === "POST",
+    ),
+    button.click(),
+  ]);
+  expect(reply.status()).toBe(200);
+  // The whole reply has arrived, not just its headers.
+  const failure = await reply.finished();
+  if (failure) throw new Error(`/rpc/${path} reply did not finish: ${failure.message}`);
+}
+
+/** Presents a deployment default the offline E2E server cannot run, as host credentials would. */
+export async function presentMainDeploymentDefault(page: Page, provider: string, modelId: string) {
+  await page.route("**/rpc/models/role", async (route) => {
+    const { json } = route.request().postDataJSON() as { json: { role: string } };
+    if (json.role !== "main") return route.continue();
+    const response = await route.fetch();
+    const body = (await response.json()) as { json: Record<string, unknown> };
+    body.json.deploymentPrimary = { provider, modelId };
+    await route.fulfill({ response, json: body });
+  });
 }

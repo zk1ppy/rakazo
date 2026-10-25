@@ -7,9 +7,9 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/80",
+        default: "bg-primary text-primary-foreground hover:bg-primary-hover",
         outline:
-          "border-border bg-transparent hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:hover:bg-input/50",
+          "border-border bg-transparent hover:bg-accent hover:text-foreground aria-expanded:bg-accent aria-expanded:text-foreground",
         secondary:
           "bg-secondary text-secondary-foreground hover:bg-[color-mix(in_oklch,var(--secondary),var(--foreground)_5%)] aria-expanded:bg-secondary aria-expanded:text-secondary-foreground",
         ghost:
@@ -18,6 +18,9 @@ const buttonVariants = cva(
           "bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40",
         link: "text-primary underline-offset-4 hover:underline",
         text: "text-muted-foreground hover:text-foreground aria-expanded:text-foreground",
+        // Floats over scrolling content, so it carries its own frosted surface.
+        floating:
+          "border-border bg-muted/90 text-foreground/75 backdrop-blur hover:bg-accent data-active:bg-accent aria-pressed:bg-accent",
       },
       size: {
         default:
@@ -40,6 +43,8 @@ const buttonVariants = cva(
         variant: "text",
         className: "px-0 has-data-[icon=inline-end]:pr-0 has-data-[icon=inline-start]:pl-0",
       },
+      // Compound classes come after size classes, so the pill survives sizes that set a radius.
+      { variant: "floating", className: "rounded-full" },
     ],
     defaultVariants: {
       variant: "default",

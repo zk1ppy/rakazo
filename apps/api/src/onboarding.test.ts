@@ -1,9 +1,9 @@
 import type * as db from "@rakazo/db";
 import { appendEventInTransaction } from "@rakazo/db";
 import { describe, expect, it, vi } from "vitest";
-import { chooseFocus, markAppConnected } from "./onboarding.js";
+import { chooseFocus, markAppConnected, promptFocus } from "./onboarding.js";
 
-const posted = vi.hoisted(() => [] as Array<{ blocks: unknown[] }>);
+const posted = vi.hoisted(() => [] as Array<{ blocks: unknown[]; markUnread?: boolean }>);
 vi.mock("@rakazo/db", async (original) => ({
   ...(await original<typeof db>()),
   createThreadMessageInTransaction: vi.fn(async (_tx, input) => {
@@ -48,6 +48,9 @@ describe("onboarding connection suggestions", () => {
       expect.objectContaining({ kind: "app_connect" }),
     );
     expect(posted.length).toBeGreaterThan(0);
+    // The reply to the user's pick is read; suggestions after the catalog wait stay unread.
+    expect(posted[0]?.markUnread).toBe(false);
+    expect(posted.slice(1).every((message) => message.markUnread === true)).toBe(true);
   });
   it("uses the available connector and omits unavailable apps", async () => {
     const { deps, actor } = fixture([
@@ -61,6 +64,47 @@ describe("onboarding connection suggestions", () => {
     ).toEqual([
       expect.objectContaining({ connectorId: "pipedream", provider: "slack", name: "Slack" }),
     ]);
+  });
+});
+
+describe("promptFocus", () => {
+  function focusFixture(options: { introRun?: boolean; blocks?: unknown[] } = {}) {
+    const { deps, actor, tx } = fixture([]);
+    tx.message.findMany = vi.fn(async () =>
+      options.blocks ? [{ role: "bot", blocks: options.blocks }] : [],
+    ) as never;
+    const run = {
+      findFirst: vi.fn(async () => (options.introRun ? { id: "intro" } : null)),
+    };
+    Object.assign(tx, { run, agentImport: { findFirst: vi.fn(async () => null) } });
+    return { deps, actor, run };
+  }
+
+  it("posts the fixed focus card when the bot has no creation intro", async () => {
+    const { deps, actor } = focusFixture();
+    await promptFocus(deps, actor, "bot");
+    expect(posted.flatMap((message) => message.blocks)).toContainEqual(
+      expect.objectContaining({ kind: "choice" }),
+    );
+  });
+
+  it("leaves the question to a bot whose creation intro is queued or running", async () => {
+    const { deps, actor, run } = focusFixture({ introRun: true });
+    await promptFocus(deps, actor, "bot");
+    expect(posted).toEqual([]);
+    expect(run.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ threadId: "thread", trigger: "created" }),
+      }),
+    );
+  });
+
+  it("does not post over a question the bot already asked", async () => {
+    const { deps, actor } = focusFixture({
+      blocks: [{ kind: "ask", text: "What do you want me for?", status: "answered" }],
+    });
+    await promptFocus(deps, actor, "bot");
+    expect(posted).toEqual([]);
   });
 });
 

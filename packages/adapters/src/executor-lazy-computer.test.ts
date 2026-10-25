@@ -38,6 +38,9 @@ async function runRoutine(
     copyFailureOnce?: boolean;
     parallel?: boolean;
     priorSetupFailures?: number;
+    exportError?: Error;
+    setupError?: Error;
+    onRunStarted?: () => void;
   } = {},
 ) {
   const attachment: Extract<MessageBlock, { kind: "file" | "image" }> = {
@@ -168,7 +171,6 @@ async function runRoutine(
     spaceModelPreference: { findFirst: vi.fn(async () => null) },
     secret: { findFirst: vi.fn(async () => null) },
     userModelCredential: { findFirst: vi.fn(async () => null) },
-    spaceBackupModel: { findMany: vi.fn(async () => []) },
     deploymentSettings: {
       findUnique: vi.fn(async () => ({
         defaultModelProvider: "openrouter",
@@ -208,9 +210,10 @@ async function runRoutine(
     listFiles: vi.fn(async () => [{ path: "notes.txt", kind: "file", size: 4 }]),
     writeFile: vi.fn(async () => undefined),
     releaseScreen: vi.fn(async () => undefined),
-    async *exportWorkspace() {
+    exportWorkspace: vi.fn(async function* () {
+      if (options.exportError) throw options.exportError;
       yield* [];
-    },
+    }),
   };
   if (options.copyFailureOnce)
     sandbox.writeFile.mockRejectedValueOnce(new Error("temporary copy failure"));
@@ -223,7 +226,12 @@ async function runRoutine(
     sandbox,
     home: { commit: vi.fn(async () => "fixture-revision") },
     memory: { read: async () => ({ documents: [] }) },
-    memoryProviders: { resolve: async () => null },
+    memoryProviders: {
+      resolve: async () => {
+        if (options.setupError) throw options.setupError;
+        return null;
+      },
+    },
     artifacts: { get: vi.fn(async () => new Uint8Array([1, 2, 3, 4])) },
     events: {
       append: vi.fn(async () => undefined),
@@ -238,7 +246,16 @@ async function runRoutine(
     secrets: [],
   } as unknown as Parameters<typeof createRunExecutor>[0]);
 
-  await executor.continueRun(run.id, "worker-1");
+  await executor.continueRun(
+    run.id,
+    "worker-1",
+    options.onRunStarted
+      ? () => {
+          expect(run.status).toBe("running");
+          options.onRunStarted!();
+        }
+      : undefined,
+  );
   const sleepJobs = enqueue.mock.calls
     .map((call) => (call as unknown[])[0] as { name: string })
     .filter((job) => job.name === "computer.sleep");
@@ -251,6 +268,7 @@ async function runRoutine(
     runtimeRun,
     steeringInputs,
     prisma,
+    run,
   };
 }
 
@@ -267,6 +285,41 @@ afterEach(() => {
 });
 
 describe("run computer provisioning", () => {
+  it("retries handed-off setup failures with durable attempt accounting and backoff", async () => {
+    const onRunStarted = vi.fn();
+    const { run, enqueue, runtimeRun, prisma } = await runRoutine([], {
+      setupError: new Error("fixture setup outage"),
+      onRunStarted,
+    });
+    expect(onRunStarted).toHaveBeenCalledExactlyOnceWith();
+    expect(runtimeRun).not.toHaveBeenCalled();
+    expect(run.status).toBe("queued");
+    expect(prisma.attempt.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "setup_failed" }),
+      }),
+    );
+    expect(enqueue).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        name: "run.continue",
+        payload: { runId: run.id },
+        availableAt: expect.any(Date),
+      }),
+    );
+  });
+
+  it("retains the setup-failure limit after handing off a run", async () => {
+    const onRunStarted = vi.fn();
+    const { enqueue, finalizeRun } = await runRoutine([], {
+      setupError: new Error("fixture setup outage"),
+      onRunStarted,
+      priorSetupFailures: 7,
+    });
+    expect(onRunStarted).toHaveBeenCalledExactlyOnceWith();
+    expect(finalizeRun).toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed" }));
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
   it("never starts the computer for a run that does not use it", async () => {
     const { finalizeRun, sandbox, sleepJobs } = await runRoutine([]);
 
@@ -422,10 +475,33 @@ describe("run computer provisioning", () => {
     expect(sandbox.releaseScreen).toHaveBeenCalledWith(COMPUTER, expect.anything());
   });
 
+  it("completes the run when its closing workspace checkpoint fails", async () => {
+    const { finalizeRun, sandbox } = await runRoutine(
+      [{ name: "list_files", args: { path: "" } }],
+      {
+        attachments: "file",
+        exportError: new Error("Boat API request failed (HTTP 502, sandbox_direct_failed)"),
+      },
+    );
+
+    expect(sandbox.exportWorkspace).toHaveBeenCalled();
+    expect(finalizeRun).toHaveBeenCalledWith(expect.objectContaining({ outcome: "completed" }));
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({ level: "warn", message: "computer.checkpoint_deferred" }),
+    );
+  });
+
   it("starts the computer before handing its screen to the user", async () => {
     await runRoutine([], { takeover: true });
 
     expect(provisionComputer).toHaveBeenCalledOnce();
+  });
+
+  it("restarts the idle timer when it asks the user to take over", async () => {
+    const { sleepJobs } = await runRoutine([], { takeover: true });
+
+    // One from starting the computer, one from the takeover request.
+    expect(sleepJobs).toHaveLength(2);
   });
 
   it("keeps setup-failure retry semantics when the computer cannot start", async () => {

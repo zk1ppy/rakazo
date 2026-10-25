@@ -95,7 +95,7 @@ export function SidebarFooter({
   return (
     <div
       data-testid="sidebar-footer"
-      className={`flex shrink-0 items-center gap-2 bg-transparent py-3 ${mini ? "flex-col px-1" : "px-2.5"}`}
+      className={`flex shrink-0 items-center gap-2 bg-transparent ${mini ? "flex-col px-1 py-2" : "px-2.5 py-3"}`}
     >
       <Popover open={open} onOpenChange={onOpenChange}>
         <PopoverTrigger
@@ -218,7 +218,7 @@ export function SidebarFooter({
           variant="outline"
           ref={pillRef}
           onClick={onIntegrations}
-          className="h-9 min-w-0 flex-1 justify-between rounded-full bg-sidebar-accent hover:border-foreground/30 hover:bg-sidebar-accent dark:hover:bg-sidebar-accent"
+          className="h-9 min-w-0 flex-1 justify-between bg-sidebar-accent hover:border-foreground/30 hover:bg-sidebar-accent dark:hover:bg-sidebar-accent"
         >
           <span ref={labelRef} className="min-w-0 truncate">
             <Trans>Connect apps</Trans>

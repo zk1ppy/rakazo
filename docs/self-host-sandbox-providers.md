@@ -39,6 +39,26 @@ Missing supervisor token is a **setup failure**: do not treat `sandbox: "none"` 
 
 Signup and local Docker computers work **without** an E2B (or other remote) account.
 
+### Bot browser
+
+The published computer image uses Chromium. To use Brave instead, build the image with
+`BROWSER=brave` and point Compose at it:
+
+```bash
+docker build --build-arg BROWSER=brave -t rakazo-computer-brave infra/sandboxes/computer
+```
+
+```env
+RAKAZO_COMPUTER_IMAGE=rakazo-computer-brave
+RAKAZO_COMPUTER_IMAGE_TAG=latest
+```
+
+The image holds one browser, and `rakazo-browser` launches whichever is installed. A locally built
+image is not on a registry, so start the stack with `bash install-images.sh --pull-never` after
+pulling the other images once. Brave's Rewards, Wallet, Leo, VPN and News are disabled by managed
+policy. Browser identity is only one input to bot-check challenges; the host's IP reputation usually
+matters more.
+
 ## `none`
 
 Runs API/web without provisioning bot computers.
@@ -64,7 +84,26 @@ a computer suspends after `SANDBOX_IDLE_MS` idle. On providers that bill while r
 a run is executing on it or a user is in control of its screen. `0` turns the cap off.
 That exception lifts only the uptime cap; idle suspension after `SANDBOX_IDLE_MS` still
 applies once nothing holds the computer.
-Docker and this-Mac computers are never capped. The next use resumes it.
+Docker and this-Mac computers are never capped. The next use resumes it. Asking for
+takeover restarts the idle timer, and on providers that do not bill while running the run
+also holds the computer for 30 minutes after asking, so the user can answer the push on
+the same open page.
+
+### Linux background-work inspection
+
+The fallback background-work probe and cancellation commands require Bash,
+Python 3.7 or newer, and a readable/searchable `/proc` root. Both supplied images
+install `python3` explicitly in `infra/sandboxes/computer/Dockerfile` and
+`infra/sandboxes/desktop/Dockerfile`. Custom and remote images must provide this
+capability. The scanner itself never installs Python.
+
+The scanner reads marker file descriptors regardless of the holder's UID,
+including duplicated, inherited, and deleted-but-open markers. Individual
+entries that disappear or deny access are skipped because their links cannot
+be observed. A failed root traversal, unexpected filesystem error, or missing
+Python capability makes inspection unknown. Such failures do not authorize marker
+cleanup or cancellation signals from partial scanner output. Cancellation
+rechecks each selected PID's marker descriptors before signaling it.
 
 ### E2B computer template
 
@@ -79,6 +118,22 @@ E2B_API_KEY=<deployment key> pnpm sandbox:e2b-template
 
 Until it exists, new computers use the stock desktop template. Existing computers keep
 the size they were created with until they are replaced.
+
+### Boat computer snapshot
+
+Boat computers start from a named snapshot, `rakazo-computer-<hash>`, that already has the
+desktop tools installed. The hash follows the setup in `packages/adapters/src/boat-sandbox.ts`,
+so changing it produces a new name and existing computers keep the one they started from.
+
+No setup is needed: when the snapshot for the current setup is missing, the API or worker
+logs `sandbox.base_image` with `outcome: "missing"`, builds it once in the background from a
+fresh sandbox with no account environment and no bot data, and deletes the build sandbox.
+Until it is ready, new computers install the tools themselves. To build it ahead of the
+first computer, in the Boat account that owns `BOAT_API_KEY`:
+
+```bash
+BOAT_API_KEY=<deployment key> pnpm sandbox:boat-snapshot
+```
 
 ## Verify a provider change
 

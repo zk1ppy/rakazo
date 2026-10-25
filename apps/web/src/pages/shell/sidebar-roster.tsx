@@ -2,7 +2,6 @@ import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
 import { Trans, useLingui } from "@lingui/react/macro";
 import type { Bot, BotSection, Group, Me, Space, ThreadSnapshot } from "@rakazo/contracts";
-import { nestRosterByParent } from "@rakazo/core";
 import {
   BotAvatar,
   Button,
@@ -31,7 +30,6 @@ import type { sidebarGroupsForSpaces } from "./space-sidebar";
 export function SidebarRoster({
   sidebarGroups,
   collapsedSidebarSections,
-  collapsedRosterParents,
   bootstrapMe,
   botSections,
   spaces,
@@ -53,7 +51,6 @@ export function SidebarRoster({
   displayedRunError,
   draggedBotId,
   setDraggedBotId,
-  toggleRosterParent,
   botMenu,
   setBotMenu,
   reorderRosterBot,
@@ -65,14 +62,13 @@ export function SidebarRoster({
     typeof sidebarGroupsForSpaces<Space["bots"][number], Space["groups"][number]>
   >;
   collapsedSidebarSections: ReadonlySet<string>;
-  collapsedRosterParents: ReadonlySet<string>;
   bootstrapMe: Pick<Me, "spaceId"> | null | undefined;
   botSections: BotSection[];
   spaces: Space[];
   rosterDropKey: string | null;
   setRosterDropKey: (key: string | null) => void;
-  rosterDropAction: (target: RosterDropTarget, sameParent: boolean) => RosterDropAction | null;
-  applyRosterDrop: (target: RosterDropTarget, sameParent: boolean, botIds: string[]) => void;
+  rosterDropAction: (target: RosterDropTarget, sameList: boolean) => RosterDropAction | null;
+  applyRosterDrop: (target: RosterDropTarget, sameList: boolean, botIds: string[]) => void;
   openSpaceChat: (spaceId: string, path: string) => void;
   spaceMenuAnchor: RefObject<HTMLElement | null>;
   setSpaceMenu: (menu: { id: string; position: { x: number; y: number } }) => void;
@@ -87,7 +83,6 @@ export function SidebarRoster({
   displayedRunError: string | null;
   draggedBotId: string | null;
   setDraggedBotId: (id: string | null) => void;
-  toggleRosterParent: (id: string) => void;
   botMenu: { kind: "bot" | "group"; id: string } | null;
   setBotMenu: Dispatch<SetStateAction<{ kind: "bot" | "group"; id: string } | null>>;
   reorderRosterBot: (sourceId: string, targetId: string, groupBotIds: string[]) => void;
@@ -103,19 +98,6 @@ export function SidebarRoster({
         const groupBotIds = group.bots.flatMap((item) =>
           item.kind === "bot" ? [item.chat.id] : [],
         );
-        const nestedRows = nestRosterByParent(
-          group.bots,
-          mini ? new Set() : collapsedRosterParents,
-        );
-        const treeActive = nestedRows.some((row) => row.depth > 0 || row.hasChildren);
-        const rosterParent = new Map(
-          nestedRows.map((row) => [row.item.chat.id, row.parentId] as const),
-        );
-        // Reorder among visible siblings so keyboard and drag moves match the tree.
-        const siblingBotIds = (parentId: string | null) =>
-          nestedRows.flatMap((row) =>
-            row.item.kind === "bot" && row.parentId === parentId ? [row.item.chat.id] : [],
-          );
         const hasSpaceActions = group.canOpenSpaceSettings;
         const headerDropTarget: RosterDropTarget | null =
           group.spaceId === bootstrapMe?.spaceId &&
@@ -268,11 +250,8 @@ export function SidebarRoster({
                 ) : null}
               </div>
             ) : null}
-            <CollapsibleContent
-              className={`flex flex-col gap-0.5 ${mini && groupIndex > 0 ? "mt-2 border-t border-sidebar-border pt-2" : ""}`}
-            >
-              {nestedRows.map(({ item, depth, hasChildren, parentId }) => {
-                const parentCollapsed = hasChildren && collapsedRosterParents.has(item.chat.id);
+            <CollapsibleContent className="flex flex-col gap-0.5">
+              {group.bots.map((item) => {
                 const selected =
                   (item.kind === "bot" && !inGroup && active?.id === item.chat.id) ||
                   (item.kind === "group" && inGroup && activeGroup?.id === item.chat.id);
@@ -308,17 +287,15 @@ export function SidebarRoster({
                             memberIds: item.chat.members.map((member) => member.botId),
                           },
                         };
-                const rowSameParent =
-                  Boolean(draggedBotId) &&
-                  groupBotIds.includes(draggedBotId ?? "") &&
-                  rosterParent.get(draggedBotId ?? "") === parentId;
+                const rowSameList =
+                  Boolean(draggedBotId) && groupBotIds.includes(draggedBotId ?? "");
                 const rowDropKey = `row:${item.kind}:${item.chat.id}`;
                 const avatar =
                   item.kind === "bot" ? (
                     <BotAvatar
                       color={item.chat.color}
                       identity={item.chat.id}
-                      size={mini ? 32 : compact ? 28 : 38}
+                      size={mini ? 40 : compact ? 28 : 38}
                       status={item.chat.status}
                     />
                   ) : (
@@ -328,7 +305,7 @@ export function SidebarRoster({
                           ? (activeSnapshot.members ?? item.chat.members)
                           : item.chat.members
                       }
-                      size={mini ? 32 : compact ? 28 : 38}
+                      size={mini ? 40 : compact ? 28 : 38}
                     />
                   );
                 const chatTrigger = (
@@ -338,7 +315,6 @@ export function SidebarRoster({
                     data-roster-bot-id={item.kind === "bot" ? item.chat.id : undefined}
                     data-roster-unread={item.chat.unread ? "true" : undefined}
                     data-roster-error={rowError && (compact || mini) ? "true" : undefined}
-                    data-roster-depth={item.kind === "bot" && treeActive ? depth : undefined}
                     aria-current={selected ? "page" : undefined}
                     aria-label={mini ? item.chat.name : undefined}
                     aria-describedby={
@@ -363,7 +339,7 @@ export function SidebarRoster({
                       event.dataTransfer.setData("text/plain", item.chat.id);
                     }}
                     onDragOver={(event) => {
-                      if (!rowDropTarget || !rosterDropAction(rowDropTarget, rowSameParent)) return;
+                      if (!rowDropTarget || !rosterDropAction(rowDropTarget, rowSameList)) return;
                       event.preventDefault();
                       event.dataTransfer.dropEffect = "move";
                       if (rosterDropKey !== rowDropKey) setRosterDropKey(rowDropKey);
@@ -374,7 +350,7 @@ export function SidebarRoster({
                     onDrop={(event) => {
                       if (!rowDropTarget) return;
                       event.preventDefault();
-                      applyRosterDrop(rowDropTarget, rowSameParent, groupBotIds);
+                      applyRosterDrop(rowDropTarget, rowSameList, groupBotIds);
                     }}
                     onDragEnd={() => {
                       setDraggedBotId(null);
@@ -388,7 +364,7 @@ export function SidebarRoster({
                         (event.key !== "ArrowUp" && event.key !== "ArrowDown")
                       )
                         return;
-                      const siblings = siblingBotIds(parentId);
+                      const siblings = groupBotIds;
                       const index = siblings.indexOf(item.chat.id);
                       const target = siblings[index + (event.key === "ArrowUp" ? -1 : 1)];
                       if (!target) return;
@@ -414,13 +390,8 @@ export function SidebarRoster({
                     } ${
                       selected || rosterDropKey === rowDropKey
                         ? "bg-sidebar-accent"
-                        : "group-hover/row:bg-sidebar-accent"
+                        : "group-hover/row:bg-accent"
                     }`}
-                    style={
-                      treeActive && !mini
-                        ? { paddingInlineStart: `${24 + depth * 14}px` }
-                        : undefined
-                    }
                   >
                     {mini ? (
                       <span className="relative shrink-0">
@@ -465,7 +436,7 @@ export function SidebarRoster({
                             <span
                               dir="auto"
                               data-roster-bot-name={item.kind === "bot" ? "" : undefined}
-                              className={`min-w-0 truncate text-[14px] text-foreground ${
+                              className={`min-w-0 truncate text-body2 text-foreground ${
                                 item.chat.unread ? "font-semibold" : "font-medium"
                               }`}
                             >
@@ -479,7 +450,10 @@ export function SidebarRoster({
                           </div>
                           <div className="flex shrink-0 items-center gap-1.5">
                             {!compact ? (
-                              <span className="text-[11.5px] text-muted-foreground/60 tabular-nums">
+                              <span
+                                data-roster-time
+                                className="text-label text-faint-foreground tabular-nums"
+                              >
                                 {formatRosterTime(item.chat.updatedAt)}
                               </span>
                             ) : null}
@@ -526,12 +500,12 @@ export function SidebarRoster({
                           <div
                             dir="auto"
                             data-roster-preview={!workStatusLabel ? "true" : undefined}
-                            className={`mt-1 line-clamp-2 text-[12.5px] break-words whitespace-normal ${
+                            className={`mt-1 line-clamp-2 text-label break-words whitespace-normal ${
                               workStatusLabel
                                 ? "font-semibold text-status-working"
                                 : item.chat.unread
                                   ? "font-medium text-foreground/75"
-                                  : "text-muted-foreground/60"
+                                  : "text-muted-foreground"
                             }`}
                           >
                             {rosterLine}
@@ -549,33 +523,6 @@ export function SidebarRoster({
                       opacity: item.kind === "bot" && draggedBotId === item.chat.id ? 0.55 : 1,
                     }}
                   >
-                    {hasChildren && !mini ? (
-                      <span
-                        className="absolute inset-y-0 z-10 flex w-3.5 items-center justify-center"
-                        style={{ insetInlineStart: `${10 + depth * 14}px` }}
-                      >
-                        <button
-                          type="button"
-                          aria-expanded={!parentCollapsed}
-                          aria-label={
-                            parentCollapsed
-                              ? t`Expand ${item.chat.name}`
-                              : t`Collapse ${item.chat.name}`
-                          }
-                          className="inline-flex size-3.5 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
-                          onClick={() => toggleRosterParent(item.chat.id)}
-                        >
-                          <ChevronDown
-                            size={12}
-                            strokeWidth={2}
-                            className={`transition-transform ${
-                              parentCollapsed ? "-rotate-90" : ""
-                            }`}
-                            aria-hidden="true"
-                          />
-                        </button>
-                      </span>
-                    ) : null}
                     <ContextMenu
                       disabled={item.chat.spaceId !== bootstrapMe?.spaceId}
                       open={botMenu?.kind === item.kind && botMenu.id === item.chat.id}
@@ -592,6 +539,7 @@ export function SidebarRoster({
                     >
                       {mini ? (
                         <IconTooltip
+                          side="inline-end"
                           label={
                             compactStatusLabel
                               ? `${item.chat.name}: ${compactStatusLabel}`

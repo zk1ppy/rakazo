@@ -7,7 +7,7 @@ import { UI_LOCALES } from "./ui-locale";
 
 describe("lingui catalogs", () => {
   it("translates sign-out failures in every supported language", () => {
-    for (const locale of ["de", "es", "fr", "hi", "ko", "nl", "pt-BR", "ru", "tr", "zh-CN"]) {
+    for (const locale of ["de", "es", "fr", "hi", "ja", "ko", "nl", "pt-BR", "ru", "tr", "zh-CN"]) {
       const catalog = readFileSync(
         fileURLToPath(new URL(`../locales/${locale}/messages.po`, import.meta.url)),
         "utf8",
@@ -25,6 +25,9 @@ describe("lingui catalogs", () => {
   it("localizes provider error guidance and retains its placeholders", () => {
     const messages = [
       ...Object.values(RUN_ERROR_LIMIT_MESSAGES).flatMap(Object.values),
+      "{summary} Your backup models also failed.",
+      "{summary} No backup model was usable for this request.",
+      "{summary} Backup models failed or were unavailable for this request.",
       "Your OpenRouter",
       "Your OpenAI",
       "Your Anthropic",
@@ -35,9 +38,25 @@ describe("lingui catalogs", () => {
       "{provider} rejected the API key. Check your connection settings.",
       "{provider} could not find the requested model.",
       "{provider} took too long to respond. Try again.",
+      "{provider} is overloaded right now. Try again in a moment.",
+      "{provider} couldn't be reached. Check that it's running.",
+      "This conversation is too long for the model. Retrying won't help. Start a new chat or shorten your message.",
       "Details",
     ];
-    for (const locale of ["de", "es", "fr", "he", "hi", "ko", "nl", "pt-BR", "ru", "tr", "zh-CN"]) {
+    for (const locale of [
+      "de",
+      "es",
+      "fr",
+      "he",
+      "hi",
+      "ja",
+      "ko",
+      "nl",
+      "pt-BR",
+      "ru",
+      "tr",
+      "zh-CN",
+    ]) {
       const catalog = readFileSync(
         fileURLToPath(new URL(`../locales/${locale}/messages.po`, import.meta.url)),
         "utf8",
@@ -59,6 +78,42 @@ describe("lingui catalogs", () => {
     }
   });
 
+  it("translates bot settings labels and retains placeholders in every locale", () => {
+    for (const locale of UI_LOCALES) {
+      const catalog = readFileSync(
+        fileURLToPath(new URL(`../locales/${locale}/messages.po`, import.meta.url)),
+        "utf8",
+      );
+      for (const message of [
+        "Advanced",
+        "Notifications",
+        "When it finishes or needs input",
+        "Model",
+        "Add a label",
+        "Add open work",
+        "Can edit and organise bots it creates",
+        "Disable a tool",
+        "Edit label",
+        "Edit name",
+        "Enable {0}",
+        "Encrypted and never shown again",
+        "How other bots see it",
+        "Model connections",
+        "Permissions",
+        "Skills",
+      ]) {
+        const entry = catalog
+          .split("\n\n")
+          .find((block) => block.includes(`msgid ${JSON.stringify(message)}\n`));
+        expect(entry, `${locale}: ${message}`).toMatch(/msgstr ".+"/);
+        const translated = entry?.split("msgstr ")[1] ?? "";
+        expect(translated.match(/\{\w+\}/g) ?? [], `${locale}: ${message}`).toEqual(
+          message.match(/\{\w+\}/g) ?? [],
+        );
+      }
+    }
+  });
+
   beforeEach(() => {
     i18n.load("en", {});
     i18n.activate("en");
@@ -69,7 +124,7 @@ describe("lingui catalogs", () => {
       "Command variable",
       "Available to this bot's shell commands as {commandVariable}",
       "{commandVariable} is reserved and cannot be used as a command variable. Choose another name.",
-      "Values are encrypted and never shown again.",
+      "Encrypted and never shown again",
     ];
     for (const locale of [
       "en",
@@ -78,6 +133,7 @@ describe("lingui catalogs", () => {
       "fr",
       "he",
       "hi",
+      "ja",
       "ko",
       "nl",
       "pt-BR",
@@ -102,7 +158,7 @@ describe("lingui catalogs", () => {
   });
 
   it("translates model connection preflight feedback in every non-English catalog", () => {
-    const locales = ["de", "es", "fr", "he", "hi", "ko", "nl", "pt-BR", "ru", "tr", "zh-CN"];
+    const locales = ["de", "es", "fr", "he", "hi", "ja", "ko", "nl", "pt-BR", "ru", "tr", "zh-CN"];
     const messages = [
       "A subscription credential is stored securely.",
       'Model "{modelId}" was not listed.',

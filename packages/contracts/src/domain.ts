@@ -3,9 +3,10 @@ import { AGENT_SECRET_NAME_PATTERN } from "./agent-secret-name.js";
 import { BotAvatarValueSchema } from "./bot-avatar.js";
 import { DisabledBuiltinToolsSchema } from "./builtin-tools.js";
 import {
-  CLOUDFLARE_AI_GATEWAY_CONFIG_MESSAGE,
   cloudflareGatewayRoutingId,
+  cloudflareModelConfigMessage,
   isCloudflareAiGatewayProvider,
+  isCloudflareModelProvider,
 } from "./cloudflare-ai-gateway.js";
 import { ThreadMessageSchema } from "./events.js";
 import { Id, MemoryScope, RunStatus, SandboxKind } from "./ids.js";
@@ -16,6 +17,7 @@ import {
   McpTransportSchema,
   parseMcpOAuthAuthorizationParams,
 } from "./mcp.js";
+import { ModelHeadersSchema } from "./model-headers.js";
 import { RoutineWatchSchema, RoutineWatchStateSchema } from "./routine-watch.js";
 import { RunTriggerSchema } from "./runs.js";
 
@@ -25,6 +27,10 @@ export type ComputerMode = z.infer<typeof ComputerModeSchema>;
 export const MemoryScopeSchema = z.enum(["isolated", "shared"]);
 export type MemoryScopeValue = z.infer<typeof MemoryScopeSchema>;
 
+/**
+ * Deprecated: bots have one avatar style. Kept so app versions that still send or read it
+ * keep working; the server ignores a sent style and always reports "organic".
+ */
 export const AvatarStyleSchema = z.enum(["robot", "organic"]);
 
 /** True for an IANA timezone this runtime can format in, such as "Pacific/Auckland". */
@@ -122,6 +128,7 @@ export const BotSchema = z.object({
   thinkingLevel: ThinkingLevelSchema.nullable(),
   teamChatAmbientEnabled: z.boolean(),
   teamChatRules: z.string(),
+  crossSpaceCommunication: z.boolean().optional(),
   fleetManagement: z.boolean().default(false),
   disabledBuiltinTools: z.array(z.string()).default([]),
   webhookConfigured: z.boolean(),
@@ -168,10 +175,11 @@ export function truncateReplyQuote(value: string): string {
 
 export const GROUP_MEMBER_MIN = 2;
 export const GROUP_MEMBER_MAX = 10;
+export const GROUP_NAME_MAX_LENGTH = 80;
 
 /** Preserve pick order and the group name limit without splitting a surrogate pair. */
 export function defaultGroupName(names: readonly string[]): string {
-  const value = names.join(", ").trim().slice(0, 80);
+  const value = names.join(", ").trim().slice(0, GROUP_NAME_MAX_LENGTH);
   const last = value.charCodeAt(value.length - 1);
   return (last >= 0xd800 && last <= 0xdbff ? value.slice(0, -1) : value).trim();
 }
@@ -199,14 +207,14 @@ const GroupBotIds = z
   .refine((ids) => new Set(ids).size === ids.length, { error: "botIds must be distinct" });
 
 export const CreateGroupInput = z.object({
-  name: z.string().trim().min(1).max(80),
+  name: z.string().trim().min(1).max(GROUP_NAME_MAX_LENGTH),
   botIds: GroupBotIds,
 });
 export type CreateGroupInput = z.infer<typeof CreateGroupInput>;
 
 export const UpdateGroupInput = z.object({
   groupId: Id,
-  name: z.string().trim().min(1).max(80).optional(),
+  name: z.string().trim().min(1).max(GROUP_NAME_MAX_LENGTH).optional(),
   botIds: GroupBotIds.optional(),
   /** Reject a membership replacement when another client changed the active roster. */
   expectedBotIds: z.array(Id).max(GROUP_MEMBER_MAX).optional(),
@@ -343,6 +351,8 @@ export const SpaceSchema = z.object({
   canRename: z.boolean().optional(),
   /** True only when the current member may delete this non-default space. */
   canDelete: z.boolean().optional(),
+  /** Every bot deleting the space removes, archived and other members' included. */
+  botCount: z.number().int().nonnegative().optional(),
   bots: z.array(SpaceBotSchema),
   groups: z.array(SpaceGroupSchema),
   externalConversations: z.array(ExternalConversationSchema),
@@ -376,6 +386,8 @@ export const CreateBotInput = z.object({
   notifyOnFinish: z.boolean().default(true),
   fleetManagement: z.boolean().optional(),
   color: BotAvatarValueSchema.optional(),
+  /** Organic body family (0-9) to draw the new bot with; the server picks an id that hashes to it. */
+  avatarFamily: z.number().int().min(0).max(9).optional(),
   computerMode: ComputerModeSchema.default("team"),
   /** Idempotency key within a space (unique with spaceId). */
   spawnKey: z.string().trim().min(1).max(120).optional(),
@@ -415,6 +427,7 @@ export const UpdateBotInput = z
     thinkingLevel: ThinkingLevelSchema.nullable().optional(),
     teamChatAmbientEnabled: z.boolean().optional(),
     teamChatRules: z.string().max(TEAM_CHAT_RULES_MAX_LENGTH).optional(),
+    crossSpaceCommunication: z.boolean().optional(),
     fleetManagement: z.boolean().optional(),
     disabledBuiltinTools: DisabledBuiltinToolsSchema.optional(),
   })
@@ -550,6 +563,7 @@ export const CreateRoutineInput = z
       });
     }
   });
+export type CreateRoutineInput = z.infer<typeof CreateRoutineInput>;
 
 export const ScratchpadItemStatusSchema = z.enum(["open", "parked", "done"]);
 export type ScratchpadItemStatus = z.infer<typeof ScratchpadItemStatusSchema>;
@@ -745,6 +759,8 @@ export type ActionApprovalRule = z.infer<typeof ActionApprovalRuleSchema>;
 export const ActionAutoReviewSettingsSchema = z.object({
   enabled: z.boolean(),
   checkerAvailable: z.boolean(),
+  /** Run every action that would ask, except the ones that always need a person. */
+  skipApprovals: z.boolean(),
 });
 export type ActionAutoReviewSettings = z.infer<typeof ActionAutoReviewSettingsSchema>;
 
@@ -967,6 +983,22 @@ export const UsageRecordSchema = z.object({
   createdAt: z.string(),
 });
 
+/** Token and cost totals are null when any counted call lacks that figure. */
+const UsageTotalsSchema = z.object({
+  inputTokens: z.number().nullable(),
+  outputTokens: z.number().nullable(),
+  totalTokens: z.number().nullable().optional(),
+  costUsd: z.number().nullable().optional(),
+  modelCalls: z.number().optional(),
+});
+export const UsageSummarySchema = UsageTotalsSchema.extend({
+  runs: z.number(),
+  models: z
+    .array(UsageTotalsSchema.required().extend({ provider: z.string(), model: z.string() }))
+    .optional(),
+});
+export type UsageSummary = z.infer<typeof UsageSummarySchema>;
+
 export const COMPUTER_UPDATE_STAGES = [
   "preparing",
   "saving",
@@ -1174,6 +1206,7 @@ export const ModelCredentialSchema = z.object({
   label: z.string(),
   hasKey: z.boolean(),
   isDefault: z.boolean(),
+  headerNames: z.array(z.string()).optional(),
   baseUrl: z.string().optional(),
   accountId: z.string().optional(),
   gatewayId: z.string().optional(),
@@ -1198,27 +1231,41 @@ export const ModelBackupChoiceSchema = z.object({
   modelId: z.string().trim().min(1).max(512),
 });
 export type ModelBackupChoice = z.infer<typeof ModelBackupChoiceSchema>;
-export const ModelBackupListSchema = z
-  .array(ModelBackupChoiceSchema)
-  .max(MAX_MODEL_BACKUPS)
-  .superRefine((choices, ctx) => {
-    const seen = new Set<string>();
-    for (const [index, choice] of choices.entries()) {
-      const key = JSON.stringify([choice.provider, choice.modelId]);
-      if (seen.has(key)) {
-        ctx.addIssue({
-          code: "custom",
-          message: "Backup models must be unique",
-          path: [index],
-        });
+/** At most MAX_MODEL_BACKUPS choices, each model once. */
+export function modelChoiceListSchema<T extends z.ZodType<ModelBackupChoice>>(choice: T) {
+  return z
+    .array(choice)
+    .max(MAX_MODEL_BACKUPS)
+    .superRefine((choices, ctx) => {
+      const seen = new Set<string>();
+      for (const [index, choice] of choices.entries()) {
+        // The same model may run on two connections, so a pinned connection is part of it.
+        const credentialId = (choice as { credentialId?: string | null }).credentialId ?? null;
+        const key = JSON.stringify([choice.provider, choice.modelId, credentialId]);
+        if (seen.has(key)) {
+          ctx.addIssue({
+            code: "custom",
+            message: "Backup models must be unique",
+            path: [index],
+          });
+        }
+        seen.add(key);
       }
-      seen.add(key);
-    }
-  });
+    });
+}
+export const ModelBackupListSchema = modelChoiceListSchema(ModelBackupChoiceSchema);
 
 export const OPENAI_COMPATIBLE_PROVIDER_ID = "openai-compatible";
 
 export const MAX_ENABLED_MODEL_IDS = 500;
+
+/** An existing connection's id, null for a new one, or omitted for the provider's newest. */
+export const ModelConnectionTargetSchema = Id.nullable().optional();
+
+export const MAX_MODEL_CONNECTION_LABEL = 80;
+export const ModelConnectionLabelSchema = z.string().trim().min(1).max(MAX_MODEL_CONNECTION_LABEL);
+
+export const CONNECTION_LABEL_MAX_LENGTH = 80;
 
 export const ModelConnectInputSchema = z
   .object({
@@ -1227,12 +1274,20 @@ export const ModelConnectInputSchema = z
     apiKey: z.string().optional(),
     accountId: z.string().optional(),
     gatewayId: z.string().optional(),
+    headers: ModelHeadersSchema.optional(),
     baseUrl: z.string().optional(),
     label: z.string().optional(),
+    /**
+     * The connection this save updates; null adds another connection for the provider.
+     * Older apps omit it and update the provider's newest connection.
+     */
+    credentialId: ModelConnectionTargetSchema,
     modelId: z.string().optional(),
     reasoning: z.boolean().optional(),
     thinkingLevel: ThinkingLevelSchema.nullable().optional(),
     minReasoningEffort: MinReasoningEffortSchema.nullable().optional(),
+    /** False keeps the space's current default model; omitted means true. */
+    makeDefault: z.boolean().optional(),
     maxTokens: z.number().int().min(1).max(MAX_MODEL_MAX_TOKENS).nullable().optional(),
     supportsImages: z.boolean().optional(),
     maxImagesPerPrompt: z.number().int().min(1).max(1000).nullable().optional(),
@@ -1249,18 +1304,22 @@ export const ModelConnectInputSchema = z
         path: ["maxTokens"],
       });
     }
-    if (isCloudflareAiGatewayProvider(value.provider)) {
+    if (isCloudflareModelProvider(value.provider)) {
       if (value.accountId !== undefined && !cloudflareGatewayRoutingId(value.accountId)) {
         ctx.addIssue({
           code: "custom",
-          message: CLOUDFLARE_AI_GATEWAY_CONFIG_MESSAGE,
+          message: cloudflareModelConfigMessage(value.provider),
           path: ["accountId"],
         });
       }
-      if (value.gatewayId !== undefined && !cloudflareGatewayRoutingId(value.gatewayId)) {
+      if (
+        isCloudflareAiGatewayProvider(value.provider) &&
+        value.gatewayId !== undefined &&
+        !cloudflareGatewayRoutingId(value.gatewayId)
+      ) {
         ctx.addIssue({
           code: "custom",
-          message: CLOUDFLARE_AI_GATEWAY_CONFIG_MESSAGE,
+          message: cloudflareModelConfigMessage(value.provider),
           path: ["gatewayId"],
         });
       }
@@ -1332,6 +1391,14 @@ export const SpaceMemoryConfigSchema = z.object({
 export type SpaceMemoryConfig = z.infer<typeof SpaceMemoryConfigSchema>;
 
 export const ModelCatalogEntrySchema = z.object({
+  /** Omitted by older servers and ordinary chat connections. */
+  protocol: z.enum(["chat", "decisions"]).optional(),
+  /** Preselected for a new connection when there is no saved model choice. */
+  recommended: z.boolean().optional(),
+  /** The provider's connections that can run it, when not all of them can. */
+  credentialIds: z.array(z.string()).optional(),
+  /** Available through the deployment without a personal credential. */
+  managed: z.boolean().optional(),
   provider: z.string(),
   providerName: z.string().optional(),
   id: z.string(),
@@ -1515,6 +1582,7 @@ export const MeSchema = z.object({
   email: z.string().email(),
   name: z.string(),
   spaceId: Id,
+  /** Deprecated: app accounts never have server administrator privileges. Always false. */
   isDeploymentOwner: z.boolean(),
   needsModel: z.boolean(),
   defaultProvider: z.string().nullable(),
@@ -1532,12 +1600,46 @@ export const MeSchema = z.object({
    * Absent from servers that predate it.
    */
   timezone: z.string().nullable().optional(),
-  /** True when this deployment bills and the user is not the deployment owner. */
+  /** True when this deployment bills model usage. */
   billingEnabled: z.boolean(),
+  /** True until a user of a billing deployment answers or skips the signup survey. Absent from older servers. */
+  needsSignupSurvey: z.boolean().optional(),
 });
 export type Me = z.infer<typeof MeSchema>;
 
+export const MODEL_CREDIT_AMOUNTS = [1000, 2000, 5000, 10000, 20000, 50000] as const;
+export const DEFAULT_MONTHLY_CREDIT_AMOUNT = 2000;
+export const ModelCreditAmountSchema = z.union(
+  MODEL_CREDIT_AMOUNTS.map((amount) => z.literal(amount)),
+);
+
+export const SIGNUP_SURVEY_USES = ["personal", "work", "both"] as const;
+export const SIGNUP_SURVEY_TEAM_SIZES = ["1", "2-10", "11-50", "51-200", "201+"] as const;
+
+/** Team sizes as shown: en dashes for ranges, and the open-ended bucket as "200+". */
+export function signupSurveyTeamSizeLabel(size: (typeof SIGNUP_SURVEY_TEAM_SIZES)[number]): string {
+  return size === "201+" ? "200+" : size.replace("-", "–");
+}
+
+/** Every answer is optional; an empty survey records that the user skipped it. */
+export const SignupSurveySchema = z.object({
+  reason: z.string().trim().max(2000).optional(),
+  use: z.enum(SIGNUP_SURVEY_USES).optional(),
+  /** Only kept when the survey asks it; see signupSurveyAsksTeamSize. */
+  teamSize: z.enum(SIGNUP_SURVEY_TEAM_SIZES).optional(),
+  source: z.string().trim().max(500).optional(),
+});
+export type SignupSurvey = z.infer<typeof SignupSurveySchema>;
+
+export function signupSurveyAsksTeamSize(use: SignupSurvey["use"]): boolean {
+  return use === "work" || use === "both";
+}
+
 export const BillingStatusSchema = z.object({
+  funding: z.enum(["byok", "credits"]).nullable().optional(),
+  balanceUsd: z.number().optional(),
+  monthlyAmountCents: z.number().int().positive().nullable().optional(),
+  creditPurchasesEnabled: z.boolean().optional(),
   access: z.boolean(),
   /** Only organization owners start checkout or open the billing portal. */
   canManage: z.boolean(),

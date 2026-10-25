@@ -8,6 +8,46 @@ import {
   signupThroughForm,
 } from "./helpers";
 
+test("sign-up stays blank until session and sign-in options are ready", async ({
+  page,
+}, testInfo) => {
+  let releaseSession = () => {};
+  let releaseCapabilities = () => {};
+  const sessionReady = new Promise<void>((resolve) => {
+    releaseSession = resolve;
+  });
+  const capabilitiesReady = new Promise<void>((resolve) => {
+    releaseCapabilities = resolve;
+  });
+  await page.route("**/api/auth/get-session**", async (route) => {
+    await sessionReady;
+    await route.fulfill({ json: null });
+  });
+  await page.route("**/api/auth/capabilities", async (route) => {
+    await capabilitiesReady;
+    await route.fulfill({
+      json: { passwordAuth: true, sso: null, passwordReset: false, resetUrl: null },
+    });
+  });
+
+  await page.goto("/sign-up");
+  await expect(page.locator('[data-rakazo-app-state="session-pending"]')).toBeVisible();
+  await expect(page.locator("#root")).toHaveText("");
+  await captureScreenshot(page, testInfo, "signup-session-pending");
+
+  const capabilitiesRequested = page.waitForRequest("**/api/auth/capabilities");
+  releaseSession();
+  await capabilitiesRequested;
+  await expect(page.locator('[data-rakazo-app-state="ready"]')).toBeVisible();
+  await expect(page.locator("#root")).toHaveText("");
+  await captureScreenshot(page, testInfo, "signup-options-pending");
+
+  releaseCapabilities();
+  await expect(page.getByRole("heading", { name: "Create your Rakazo" })).toBeVisible();
+  await expect(page.getByLabel("Email", { exact: true })).toBeVisible();
+  await captureScreenshot(page, testInfo, "signup-ready");
+});
+
 for (const mode of ["sign-in", "sign-up", "sso-only"] as const) {
   test(`SSO is ${mode === "sso-only" ? "primary" : "secondary"} on ${mode}`, async ({
     page,
@@ -113,21 +153,6 @@ test("logout protects bot deep links and sign-in restores the session", async ({
   await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Usage", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
-  await expect(
-    page
-      .locator('[data-slot="popover-content"]')
-      .getByRole("button", { name: "Models", exact: true }),
-  ).toHaveCount(0);
-  await expect(
-    page
-      .locator('[data-slot="popover-content"]')
-      .getByRole("button", { name: "Memory", exact: true }),
-  ).toHaveCount(0);
-  await expect(
-    page
-      .locator('[data-slot="popover-content"]')
-      .getByRole("button", { name: "Voice", exact: true }),
-  ).toHaveCount(0);
   await captureScreenshot(page, testInfo, "36-account-menu");
 
   // A failed sign-out keeps the user in place and says so instead of silently bouncing back.
@@ -240,10 +265,7 @@ test("changes and recovers an email password", async ({ page }, testInfo) => {
   await completeOnboarding(page);
   await page.waitForURL(/\/app\/[^/]+$/);
 
-  await page.getByTestId("user-menu-trigger").click();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const settings = page.getByTestId("user-settings");
-  await expect(settings).toBeVisible();
+  await page.getByTestId("sidebar-search-trigger").click();
   await expect(page.getByTestId("sidebar-search").locator("input")).toHaveAttribute(
     "autocomplete",
     "off",
@@ -252,6 +274,14 @@ test("changes and recovers an email password", async ({ page }, testInfo) => {
     "name",
     "sidebar-search",
   );
+
+  await page.getByTestId("user-menu-trigger").click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.getByTestId("user-settings");
+  await expect(settings).toBeVisible();
+  await expect(settings.getByLabel("Current password")).toHaveCount(0);
+  await captureScreenshot(page, testInfo, "general-settings");
+  await settings.getByRole("button", { name: "Change password" }).click();
   await expect(settings.locator('input[name="username"]')).toHaveAttribute(
     "autocomplete",
     "username",
@@ -271,8 +301,9 @@ test("changes and recovers an email password", async ({ page }, testInfo) => {
   await settings.getByLabel("Current password").fill(originalPassword);
   await settings.getByLabel("New password").fill(changedPassword);
   await settings.getByLabel("Confirm password").fill(changedPassword);
-  await settings.getByRole("button", { name: "Change password" }).click();
+  await settings.getByRole("button", { name: "Save", exact: true }).click();
   await expect(settings.getByText("Password updated")).toBeVisible();
+  await expect(settings.getByLabel("Current password")).toHaveCount(0);
   await captureScreenshot(page, testInfo, "41-password-changed");
   await settings.getByRole("button", { name: "Close user settings" }).click();
 
@@ -290,19 +321,41 @@ test("changes and recovers an email password", async ({ page }, testInfo) => {
   await captureScreenshot(page, testInfo, "42-password-reset-requested");
 
   const emailApi = process.env.API_URL ?? "http://127.0.0.1:3110";
-  await expect
-    .poll(async () => {
-      const response = await page.request.get(`${emailApi}/__e2e/emails`);
-      return ((await response.json()) as unknown[]).length;
-    })
-    .toBeGreaterThan(0);
-  const messagesResponse = await page.request.get(`${emailApi}/__e2e/emails`);
-  expect(messagesResponse.headers()["cache-control"]).toBe("no-store");
-  const messages = (await messagesResponse.json()) as Array<{
-    text: string;
-  }>;
-  const resetUrl = messages.at(-1)?.text.match(/https?:\/\/\S+/)?.[0];
+  // Workers share one outbox, so read only this user's mail.
+  const sentToUser = async () => {
+    const response = await page.request.get(`${emailApi}/__e2e/emails`);
+    expect(response.headers()["cache-control"]).toBe("no-store");
+    const messages = (await response.json()) as Array<{
+      to: string;
+      subject: string;
+      text: string;
+      html: string;
+    }>;
+    return messages.filter(
+      (message) => message.to === email && message.subject === "Reset your Rakazo password",
+    );
+  };
+  await expect.poll(async () => (await sentToUser()).length).toBeGreaterThan(0);
+  const resetMessage = (await sentToUser()).at(-1)!;
+  const resetUrl = resetMessage.text.match(/https?:\/\/\S+/)?.[0];
   expect(resetUrl).toBeTruthy();
+
+  const emailPreview = await page.context().newPage();
+  try {
+    await emailPreview.setContent(resetMessage.html);
+    const resetLink = emailPreview.getByRole("link", { name: "Reset password", exact: true });
+    await expect(resetLink).toHaveAttribute("href", resetUrl!);
+    for (const width of [800, 390]) {
+      await emailPreview.setViewportSize({ width, height: 480 });
+      await expect(resetLink).toBeVisible();
+      expect(
+        await emailPreview.locator("body").evaluate((body) => body.scrollWidth),
+      ).toBeLessThanOrEqual(width);
+      await captureScreenshot(emailPreview, testInfo, `password-reset-email-${width}`);
+    }
+  } finally {
+    await emailPreview.close();
+  }
 
   await page.goto(resetUrl!);
   await expect(page.getByRole("heading", { name: "Choose a new password" })).toBeVisible();

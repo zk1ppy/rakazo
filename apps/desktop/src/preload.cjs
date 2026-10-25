@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld("rakazoDesktop", {
     set: (count) => ipcRenderer.invoke("desktop.badge.set", count),
   },
   computer: {
+    managesHostChoice: true,
     requestAccess: () => ipcRenderer.invoke("desktop.computer.requestAccess"),
     revokeAccess: () => ipcRenderer.invoke("desktop.computer.revokeAccess"),
     onConfigure: (listener) => {
@@ -14,9 +15,8 @@ contextBridge.exposeInMainWorld("rakazoDesktop", {
       return () => ipcRenderer.off("desktop.computer.configure", handler);
     },
   },
-  localSettings: {
-    request: (pathname, body) =>
-      ipcRenderer.invoke("desktop.localSettings.request", pathname, body),
+  passkeys: {
+    rpIds: () => ipcRenderer.invoke("desktop.passkeys.rpIds"),
   },
   window: {
     close: () => ipcRenderer.invoke("desktop.window.close"),

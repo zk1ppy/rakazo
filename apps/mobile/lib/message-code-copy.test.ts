@@ -5,15 +5,12 @@ import { describe, expect, it, vi } from "vitest";
 // Exercise MessageRow's actual menu without loading the screen's native dependencies.
 const source = readFileSync(new URL("../app/thread.tsx", import.meta.url), "utf8");
 const start = source.indexOf("    const messageText = selectableMobileMessageText(message);");
-const end = source.indexOf(
-  "  }, [message, actions, readOnly, onCall, colorScheme, t, locale]);",
-  start,
-);
+const end = source.indexOf("\n  }, [", start);
 const menuSource = ts.transpileModule(source.slice(start, end), {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText;
 
-function messageMenu(role: "bot" | "user", blocks: string[]) {
+function messageMenu(role: "bot" | "user", blocks: string[], markedUnread = false) {
   const text = blocks.map((code) => `\`\`\`\n${code}\n\`\`\``).join("\n\n");
   const setStringAsync = vi.fn(async (_text: string) => undefined);
   // Markdown extraction itself is covered by chat-ui's native parser tests.
@@ -22,6 +19,7 @@ function messageMenu(role: "bot" | "user", blocks: string[]) {
     message: { id: "message-1", role, blocks: [{ kind: "text", text }] },
     actions: {},
     readOnly: false,
+    markedUnread,
     onCall: false,
     colorScheme: "light",
     t: (value: string) => value,
@@ -29,6 +27,9 @@ function messageMenu(role: "bot" | "user", blocks: string[]) {
     blockText: () => text,
     quotableMessageSegments: () => [],
     canReactToThreadMessage: () => false,
+    canDoubleTapReact: () => false,
+    waitingForUser: false,
+    canMarkMessageUnread: () => true,
     markdownCodeBlocks,
     Clipboard: { setStringAsync },
     MESSAGE_REACTIONS: [],
@@ -65,4 +66,15 @@ describe("MessageRow code copy accessibility action", () => {
     expect(menu.setStringAsync).not.toHaveBeenCalled();
     if (role === "user") expect(menu.markdownCodeBlocks).not.toHaveBeenCalled();
   });
+});
+
+it("hides the completed unread action while preserving code copy", () => {
+  const available = messageMenu("bot", ["example"]);
+  expect(available.accessibilityActions).toContainEqual({
+    name: "unread",
+    label: "Mark as unread",
+  });
+  const completed = messageMenu("bot", ["example"], true);
+  expect(completed.accessibilityActions.some((action) => action.name === "unread")).toBe(false);
+  expect(completed.accessibilityActions).toContainEqual({ name: "copyCode", label: "Copy code" });
 });

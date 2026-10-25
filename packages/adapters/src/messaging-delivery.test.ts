@@ -51,6 +51,10 @@ function createFakeSurface(sendError?: Error) {
     }),
     platforms: () => [
       { provider: "sendblue", capabilities: { direct: true, groups: true, receipt: "typing" } },
+      {
+        provider: "telegram",
+        capabilities: { direct: true, groups: false, receipt: null, files: true },
+      },
     ],
     handleWebhook: () => null,
     onInbound: () => undefined,
@@ -69,6 +73,8 @@ function createDeps(overrides: {
   existingOutbox?: unknown;
   sendError?: Error;
   connectionStatus?: string | null;
+  blockedBot?: string;
+  artifacts?: Array<Record<string, unknown>>;
 }) {
   const rows = [...(overrides.outboundRows ?? [])] as Array<Record<string, unknown>>;
   const { messaging, sendToThread, openDirectThread } = createFakeSurface(overrides.sendError);
@@ -97,6 +103,14 @@ function createDeps(overrides: {
         return identityRow;
       }),
     },
+    artifact: {
+      findFirst: vi.fn(
+        async ({ where }: { where: { id: string; spaceId: string } }) =>
+          (overrides.artifacts ?? []).find(
+            (artifact) => artifact.id === where.id && artifact.spaceId === where.spaceId,
+          ) ?? null,
+      ),
+    },
     agentConnection: {
       findUnique: vi.fn(async () =>
         overrides.connectionStatus === null
@@ -106,10 +120,17 @@ function createDeps(overrides: {
             : { status: "pending" },
       ),
     },
-    $queryRaw: vi.fn(async () =>
-      overrides.connectionStatus === null
-        ? []
-        : [{ status: overrides.connectionStatus ?? "pending" }],
+    $queryRaw: vi.fn(async (query: TemplateStringsArray) =>
+      query.join("").includes("FROM bots")
+        ? ["bot-1", "bot-2"].map((id) => ({
+            id,
+            spaceId: id,
+            crossSpaceCommunication: id !== overrides.blockedBot,
+            archivedAt: null,
+          }))
+        : overrides.connectionStatus === null
+          ? []
+          : [{ status: overrides.connectionStatus ?? "pending" }],
     ),
     messagingOutbound: {
       findUnique: vi.fn(async ({ where }: { where?: { id?: string } } = {}) => {
@@ -119,7 +140,7 @@ function createDeps(overrides: {
       }),
       findMany: vi.fn(async ({ where }: { where?: { status?: string; OR?: unknown[] } } = {}) => {
         const now = Date.now();
-        return rows.filter((row) => {
+        const found = rows.filter((row) => {
           if (where?.status && row.status !== where.status) return false;
           if (!where?.OR) return row.status === "pending";
           const next = row.nextAttemptAt;
@@ -127,6 +148,10 @@ function createDeps(overrides: {
           const nextMs = next instanceof Date ? next.getTime() : new Date(String(next)).getTime();
           return nextMs <= now;
         });
+        // The drain reads in send order (orderBy createdAt).
+        return found.every((row) => row.createdAt instanceof Date)
+          ? found.sort((a, b) => (a.createdAt as Date).getTime() - (b.createdAt as Date).getTime())
+          : found;
       }),
       // Earlier undelivered part of the same reply (see hasUndeliveredEarlierPart).
       findFirst: vi.fn(
@@ -202,6 +227,7 @@ function createDeps(overrides: {
       notify: vi.fn(async () => undefined),
     } as unknown as MessagingDeliveryDeps["events"],
     jobs: { enqueue: vi.fn(async () => undefined) },
+    artifacts: { get: vi.fn(async (storageKey: string) => new TextEncoder().encode(storageKey)) },
     sendToThread,
     openDirectThread,
     rows,
@@ -604,6 +630,7 @@ function createChannelDeps(
     sourceHop?: number;
     transport?: string;
     peerBotName?: string | null;
+    blockedBot?: string;
     messages?: unknown[];
   } = {},
 ) {
@@ -769,6 +796,14 @@ function createChannelDeps(
       ),
     },
     user: { findUnique: vi.fn(async () => ({ id: "user-1", name: "Alice Owner" })) },
+    $queryRaw: vi.fn(async () =>
+      ["bot-1", "bot-2"].map((id) => ({
+        id,
+        spaceId: id,
+        crossSpaceCommunication: id !== overrides.blockedBot,
+        archivedAt: null,
+      })),
+    ),
     bot: {
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
         where.id === "bot-1"
@@ -779,13 +814,16 @@ function createChannelDeps(
       ),
     },
     thread: { findFirst: vi.fn(async () => ({ id: "thread-2" })) },
-    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(txMock)),
+    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
+      fn({ ...txMock, $queryRaw: prisma.$queryRaw }),
+    ),
   };
   return {
     prisma: prisma as unknown as PrismaClient & typeof prisma,
     messaging,
     events: { sendUserMessage, notify } as unknown as MessagingDeliveryDeps["events"],
     jobs: { enqueue },
+    artifacts: { get: vi.fn() },
     sendToThread,
     sendUserMessage,
     notify,
@@ -915,6 +953,7 @@ describe("deliverMessagingOutbound channel runs", () => {
         threadId: "thread-2",
         botId: "bot-2",
         trigger: "messaging",
+        crossSpaceSenderBotId: "bot-1",
         clientNonce: "messaging-peer:m-1:bot-2",
       }),
     );
@@ -1041,9 +1080,13 @@ describe("deliverMessagingOutbound conversation order", () => {
   const part = (letter: string) => letter.repeat(3000);
   const longReply = [part("a"), part("b"), part("c")].join("\n\n");
 
-  it("queues a long WhatsApp reply as one row per message-sized part", async () => {
+  it.each([
+    whatsapp,
+    { provider: "telegram", address: "123", dmThreadId: "telegram:123" },
+    { provider: "telegram-work", address: "123", dmThreadId: "telegram-work:123" },
+  ])("queues a long $provider reply as one row per message-sized part", async (identity) => {
     const deps = createDeps({
-      identity: whatsapp,
+      identity,
       messages: [{ id: "m-1", blocks: [{ kind: "text", text: longReply }] }],
     });
     await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
@@ -1150,4 +1193,264 @@ describe("deliverMessagingOutbound conversation order", () => {
     );
     expect(deps.rows.map((row) => row.status)).toEqual(["pending", "pending", "sent"]);
   });
+});
+
+describe("deliverMessagingOutbound attachments", () => {
+  const telegram = { provider: "telegram", address: "123", dmThreadId: "telegram:123" };
+  const artifacts = [
+    {
+      id: "art-1",
+      spaceId: "ws-1",
+      userId: "user-1",
+      name: "chart.png",
+      mimeType: "image/png",
+      storageKey: "key-1",
+    },
+    {
+      id: "art-2",
+      spaceId: "ws-1",
+      userId: "user-1",
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      storageKey: "key-2",
+    },
+  ];
+  const reply = {
+    id: "m-1",
+    blocks: [
+      { kind: "text", text: "Here you go" },
+      { kind: "image", artifactId: "art-1", mimeType: "image/png", name: "chart.png" },
+      {
+        kind: "file",
+        artifactId: "art-2",
+        mimeType: "application/pdf",
+        name: "report.pdf",
+        size: 5,
+      },
+    ],
+  };
+  const bytes = (storageKey: string) => new TextEncoder().encode(storageKey);
+  const sentBodies = (deps: ReturnType<typeof createDeps>) =>
+    deps.sendToThread.mock.calls.map((call) => {
+      const request = (call as unknown[])[0] as { body: string; attachment?: { name: string } };
+      return request.attachment ? `file:${request.attachment.name}` : request.body;
+    });
+
+  it("sends a reply's image and file after its text, one row each", async () => {
+    const deps = createDeps({ identity: telegram, messages: [reply], artifacts });
+    await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
+
+    expect(deps.sendToThread.mock.calls.map((call) => (call as unknown[])[0])).toEqual([
+      { threadId: "telegram:123", body: "Here you go" },
+      {
+        threadId: "telegram:123",
+        body: "",
+        attachment: { name: "chart.png", mimeType: "image/png", data: bytes("key-1") },
+      },
+      {
+        threadId: "telegram:123",
+        body: "",
+        attachment: { name: "report.pdf", mimeType: "application/pdf", data: bytes("key-2") },
+      },
+    ]);
+    expect(deps.rows.map((row) => [row.idempotencyKey, row.status])).toEqual([
+      ["msg:m-1", "sent"],
+      ["msg:m-1:file:art-1", "sent"],
+      ["msg:m-1:file:art-2", "sent"],
+    ]);
+    // Bytes come from the artifact store, read in the artifact's own Space.
+    expect(deps.artifacts.get).toHaveBeenCalledWith(
+      "key-1",
+      expect.objectContaining({ spaceId: "ws-1", userId: "user-1" }),
+    );
+  });
+
+  it("sends a reply that is only a file", async () => {
+    const deps = createDeps({
+      identity: telegram,
+      messages: [{ id: "m-1", blocks: [reply.blocks[1]] }],
+      artifacts,
+    });
+    await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
+
+    expect(sentBodies(deps)).toEqual(["file:chart.png"]);
+  });
+
+  it("keeps text-only delivery on platforms that cannot send files", async () => {
+    const deps = createDeps({ messages: [reply], artifacts });
+    await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
+
+    expect(deps.sendToThread).toHaveBeenCalledExactlyOnceWith(
+      { threadId: "sendblue:dm-1", body: "Here you go" },
+      context,
+    );
+    expect(deps.rows).toHaveLength(1);
+    expect(deps.artifacts.get).not.toHaveBeenCalled();
+  });
+
+  it("retries a failed file without sending the text again", async () => {
+    const deps = createDeps({ identity: telegram, messages: [reply], artifacts });
+    deps.sendToThread
+      .mockResolvedValueOnce({ handle: "text-1" })
+      .mockRejectedValueOnce(new Error("Telegram 500"));
+    await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
+
+    // The second file waits behind the failed first one.
+    expect(deps.rows.map((row) => row.status)).toEqual(["sent", "pending", "pending"]);
+
+    deps.rows[1]!.nextAttemptAt = new Date(Date.now() - 1);
+    await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
+
+    expect(sentBodies(deps)).toEqual([
+      "Here you go",
+      "file:chart.png",
+      "file:chart.png",
+      "file:report.pdf",
+    ]);
+    expect(deps.rows.map((row) => row.status)).toEqual(["sent", "sent", "sent"]);
+  });
+
+  it("queues a short notice once a file's attempts run out, without repeating the text", async () => {
+    const fileRow = {
+      id: "out-2",
+      idempotencyKey: "msg:m-1:file:art-1",
+      kind: "dm",
+      identityId: "mi-1",
+      body: "",
+      sourceMessageId: "m-1",
+      status: "pending",
+      attempts: MESSAGING_OUTBOUND_MAX_ATTEMPTS - 1,
+      nextAttemptAt: null,
+      providerHandle: null,
+      createdAt: new Date(1_001),
+    };
+    const deps = createDeps({
+      run: null,
+      identity: telegram,
+      artifacts,
+      outboundRows: [
+        {
+          ...fileRow,
+          id: "out-1",
+          idempotencyKey: "msg:m-1",
+          body: "Here you go",
+          status: "sent",
+          providerHandle: "text-1",
+          createdAt: new Date(1_000),
+        },
+        fileRow,
+      ],
+    });
+    deps.sendToThread.mockRejectedValueOnce(new Error("Telegram 500"));
+    await deliverMessagingOutbound(deps, {}, context);
+
+    expect(deps.rows.map((row) => [row.idempotencyKey, row.status])).toEqual([
+      ["msg:m-1", "sent"],
+      ["msg:m-1:file:art-1", "failed"],
+      ["msg:m-1:file:art-1:notice", "pending"],
+    ]);
+    expect(deps.rows[2]).toEqual(
+      expect.objectContaining({ kind: "dm", identityId: "mi-1", sourceMessageId: "m-1" }),
+    );
+    expect(deps.jobs.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "messaging.deliver" }),
+    );
+
+    await deliverMessagingOutbound(deps, {}, context);
+    expect(sentBodies(deps)).toEqual(["file:chart.png", 'Could not send "chart.png".']);
+    expect(deps.rows.map((row) => row.status)).toEqual(["sent", "failed", "sent"]);
+  });
+
+  it("sends the notice in the file's place, before a later reply already queued", async () => {
+    const deps = createDeps({
+      run: null,
+      identity: telegram,
+      artifacts,
+      outboundRows: [
+        {
+          id: "out-1",
+          idempotencyKey: "msg:m-1:file:art-1",
+          kind: "dm",
+          identityId: "mi-1",
+          body: "",
+          sourceMessageId: "m-1",
+          status: "pending",
+          attempts: MESSAGING_OUTBOUND_MAX_ATTEMPTS - 1,
+          nextAttemptAt: null,
+          providerHandle: null,
+          createdAt: new Date(1_000),
+        },
+        {
+          id: "out-2",
+          idempotencyKey: "msg:m-2",
+          kind: "dm",
+          identityId: "mi-1",
+          body: "Later reply",
+          sourceMessageId: "m-2",
+          status: "pending",
+          attempts: 0,
+          nextAttemptAt: null,
+          providerHandle: null,
+          createdAt: new Date(2_000),
+        },
+      ],
+    });
+    deps.sendToThread.mockRejectedValueOnce(new Error("Telegram 500"));
+    await deliverMessagingOutbound(deps, {}, context);
+    // The failure and its notice are saved together.
+    expect(deps.prisma.$transaction).toHaveBeenCalledTimes(1);
+
+    await deliverMessagingOutbound(deps, {}, context);
+    expect(sentBodies(deps)).toEqual([
+      "file:chart.png",
+      'Could not send "chart.png".',
+      "Later reply",
+    ]);
+  });
+
+  it("drops a file whose artifact is gone or belongs to another Space", async () => {
+    const deps = createDeps({
+      identity: telegram,
+      messages: [reply],
+      artifacts: [{ ...artifacts[0]!, spaceId: "ws-2" }],
+    });
+    await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
+
+    expect(sentBodies(deps)).toEqual(["Here you go"]);
+    expect(deps.rows.map((row) => row.status)).toEqual(["sent", "failed", "failed"]);
+    expect(deps.artifacts.get).not.toHaveBeenCalled();
+  });
+});
+
+describe("cross-space group reply isolation", () => {
+  it.each(["bot-1", "bot-2"])(
+    "does not send history or wake a peer when %s is blocked",
+    async (blockedBot) => {
+      const deps = createChannelDeps({ blockedBot, text: "@Helper private reply" });
+      await deliverMessagingOutbound(deps, { runId: "run-1" }, context);
+      expect(deps.contextMessages).toHaveLength(0);
+      expect(deps.sendUserMessage).not.toHaveBeenCalled();
+    },
+  );
+});
+
+it("drops a queued connection invite after opt-out", async () => {
+  const deps = createDeps({
+    run: null,
+    blockedBot: "bot-1",
+    connectionStatus: "pending",
+    outboundRows: [
+      {
+        id: "invite",
+        idempotencyKey: "connect:bot-1:bot-2",
+        kind: "dm",
+        identityId: "mi-1",
+        body: "Connection invite",
+        status: "pending",
+        providerHandle: null,
+      },
+    ],
+  });
+  await deliverMessagingOutbound(deps, {}, context);
+  expect(deps.sendToThread).not.toHaveBeenCalled();
 });

@@ -17,8 +17,10 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFloatingHeaderInset } from "../lib/floating-header";
 import { useI18n } from "../lib/i18n";
 import { native, useThemedStyles } from "../lib/native";
+import { useSideInsets } from "../lib/side-insets";
 import { Checkmark } from "./row-accessories";
 import { SettingsLabel, SettingsRow } from "./settings-group";
+import { TextOnlyMark } from "./text-only-mark";
 
 /** Searchable grouped model cells shared by chat and connection settings. */
 export function ModelPickerList({
@@ -28,8 +30,11 @@ export function ModelPickerList({
   error,
   providerLabel,
   emptyMessage,
+  connectChoices,
 }: {
   choices: readonly ChatModelChoice[] | null;
+  /** Providers that need a connection first, listed after the models. */
+  connectChoices?: readonly ChatModelChoice[];
   selectedKey: string;
   onSelect: (choice: ChatModelChoice) => void;
   error?: string | null;
@@ -40,6 +45,7 @@ export function ModelPickerList({
   const { t } = useI18n();
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
+  const sideInsets = useSideInsets();
   const styles = useThemedStyles(createStyles);
   const headerInset = useFloatingHeaderInset();
   const list = useRef<SectionList<ChatModelChoice>>(null);
@@ -85,21 +91,26 @@ export function ModelPickerList({
     });
   }, [navigation, t, changeQuery]);
 
-  const sections = useMemo(
-    () =>
-      choices
-        ? groupModelChoices(choices, query).map((section) => ({
-            ...section,
-            heading:
-              providerLabel && section.heading === providerLabel
-                ? undefined
-                : providerLabel && section.heading?.startsWith(`${providerLabel} · `)
-                  ? section.heading.slice(providerLabel.length + 3)
-                  : section.heading,
-          }))
-        : [],
-    [choices, query, providerLabel],
-  );
+  const sections = useMemo(() => {
+    if (!choices) return [];
+    const models = groupModelChoices(choices, query).map((section) => ({
+      ...section,
+      connect: false,
+      heading:
+        providerLabel && section.heading === providerLabel
+          ? undefined
+          : providerLabel && section.heading?.startsWith(`${providerLabel} · `)
+            ? section.heading.slice(providerLabel.length + 3)
+            : section.heading,
+    }));
+    const connect = groupModelChoices(
+      (connectChoices ?? []).map((choice) => ({ ...choice, providerLabel: undefined })),
+      query,
+    ).flatMap((section) => section.data);
+    return connect.length
+      ? [...models, { key: "connect", heading: undefined, connect: true, data: connect }]
+      : models;
+  }, [choices, connectChoices, query, providerLabel]);
   useLayoutEffect(() => {
     const state = initialScroll.current;
     if (state.handled || state.cancelled || choices === null) return;
@@ -179,7 +190,7 @@ export function ModelPickerList({
       onScrollToIndexFailed={retryInitialSelection}
       onScrollBeginDrag={cancelInitialScroll}
       key={Platform.OS === "android" ? "android" : query}
-      style={styles.screen}
+      style={[styles.screen, sideInsets]}
       contentContainerStyle={[
         styles.content,
         { paddingTop: headerInset + 16, paddingBottom: insets.bottom + 72 },
@@ -240,11 +251,21 @@ export function ModelPickerList({
             <SettingsRow
               accessibilityRole="button"
               accessibilityLabel={item.label}
+              accessibilityHint={item.images === false ? t("Can't read images") : undefined}
               accessibilityState={{ selected }}
               onPress={() => onSelect(item)}
               title={item.title ?? item.label}
               detail={item.detail}
-              trailing={selected ? <Checkmark /> : null}
+              value={section.connect ? t("Connect") : undefined}
+              chevron={section.connect ? "right" : undefined}
+              trailing={
+                item.images === false || selected ? (
+                  <View style={styles.trailing}>
+                    {item.images === false ? <TextOnlyMark /> : null}
+                    {selected ? <Checkmark /> : null}
+                  </View>
+                ) : null
+              }
             />
           </View>
         );
@@ -259,6 +280,7 @@ function createStyles() {
     content: { paddingHorizontal: 16 },
     sectionHeading: { paddingBottom: 7 },
     sectionGap: { height: 20 },
+    trailing: { flexDirection: "row", alignItems: "center", gap: 10 },
     cell: { backgroundColor: native.fill, overflow: "hidden" },
     first: { borderTopLeftRadius: 16, borderTopRightRadius: 16, borderCurve: "continuous" },
     last: { borderBottomLeftRadius: 16, borderBottomRightRadius: 16, borderCurve: "continuous" },

@@ -13,12 +13,13 @@ test("account settings language picker includes Hebrew and mirrors the UI right-
   const picker = settings.getByTestId("ui-locale-select");
   await picker.click();
   await expect(page.getByRole("option", { name: "עברית", exact: true })).toBeVisible();
+  await expect(page.getByRole("option", { name: "日本語", exact: true })).toBeVisible();
   await captureScreenshot(page, testInfo, "ui-locale-picker-he");
 
   await page.getByRole("option", { name: "עברית", exact: true }).click();
   await expect(settings.getByRole("heading", { name: "כללי", exact: true })).toBeVisible();
   await expect(settings.getByRole("heading", { name: "חשבון", exact: true })).toBeVisible();
-  await expect(settings.getByRole("heading", { name: "שפה", exact: true })).toBeVisible();
+  await expect(settings.getByText("שפה", { exact: true })).toBeVisible();
   await expect(picker).toHaveText("עברית");
   await expect(page.locator("html")).toHaveAttribute("lang", "he");
   await expect(page.locator("html")).toHaveAttribute("dir", "rtl");

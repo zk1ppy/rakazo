@@ -8,8 +8,10 @@ import {
   endsSentence,
   humanizeToolName,
   isRunTerminalEvent,
+  liveActivityLine,
   normalizeResponseStreamingPreference,
   projectMessages,
+  redactSecrets,
   reduceLiveMessageBlocks,
   responseStreamingEnabled,
   runFailureError,
@@ -20,6 +22,7 @@ import {
   trackToolNameStreak,
   withLiveStreamingProgress,
 } from "./events.js";
+import { modelFallbackFailure, normalizeRunError } from "./run-error.js";
 
 describe("containsSecret", () => {
   it("detects secrets that JSON escaping changes", () => {
@@ -161,6 +164,25 @@ describe("runFailureError", () => {
     const long = runFailureError({ type: "run.failed", payload: { error: "x".repeat(400) } });
     expect(long).toHaveLength(301);
     expect(long?.endsWith("…")).toBe(true);
+  });
+
+  it("clamps each model's diagnostic so an exhausted backup chain stays readable", () => {
+    const error = modelFallbackFailure("Request timed out.", [
+      {
+        provider: "fake-provider",
+        modelId: "fake-model",
+        status: "failed",
+        reason: "x".repeat(400),
+      },
+      { provider: "fake-provider", modelId: "fake-other", status: "failed", reason: "Timeout" },
+    ]);
+    const shown = runFailureError({ type: "run.failed", payload: { error } });
+    expect(normalizeRunError(shown!).summary).toBe(
+      "Your model provider took too long to respond. Try again. Your backup models also failed.",
+    );
+    expect(normalizeRunError(shown!).details).toBe(
+      `Request timed out.\nfake-provider fake-model: ${"x".repeat(300)}…\nfake-provider fake-other: Timeout`,
+    );
   });
 });
 
@@ -742,6 +764,24 @@ describe("appendToolCallSegment", () => {
   });
 });
 
+describe("redactSecrets", () => {
+  it("hides a longer value whole when a shorter one appears inside it", () => {
+    expect(redactSecrets("password=hunter123xyz", ["123", "hunter123xyz"])).toBe(
+      "password=[redacted]",
+    );
+    expect(redactSecrets("a 123 b", ["123", "hunter123xyz", ""])).toBe("a [redacted] b");
+  });
+
+  it("hides values that overlap without one containing the other", () => {
+    expect(redactSecrets("x=pre-hunter123xyz;", ["pre-hun", "hunter123xyz"])).toBe("x=[redacted];");
+    expect(redactSecrets("abab abab", ["abab"])).toBe("[redacted] [redacted]");
+    expect(redactSecrets("aaaaaa", ["aaaa"])).toBe("[redacted]");
+    expect(redactSecrets("keyfake-keyfake-", ["fake-", "key"])).toBe(
+      "[redacted][redacted][redacted][redacted]",
+    );
+  });
+});
+
 describe("createStreamingRedactor", () => {
   it("never emits a secret split across streaming chunks", () => {
     const redactor = createStreamingRedactor(["fake-secret-123"]);
@@ -752,6 +792,29 @@ describe("createStreamingRedactor", () => {
     ].join("");
     expect(output).toBe("before [redacted] after");
     expect(output).not.toContain("fake-secret-123");
+  });
+
+  it("hides overlapping values whole, however the text is split", () => {
+    const secrets = ["pre-hun", "hunter123xyz", "123"];
+    const text = "x=pre-hunter123xyz; y=123; z=hunter123xyz";
+    for (let size = 1; size <= text.length; size += 1) {
+      const redactor = createStreamingRedactor(secrets);
+      let output = "";
+      for (let at = 0; at < text.length; at += size)
+        output += redactor.push(text.slice(at, at + size));
+      output += redactor.finish();
+      expect(output).toBe(redactSecrets(text, secrets));
+      expect(output).toBe("x=[redacted]; y=[redacted]; z=[redacted]");
+    }
+  });
+
+  it("shows a long run of a value that overlaps itself as it streams, without holding it", () => {
+    const redactor = createStreamingRedactor(["0000"]);
+    const outputs = Array.from({ length: 10_000 }, () => redactor.push("0000"));
+    // One placeholder as soon as the first match is known; later matches extend it.
+    expect(outputs[0]).toBe("[redacted]");
+    expect(outputs.slice(1).every((output) => output === "")).toBe(true);
+    expect(redactor.push(" done") + redactor.finish()).toBe(" done");
   });
 
   it("does not delay chunks when there are no known secrets", () => {
@@ -820,5 +883,62 @@ describe("sanitizeUtf16ForJson", () => {
         "meta\uFFFD#2": "also",
       },
     });
+  });
+});
+
+describe("stale helper projection", () => {
+  it.each([
+    "run.waiting_input",
+    "computer.takeover.requested",
+    "run.completed",
+    "run.failed",
+    "run.cancelled",
+  ])("settles helpers on %s without reviving them on resume", (type) => {
+    const base = {
+      id: "fixture",
+      threadId: "thread-1",
+      runId: "run-1",
+      seq: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const helper = { agentId: "helper", name: "Helper", task: "Check", status: "running" };
+    const next = projectMessages([
+      { ...base, type: "thread.subagent", payload: helper },
+      { ...base, seq: 2, type, payload: {} },
+      { ...base, seq: 3, type: "run.started", payload: {} },
+      { ...base, seq: 4, type: "thread.subagent", payload: { ...helper, agentId: "resumed" } },
+    ]);
+    expect(next.find((m) => m.id === "subagent:helper")?.blocks[0]).toMatchObject({
+      status: "failed",
+      result: "stopped",
+    });
+    expect(next.find((m) => m.id === "subagent:resumed")?.blocks[0]).toMatchObject({
+      status: "running",
+    });
+  });
+});
+
+describe("liveActivityLine", () => {
+  it("reads the tool status the live message is showing", () => {
+    expect(
+      liveActivityLine([
+        { id: "m1", blocks: [{ kind: "text", text: "Hi" }] },
+        {
+          id: "progress:run-1",
+          blocks: [{ kind: "progress", text: "Searching the web: injury news", activity: true }],
+        },
+      ]),
+    ).toBe("Searching the web: injury news");
+  });
+
+  it("is empty while the bot writes text or has no live message", () => {
+    expect(
+      liveActivityLine([
+        { id: "progress:run-1", blocks: [{ kind: "progress", text: "Checking that first." }] },
+      ]),
+    ).toBeUndefined();
+    expect(
+      liveActivityLine([{ id: "m1", blocks: [{ kind: "text", text: "Done" }] }]),
+    ).toBeUndefined();
   });
 });

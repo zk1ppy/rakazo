@@ -1,6 +1,6 @@
 import { Trans, useLingui } from "@lingui/react/macro";
 import type { Bot, Group } from "@rakazo/contracts";
-import { GROUP_MEMBER_MAX, GROUP_MEMBER_MIN } from "@rakazo/contracts";
+import { GROUP_MEMBER_MAX, GROUP_MEMBER_MIN, GROUP_NAME_MAX_LENGTH } from "@rakazo/contracts";
 import { BotAvatar, Button, Checkbox, Input } from "@rakazo/ui-web";
 import { X } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
@@ -68,15 +68,15 @@ function MemberPicker({
         <span className="text-sm text-muted-foreground">
           <Trans>Members ({selected.length})</Trans>
         </span>
-        <button
-          type="button"
+        <Button
+          variant="text"
           aria-expanded={expanded}
           aria-controls={listId}
           onClick={() => setExpanded((value) => !value)}
-          className="text-sm text-muted-foreground hover:text-foreground"
+          className="font-normal"
         >
           {expanded ? <Trans>Show selected</Trans> : <Trans>Show all</Trans>}
-        </button>
+        </Button>
       </div>
       {expanded ? (
         <>
@@ -101,7 +101,7 @@ function MemberPicker({
             <div
               key={bot.id}
               className={`flex w-full items-center rounded-xl px-2.5 py-2.5 ${
-                checked ? "bg-muted" : "hover:bg-accent"
+                checked ? "bg-accent" : "hover:bg-accent"
               }`}
             >
               <button
@@ -193,6 +193,7 @@ export function CreateGroupForm({
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder={t`Name this group`}
+          maxLength={GROUP_NAME_MAX_LENGTH}
           className="mt-2"
         />
       </label>
@@ -315,6 +316,7 @@ export function GroupSettings({
           id={nameId}
           value={name}
           onChange={(e) => setName(e.target.value)}
+          maxLength={GROUP_NAME_MAX_LENGTH}
           className="mt-2"
         />
       </label>

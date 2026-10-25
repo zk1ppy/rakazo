@@ -17,8 +17,6 @@ export function createThreadHeaderStyles() {
       borderRadius: 999,
     },
     titleCapsuleFill: {
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: tokens.glassStroke,
       backgroundColor: tokens.glassFill,
     },
     title: {
@@ -42,20 +40,12 @@ export function createThreadHeaderStyles() {
       borderColor: tokens.glassStroke,
       backgroundColor: tokens.glassFill,
     },
-    headerFade: {
+    statusBarFade: {
       position: "absolute",
       top: 0,
       left: 0,
       right: 0,
-      backgroundColor: tokens.background,
-    },
-    headerFadeEdge: {
-      position: "absolute",
-      top: "100%",
-      left: 0,
-      right: 0,
-      height: 16,
-      experimental_backgroundImage: `linear-gradient(to bottom, ${tokens.background} 0%, ${transparentBackground} 100%)`,
+      experimental_backgroundImage: `linear-gradient(to bottom, ${tokens.background} 0%, ${tokens.background} 60%, ${transparentBackground} 100%)`,
     },
     composerFade: {
       position: "absolute",

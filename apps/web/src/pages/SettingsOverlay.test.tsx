@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -66,23 +67,46 @@ vi.mock("./AccountSettingsOverlay", () => ({
   UpdatesSettingsPanel: () => null,
   UsageSettingsPanel: () => null,
 }));
-const { memoryConfigs, providerConfig, updaterStatus } = vi.hoisted(() => ({
+const { memoryConfigs, memoryConfigChange, providerConfig, updaterStatus } = vi.hoisted(() => ({
   memoryConfigs: [] as unknown[],
+  memoryConfigChange: { current: (_config: unknown) => {} },
   providerConfig: vi.fn(async (_spaceId: string): Promise<unknown> => null),
   updaterStatus: vi.fn(async (): Promise<unknown> => ({ installKind: "compose" })),
 }));
 vi.mock("../lib/rpc", () => ({
   rpc: { updater: { status: updaterStatus } },
+  createSpaceRpc: () => ({ memory: { providerConfig: () => providerConfig("") } }),
+  selectedSpaceId: () => null,
   rpcForSpace: (spaceId: string) => ({
     memory: { providerConfig: () => providerConfig(spaceId) },
   }),
 }));
 vi.mock("./BillingSettingsPanel", () => ({ BillingSettingsPanel: () => null }));
 vi.mock("./MemorySettingsOverlay", () => ({
-  MemorySettingsOverlay: ({ config }: { config: unknown }) => {
+  MemorySettingsOverlay: ({
+    config,
+    onConfigChange,
+  }: {
+    config: unknown;
+    onConfigChange: (config: unknown) => void;
+  }) => {
     memoryConfigs.push(config);
+    memoryConfigChange.current = onConfigChange;
     return null;
   },
+}));
+vi.mock("./SpaceSettingsPanel", () => ({
+  SpaceSettingsPanel: ({
+    space,
+    onDelete,
+  }: {
+    space: { name: string };
+    onDelete: () => Promise<void>;
+  }) => (
+    <button type="button" data-testid="space-settings" onClick={() => void onDelete()}>
+      {space.name}
+    </button>
+  ),
 }));
 vi.mock("./ModelSettingsOverlay", () => ({ ModelSettingsOverlay: () => null }));
 vi.mock("./VoiceSettingsOverlay", () => ({ VoiceSettingsOverlay: () => null }));
@@ -100,21 +124,24 @@ async function render(props: Partial<React.ComponentProps<typeof SettingsOverlay
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const rerender = async (next: Partial<React.ComponentProps<typeof SettingsOverlay>>) => {
     await act(async () => {
       root.render(
-        <SettingsOverlay
-          name="Jamie"
-          onUsageOpen={() => undefined}
-          avatarStyle="robot"
-          onAvatarStyleChange={async () => undefined}
-          timezone={null}
-          onTimezoneChange={async () => undefined}
-          memoryConfig={null}
-          onMemoryConfigChange={() => undefined}
-          onClose={() => undefined}
-          {...next}
-        />,
+        <QueryClientProvider client={queryClient}>
+          <SettingsOverlay
+            name="Jamie"
+            onUsageOpen={() => undefined}
+            timezone={null}
+            onTimezoneChange={async () => undefined}
+            memoryConfig={null}
+            onMemoryConfigChange={() => undefined}
+            onClose={() => undefined}
+            section="general"
+            onSectionChange={() => undefined}
+            {...next}
+          />
+        </QueryClientProvider>,
       );
     });
   };
@@ -136,7 +163,7 @@ it("names the space a space-scoped section acts on and switches it in place", as
     space: acme,
     spaces,
     onSpaceChange,
-    initialSection: "models",
+    section: "models",
   });
   try {
     const trigger = container.querySelector<HTMLButtonElement>('[data-testid="settings-space"]');
@@ -155,17 +182,72 @@ it("names the space a space-scoped section acts on and switches it in place", as
   }
 });
 
-it("shows the space name without a switcher when there is only one space", async () => {
+it("opens the Space section for the space it acts on, with the space picker", async () => {
+  const onDeleteSpace = vi.fn(async () => undefined);
+  const { container, cleanup } = await render({
+    space: { ...acme, canDelete: true },
+    spaces,
+    onSpaceChange: vi.fn(),
+    onDeleteSpace,
+    section: "space",
+  });
+  try {
+    const nav = [...container.querySelectorAll('[data-testid^="settings-nav-"]')].map((item) =>
+      item.getAttribute("data-testid"),
+    );
+    expect(nav.slice(0, 3)).toEqual([
+      "settings-nav-general",
+      "settings-nav-space",
+      "settings-nav-models",
+    ]);
+    expect(container.querySelector('[data-testid="settings-space"]')?.textContent).toBe("Acme");
+    const panel = container.querySelector<HTMLButtonElement>('[data-testid="space-settings"]');
+    expect(panel?.textContent).toBe("Acme");
+    await act(async () => panel?.click());
+    expect(onDeleteSpace).toHaveBeenCalledWith("space-a");
+  } finally {
+    await cleanup();
+  }
+});
+
+it("reports a section picked in the nav so the shell can keep it in the URL", async () => {
+  const onSectionChange = vi.fn();
+  const { container, cleanup } = await render({ onSectionChange });
+  try {
+    const usage = container.querySelector<HTMLButtonElement>('[data-testid="settings-nav-usage"]');
+    if (!usage) throw new Error("Missing Usage nav item");
+    await act(async () => usage.click());
+    expect(onSectionChange).toHaveBeenCalledWith("usage");
+  } finally {
+    await cleanup();
+  }
+});
+
+it("opens a linked billing section once billing turns out to be on", async () => {
+  const { container, rerender, cleanup } = await render({
+    section: "billing",
+    billingEnabled: false,
+  });
+  const shown = () =>
+    container.querySelector("[data-settings-section]")?.getAttribute("data-settings-section");
+  try {
+    expect(shown()).toBe("general");
+    await rerender({ section: "billing", billingEnabled: true });
+    expect(shown()).toBe("billing");
+  } finally {
+    await cleanup();
+  }
+});
+
+it("shows no space label or switcher when there is only one space", async () => {
   const { container, cleanup } = await render({
     space: acme,
     spaces: [acme],
     onSpaceChange: vi.fn(),
-    initialSection: "models",
+    section: "models",
   });
   try {
-    const label = container.querySelector('[data-testid="settings-space"]');
-    expect(label?.tagName).toBe("P");
-    expect(label?.textContent).toBe("Acme");
+    expect(container.querySelector('[data-testid="settings-space"]')).toBeNull();
   } finally {
     await cleanup();
   }
@@ -176,7 +258,7 @@ it("shows no space picker on sections that are not per space", async () => {
     space: acme,
     spaces,
     onSpaceChange: vi.fn(),
-    initialSection: "general",
+    section: "general",
   });
   try {
     expect(container.querySelector('[data-testid="settings-space"]')).toBeNull();
@@ -194,7 +276,7 @@ it("never hands one space's memory config to another space's panel", async () =>
     spaces: [...spaces, gamma],
     currentSpaceId: "space-a",
     onSpaceChange: vi.fn(),
-    initialSection: "memory" as const,
+    section: "memory" as const,
   };
   const { rerender, cleanup } = await render(props);
   try {
@@ -224,11 +306,11 @@ it("withholds memory connection controls after a failed load and retries the edi
   const { container, cleanup } = await render({
     space: spaces[1],
     currentSpaceId: "space-a",
-    initialSection: "memory",
+    section: "memory",
     onMemoryConfigChange,
   });
   try {
-    expect(container.textContent).toContain("Memory service unavailable");
+    await vi.waitFor(() => expect(container.textContent).toContain("Memory service unavailable"));
     expect(memoryConfigs).not.toContain(null);
     const rendersBeforeRetry = memoryConfigs.length;
     const retry = [...container.querySelectorAll("button")].find(
@@ -236,15 +318,45 @@ it("withholds memory connection controls after a failed load and retries the edi
     );
     expect(retry).toBeDefined();
     await act(async () => retry?.click());
-    expect(container.textContent).not.toContain("Memory service unavailable");
+    await vi.waitFor(() =>
+      expect(container.textContent).not.toContain("Memory service unavailable"),
+    );
     expect(memoryConfigs.length).toBeGreaterThan(rendersBeforeRetry);
     expect(memoryConfigs.at(-1)).toBeUndefined();
     expect(providerConfig.mock.calls.map(([spaceId]) => spaceId)).toEqual(["space-b", "space-b"]);
     const config = { provider: "mem0", defaultMemoryScope: "shared" };
     await act(async () => resolveRetry(config));
-    expect(memoryConfigs.at(-1)).toBe(config);
+    await vi.waitFor(() => expect(memoryConfigs.at(-1)).toBe(config));
     expect(container.textContent).not.toContain("Retry");
     expect(onMemoryConfigChange).not.toHaveBeenCalled();
+  } finally {
+    await cleanup();
+  }
+});
+
+it("keeps another space's saved memory config when an older read lands after it", async () => {
+  memoryConfigs.length = 0;
+  let resolveRead: (config: unknown) => void = () => undefined;
+  providerConfig.mockReset().mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+  );
+  const { cleanup } = await render({
+    space: spaces[1],
+    currentSpaceId: "space-a",
+    section: "memory",
+  });
+  try {
+    await vi.waitFor(() => expect(providerConfig).toHaveBeenCalledTimes(1));
+    const saved = { provider: "mem0", defaultMemoryScope: "shared" };
+    await act(async () => memoryConfigChange.current(saved));
+    await vi.waitFor(() => expect(memoryConfigs.at(-1)).toBe(saved));
+    await act(async () => resolveRead(null));
+    // Query updates reach components on a timer; let any late write land.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(memoryConfigs.at(-1)).toBe(saved);
   } finally {
     await cleanup();
   }
@@ -253,21 +365,11 @@ it("withholds memory connection controls after a failed load and retries the edi
 const updatesNav = (container: HTMLElement) =>
   container.querySelector('[data-testid="settings-nav-updates"]');
 
-it("hides Updates when neither the desktop app nor the server can update", async () => {
-  const { container, cleanup } = await render({ isDeploymentOwner: true });
+it("hides server updates and never requests server authority", async () => {
+  const { container, cleanup } = await render({});
   try {
-    await vi.waitFor(() => expect(updaterStatus).toHaveBeenCalled());
     expect(updatesNav(container)).toBeNull();
-  } finally {
-    await cleanup();
-  }
-});
-
-it("shows Updates to the owner of a server that can update itself", async () => {
-  updaterStatus.mockResolvedValueOnce({ installKind: "sidecar" });
-  const { container, cleanup } = await render({ isDeploymentOwner: true });
-  try {
-    await vi.waitFor(() => expect(updatesNav(container)).not.toBeNull());
+    expect(updaterStatus).not.toHaveBeenCalled();
   } finally {
     await cleanup();
   }
@@ -278,29 +380,6 @@ it("shows Updates in the desktop app", async () => {
   const { container, cleanup } = await render({});
   try {
     expect(updatesNav(container)).not.toBeNull();
-  } finally {
-    await cleanup();
-  }
-});
-
-it("leaves Updates for General once the status shows nothing to update", async () => {
-  let resolveStatus: (status: unknown) => void = () => undefined;
-  updaterStatus.mockImplementationOnce(
-    () =>
-      new Promise((resolve) => {
-        resolveStatus = resolve;
-      }),
-  );
-  const { container, cleanup } = await render({
-    isDeploymentOwner: true,
-    initialSection: "updates",
-  });
-  const selected = () =>
-    container.querySelector('[data-testid="user-settings"]')?.getAttribute("data-settings-section");
-  try {
-    expect(selected()).toBe("updates");
-    await act(async () => resolveStatus({ installKind: "compose" }));
-    expect(selected()).toBe("general");
   } finally {
     await cleanup();
   }

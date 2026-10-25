@@ -417,7 +417,7 @@ async function main() {
   process.on("SIGINT", requestStop);
   process.on("SIGTERM", requestStop);
   try {
-    postgres = await new PostgreSqlContainer("postgres:16-alpine").start();
+    postgres = await new PostgreSqlContainer("postgres:18-alpine").start();
     const databaseUrl = postgres.getConnectionUri();
     Object.assign(process.env, {
       DATABASE_URL: databaseUrl,
@@ -442,6 +442,8 @@ async function main() {
       PIPEDREAM_CLIENT_SECRET: "",
       PIPEDREAM_PROJECT_ID: "",
       SMTP_URL: "",
+      EMAIL_PROVIDER: "none",
+      EMAIL_API_KEY: "",
       SLACK_BOT_TOKEN: "",
       TELEGRAM_BOT_TOKEN: "",
       WHATSAPP_ACCESS_TOKEN: "",
@@ -569,6 +571,8 @@ async function main() {
               pipedreamClientSecret: undefined,
               pipedreamProjectId: undefined,
               smtpUrl: undefined,
+              emailProvider: "none",
+              emailApiKey: undefined,
               emailFrom: undefined,
               sendblueApiKeyId: undefined,
               sendblueApiSecret: undefined,

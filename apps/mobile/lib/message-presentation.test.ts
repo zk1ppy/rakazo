@@ -7,6 +7,7 @@ import {
   DISMISSED_CHOICE_ANSWER_ID,
   hasVisibleMessagePresentation,
   isCenteredAgentEvent,
+  messageHasInlineControls,
   messagePresentationSegments,
   quotableMessageSegments,
   threadCardWidth,
@@ -236,6 +237,30 @@ describe("quotableMessageSegments", () => {
   });
 });
 
+describe("messageHasInlineControls", () => {
+  it("leaves a plain message to the row gestures", () => {
+    expect(messageHasInlineControls([{ kind: "text", text: "hello" } as MessageBlock])).toBe(false);
+  });
+
+  it("keeps the taps of cards that render their own controls", () => {
+    expect(
+      messageHasInlineControls([
+        { kind: "ask", question: "Which one?", actions: [] } as unknown as MessageBlock,
+      ]),
+    ).toBe(true);
+    expect(
+      messageHasInlineControls([
+        { kind: "mcp_approval", serverId: "s" } as unknown as MessageBlock,
+      ]),
+    ).toBe(true);
+    expect(
+      messageHasInlineControls([
+        { kind: "app_connect", provider: "github" } as unknown as MessageBlock,
+      ]),
+    ).toBe(true);
+  });
+});
+
 describe("truncateQuoteExcerpt", () => {
   it("leaves short excerpts untouched", () => {
     expect(truncateQuoteExcerpt("short")).toBe("short");
@@ -252,5 +277,17 @@ describe("truncateQuoteExcerpt", () => {
     const truncated = truncateQuoteExcerpt(excerpt + "tail");
     expect(truncated).toHaveLength(REPLY_QUOTE_MAX_LENGTH - 1);
     expect(truncated).toBe("x".repeat(REPLY_QUOTE_MAX_LENGTH - 1));
+  });
+
+  it("leaves out an agent import's setup checklist, which only the web app draws", () => {
+    const checklist: MessageBlock = {
+      kind: "import_setup",
+      items: [{ kind: "routine", routineId: "routine-1", name: "morning" }],
+    };
+    expect(hasVisibleMessagePresentation([checklist])).toBe(false);
+    expect(messagePresentationSegments([checklist])).toEqual([]);
+    expect(messagePresentationSegments([{ kind: "text", text: "Imported." }, checklist])).toEqual([
+      { kind: "content", blocks: [{ kind: "text", text: "Imported." }] },
+    ]);
   });
 });

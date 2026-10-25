@@ -93,6 +93,8 @@ export interface AppEnv {
   sendbluePhoneNumber: string | undefined;
   expoAccessToken: string | undefined;
   smtpUrl: string | undefined;
+  emailProvider?: string;
+  emailApiKey?: string;
   emailFrom: string | undefined;
   /** Billing turns on only when all three are set; self-hosted installs leave them unset. */
   stripeSecretKey: string | undefined;
@@ -138,12 +140,6 @@ export interface AppEnv {
   browserMonitoring:
     | { dsn: string; environment?: string; release?: string; pseudonymSecret?: string }
     | undefined;
-  /** Private Compose control-network URL for the opt-in updater sidecar. */
-  updaterUrl: string | undefined;
-  /** Bearer shared with the updater; never sent to the browser. */
-  updaterToken: string | undefined;
-  /** Current application image tag; used for compose manual-upgrade command selection. */
-  imageTag: string | undefined;
 }
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
@@ -195,8 +191,6 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
   const sandboxProvider = resolveSandboxProvider(source);
   const cloudAgentProvider = resolveCloudAgentProvider(source);
   const deploymentModel = resolveDeploymentModel(source);
-  const updaterUrl = optional(source.RAKAZO_UPDATER_URL);
-  const updaterToken = optional(source.RAKAZO_UPDATER_TOKEN);
   return {
     passwordAuth,
     breachedPasswordCheck: source.AUTH_BREACHED_PASSWORD_CHECK_ENABLED === "true",
@@ -259,6 +253,8 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     sendbluePhoneNumber: optional(source.SENDBLUE_PHONE_NUMBER),
     expoAccessToken: optional(source.EXPO_ACCESS_TOKEN),
     smtpUrl: optional(source.SMTP_URL),
+    emailProvider: optional(source.EMAIL_PROVIDER),
+    emailApiKey: optional(source.EMAIL_API_KEY),
     emailFrom: optional(source.EMAIL_FROM),
     stripeSecretKey: optional(source.STRIPE_SECRET_KEY),
     stripeWebhookSecret: optional(source.STRIPE_WEBHOOK_SECRET),
@@ -296,9 +292,6 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     gitSha: optional(source.GIT_SHA) ?? optional(source.RAKAZO_GIT_SHA),
     minimumClientBuilds: parseMinimumClientBuilds(source.RAKAZO_MIN_CLIENT_BUILD),
     browserMonitoring: browserMonitoringFromEnv(source),
-    updaterUrl,
-    updaterToken,
-    imageTag: optional(source.RAKAZO_IMAGE_TAG),
   };
 }
 

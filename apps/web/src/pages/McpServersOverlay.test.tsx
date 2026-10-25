@@ -6,7 +6,7 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 import { McpServersOverlay } from "./McpServersOverlay";
 
-const mocks = vi.hoisted(() => ({ list: vi.fn(), test: vi.fn() }));
+const mocks = vi.hoisted(() => ({ list: vi.fn(), test: vi.fn(), update: vi.fn() }));
 vi.mock("../lib/rpc", () => ({
   rpc: {
     mcp: { servers: mocks, assignments: { all: async () => [] } },
@@ -136,5 +136,91 @@ it.each([
   } finally {
     await act(async () => root.unmount());
     vi.useRealTimers();
+  }
+});
+
+it("opens a server's form and saves it in place, sending blank values to keep what is stored", async () => {
+  const server = {
+    id: "srv_1",
+    slug: "docs",
+    name: "docs",
+    description: "",
+    transport: "streamable_http",
+    endpoint: "https://mcp.example.test/mcp",
+    command: null,
+    args: [],
+    envKeys: [],
+    fileKeys: [],
+    headerKeys: ["Authorization", "X-Team"],
+    oauthStatus: "none",
+    oauthClientId: null,
+    hasSecret: false,
+    health: { status: "unknown" },
+    enabled: true,
+  } as unknown as McpServer;
+  mocks.list.mockReset().mockResolvedValue([server]);
+  mocks.update.mockReset().mockResolvedValue(server);
+  const host = document.createElement("div");
+  const root = createRoot(host);
+  try {
+    await act(async () =>
+      root.render(<McpServersOverlay editServerId="srv_1" onClose={() => {}} />),
+    );
+    const save = Array.from(host.querySelectorAll("button")).find(
+      (button) => button.textContent === "Save",
+    );
+    expect(save).toBeDefined();
+    await act(async () => save?.click());
+    expect(mocks.update).toHaveBeenCalledWith({
+      id: "srv_1",
+      config: expect.objectContaining({
+        slug: "docs",
+        transport: "streamable_http",
+        endpoint: "https://mcp.example.test/mcp",
+        headers: { Authorization: "", "X-Team": "" },
+      }),
+    });
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("keeps a stdio server's arguments intact when they were not edited", async () => {
+  const server = {
+    id: "srv_2",
+    slug: "files",
+    name: "files",
+    description: "",
+    transport: "stdio",
+    endpoint: null,
+    command: "npx",
+    args: ["-y", "files-server", "/Users/me/My Documents"],
+    envKeys: [],
+    fileKeys: [],
+    headerKeys: [],
+    oauthStatus: "none",
+    oauthClientId: null,
+    hasSecret: false,
+    health: { status: "unknown" },
+    enabled: true,
+  } as unknown as McpServer;
+  mocks.list.mockReset().mockResolvedValue([server]);
+  mocks.update.mockReset().mockResolvedValue(server);
+  const host = document.createElement("div");
+  const root = createRoot(host);
+  try {
+    await act(async () =>
+      root.render(<McpServersOverlay editServerId="srv_2" onClose={() => {}} />),
+    );
+    const save = Array.from(host.querySelectorAll("button")).find(
+      (button) => button.textContent === "Save",
+    );
+    await act(async () => save?.click());
+    expect(mocks.update).toHaveBeenCalledWith({
+      id: "srv_2",
+      config: expect.objectContaining({ args: ["-y", "files-server", "/Users/me/My Documents"] }),
+    });
+  } finally {
+    await act(async () => root.unmount());
   }
 });

@@ -220,11 +220,13 @@ describe("archiveGroup", () => {
     eventDeleteMany = vi.fn();
     groupUpdate = vi.fn();
     const tx = {
+      externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       $queryRaw: queryRaw,
       chatGroup: { findFirst, update: groupUpdate },
       run: { findMany: findManyRuns, updateMany: runUpdateMany },
       attempt: { updateMany: attemptUpdateMany },
       task: { updateMany: taskUpdateMany },
+      secret: { deleteMany: vi.fn() },
       computerExecutionLease: { findMany: leaseFindMany, updateMany: leaseUpdateMany },
       computer: { findMany: findManyComputers, updateMany: computerUpdateMany },
       event: { deleteMany: eventDeleteMany },

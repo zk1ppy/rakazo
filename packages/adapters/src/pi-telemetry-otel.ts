@@ -94,11 +94,11 @@ export function otelPiContext(
   tracer: Tracer,
   captureContent: boolean,
   ids: SpanAttributes = {},
-  parent: Context = ROOT_CONTEXT,
+  parent?: Context,
 ): TelemetryContext {
   return {
     async startSpan(options, callback) {
-      const spanParent = parent === ROOT_CONTEXT ? adoptedRootParent() : parent;
+      const spanParent = !parent || parent === ROOT_CONTEXT ? adoptedRootParent() : parent;
       const correlation = {
         ...ids,
         ...Object.fromEntries(

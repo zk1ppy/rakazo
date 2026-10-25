@@ -1,5 +1,5 @@
 import type { RealtimeFanout } from "@rakazo/adapter-kit";
-import { encodeLoginSecret } from "@rakazo/contracts";
+import { BOT_SECRET_VALUE_MAX_LENGTH, encodeLoginSecret } from "@rakazo/contracts";
 import {
   TAKEOVER_COMPUTER_DONE_STATE,
   TAKEOVER_COMPUTER_PENDING_STATE,
@@ -7,7 +7,9 @@ import {
 } from "@rakazo/core";
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "./client.js";
+import { CrossSpaceCommunicationBlockedError } from "./cross-space-communication.js";
 import {
+  AnswerTooLongError,
   answerRunInput,
   answerWaitingRunWithTextInTransaction,
   appendEvent,
@@ -24,7 +26,7 @@ import {
   sendUserMessage,
   settleReleasedTakeoverCards,
 } from "./events.js";
-import { RunHistoryWriteError } from "./messages.js";
+import { partialReplyClientNonce, RunHistoryWriteError } from "./messages.js";
 import { installSecurityEventStore } from "./security-events.js";
 
 class TestFanout implements RealtimeFanout {
@@ -87,13 +89,150 @@ describe("finalizeRun", () => {
     expect(completedRunBlocks(blocks, null, new Date())).toBe(blocks);
   });
 
-  it("retries a transaction conflict without duplicating the terminal event or notification", async () => {
-    const conflict = Object.assign(new Error("serialization conflict"), { code: "P2034" });
-    const createEvent = vi.fn(async () => ({ threadId: "thread-1", seq: 0 }));
+  it.each(["completed", "failed"] as const)(
+    "retries a transaction conflict and clears the checkpoint on %s without duplicating the terminal event or notification",
+    async (outcome) => {
+      const conflict = Object.assign(new Error("serialization conflict"), { code: "P2034" });
+      const createEvent = vi.fn(async () => ({ threadId: "thread-1", seq: 0 }));
+      const tx = {
+        externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
+        $queryRaw: vi.fn(async () => []),
+        run: {
+          findUnique: vi.fn(async () => ({ status: "running", userId: "user-1" })),
+          findUniqueOrThrow: vi.fn(async () => ({ sourceMessage: null })),
+          findFirst: vi.fn(async () => null),
+          updateMany: vi.fn(async () => ({ count: 1 })),
+        },
+        attempt: { updateMany: vi.fn(async () => ({ count: 1 })) },
+        task: { updateMany: vi.fn(async () => ({ count: 1 })) },
+        thread: { update: vi.fn(async () => ({ nextEventSeq: 1 })) },
+        event: { create: createEvent, deleteMany: vi.fn(async () => ({ count: 0 })) },
+        secret: { deleteMany: vi.fn(async () => ({ count: 0 })) },
+        steeringMessage: {
+          deleteMany: vi.fn(async () => ({ count: 0 })),
+          findMany: vi.fn(async () => []),
+          updateMany: vi.fn(async () => ({ count: 0 })),
+        },
+        message: { findFirst: vi.fn(async () => null) },
+        bot: { update: vi.fn(async () => ({})) },
+      };
+      const transaction = vi
+        .fn()
+        .mockRejectedValueOnce(conflict)
+        .mockImplementation(async (operation: (client: typeof tx) => unknown) => operation(tx));
+      const publish = vi.fn(async () => undefined);
+
+      await expect(
+        finalizeRun(
+          { $transaction: transaction } as unknown as PrismaClient,
+          {
+            spaceId: "space-1",
+            threadId: "thread-1",
+            botId: "bot-1",
+            runId: "run-1",
+            taskId: "task-1",
+            attemptId: "attempt-1",
+            leaseOwner: "worker-1",
+            leaseFence: 1,
+            ...(outcome === "failed" ? { outcome, error: "failed" } : { outcome, blocks: [] }),
+          },
+          { publish } as never,
+        ),
+      ).resolves.toEqual({ continuationRunId: null });
+      expect(transaction).toHaveBeenCalledTimes(2);
+      expect(tx.externalEffect.deleteMany).toHaveBeenCalledWith({
+        where: { runId: "run-1", kind: "runtime_checkpoint", status: "runtime_checkpoint" },
+      });
+      expect(createEvent).toHaveBeenCalledOnce();
+      expect(publish).toHaveBeenCalledOnce();
+      // A finished run never resumes to read a waiting secret answer.
+      expect(tx.secret.deleteMany).toHaveBeenCalledWith({
+        where: { OR: [{ userId: "user-1", spaceId: "space-1", kind: "run-secret:run-1" }] },
+      });
+    },
+  );
+
+  it("saves the reply a failure cut short before the error, as no answer to steering", async () => {
     const tx = {
+      externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       $queryRaw: vi.fn(async () => []),
       run: {
-        findUnique: vi.fn(async () => ({ status: "running" })),
+        findUnique: vi.fn(async () => ({ status: "failed", startedAt: null })),
+        findUniqueOrThrow: vi.fn(async () => ({ sourceMessage: null })),
+        findFirst: vi.fn(async () => null),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+      },
+      attempt: { updateMany: vi.fn(async () => ({ count: 1 })) },
+      task: { updateMany: vi.fn(async () => ({ count: 1 })) },
+      thread: { update: vi.fn(async () => ({ nextEventSeq: 1, nextMessageSeq: 5 })) },
+      secret: { deleteMany: vi.fn(async () => ({ count: 0 })) },
+      event: {
+        create: vi.fn(async ({ data }: { data: { type: string } }) => ({
+          ...data,
+          threadId: "thread-1",
+          seq: 0,
+          createdAt: new Date(),
+        })),
+        deleteMany: vi.fn(async () => ({ count: 0 })),
+        findMany: vi.fn(async () => []),
+      },
+      steeringMessage: {
+        findMany: vi.fn(async () => []),
+        updateMany: vi.fn(async () => ({ count: 0 })),
+      },
+      message: {
+        findFirst: vi.fn(async () => null),
+        create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+          ...data,
+          id: "message-partial",
+        })),
+      },
+      bot: { update: vi.fn(async () => ({})) },
+    };
+    const prisma = {
+      $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
+    } as unknown as PrismaClient;
+    const partialReply = [{ kind: "text" as const, text: "Part one. Part tw" }];
+
+    await finalizeRun(prisma, {
+      spaceId: "space-1",
+      threadId: "thread-1",
+      botId: "bot-1",
+      runId: "run-1",
+      taskId: "task-1",
+      attemptId: "attempt-1",
+      leaseOwner: "worker-1",
+      leaseFence: 1,
+      outcome: "failed",
+      error: "terminated",
+      partialReply,
+    });
+
+    expect(tx.message.create).toHaveBeenCalledExactlyOnceWith({
+      data: expect.objectContaining({
+        role: "bot",
+        blocks: partialReply,
+        runId: "run-1",
+        clientNonce: partialReplyClientNonce("run-1"),
+      }),
+    });
+    expect(tx.event.create.mock.calls.map(([{ data }]) => data.type)).toEqual([
+      "thread.message.created",
+      "run.failed",
+    ]);
+    // Steering is settled before the kept reply exists, so the reply cannot count as its answer.
+    expect(tx.message.findFirst.mock.invocationCallOrder[0]).toBeLessThan(
+      tx.message.create.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("saves no message for a failure without a partial reply", async () => {
+    const create = vi.fn();
+    const tx = {
+      externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
+      $queryRaw: vi.fn(async () => []),
+      run: {
+        findUnique: vi.fn(async () => ({ status: "failed", startedAt: null })),
         findUniqueOrThrow: vi.fn(async () => ({ sourceMessage: null })),
         findFirst: vi.fn(async () => null),
         updateMany: vi.fn(async () => ({ count: 1 })),
@@ -101,45 +240,40 @@ describe("finalizeRun", () => {
       attempt: { updateMany: vi.fn(async () => ({ count: 1 })) },
       task: { updateMany: vi.fn(async () => ({ count: 1 })) },
       thread: { update: vi.fn(async () => ({ nextEventSeq: 1 })) },
-      event: { create: createEvent, deleteMany: vi.fn(async () => ({ count: 0 })) },
+      secret: { deleteMany: vi.fn(async () => ({ count: 0 })) },
+      event: {
+        create: vi.fn(async () => ({ threadId: "thread-1", seq: 0 })),
+        deleteMany: vi.fn(async () => ({ count: 0 })),
+      },
       steeringMessage: {
         findMany: vi.fn(async () => []),
         updateMany: vi.fn(async () => ({ count: 0 })),
       },
-      message: { findFirst: vi.fn(async () => null) },
+      message: { findFirst: vi.fn(async () => null), create },
       bot: { update: vi.fn(async () => ({})) },
     };
-    const transaction = vi
-      .fn()
-      .mockRejectedValueOnce(conflict)
-      .mockImplementation(async (operation: (client: typeof tx) => unknown) => operation(tx));
-    const publish = vi.fn(async () => undefined);
+    const prisma = {
+      $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
+    } as unknown as PrismaClient;
 
-    await expect(
-      finalizeRun(
-        { $transaction: transaction } as unknown as PrismaClient,
-        {
-          spaceId: "space-1",
-          threadId: "thread-1",
-          botId: "bot-1",
-          runId: "run-1",
-          taskId: "task-1",
-          attemptId: "attempt-1",
-          leaseOwner: "worker-1",
-          leaseFence: 1,
-          outcome: "failed",
-          error: "failed",
-        },
-        { publish } as never,
-      ),
-    ).resolves.toEqual({ continuationRunId: null });
-    expect(transaction).toHaveBeenCalledTimes(2);
-    expect(createEvent).toHaveBeenCalledOnce();
-    expect(publish).toHaveBeenCalledOnce();
+    await finalizeRun(prisma, {
+      spaceId: "space-1",
+      threadId: "thread-1",
+      botId: "bot-1",
+      runId: "run-1",
+      taskId: "task-1",
+      attemptId: "attempt-1",
+      leaseOwner: "worker-1",
+      leaseFence: 1,
+      outcome: "failed",
+      error: "terminated",
+    });
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("resumes a held messaging inbound as a messaging run", async () => {
     const tx = {
+      externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       $queryRaw: vi.fn(async () => []),
       run: {
         findUnique: vi.fn(async () => ({ status: "running", startedAt: null })),
@@ -158,6 +292,7 @@ describe("finalizeRun", () => {
         create: vi.fn(async () => ({ threadId: "thread-1", seq: 0 })),
         deleteMany: vi.fn(async () => ({ count: 0 })),
       },
+      secret: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       steeringMessage: {
         findMany: vi.fn(async () => [
           {
@@ -206,6 +341,7 @@ describe("finalizeRun", () => {
 
   it("pins the continuation when every waited message chose the same model", async () => {
     const tx = {
+      externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       $queryRaw: vi.fn(async () => []),
       run: {
         findUnique: vi.fn(async () => ({ status: "running", startedAt: null })),
@@ -224,6 +360,7 @@ describe("finalizeRun", () => {
         create: vi.fn(async () => ({ threadId: "thread-1", seq: 0 })),
         deleteMany: vi.fn(async () => ({ count: 0 })),
       },
+      secret: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       steeringMessage: {
         findMany: vi.fn(async () => [
           {
@@ -284,6 +421,7 @@ describe("finalizeRun", () => {
       text: "What is the status?",
     };
     const tx = {
+      externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       $queryRaw: vi.fn(async () => []),
       run: {
         findUnique: vi.fn(async () => ({ status: "running", startedAt: null })),
@@ -302,6 +440,7 @@ describe("finalizeRun", () => {
         create: vi.fn(async () => ({ threadId: "thread-1", seq: 0 })),
         deleteMany: vi.fn(async () => ({ count: 0 })),
       },
+      secret: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       steeringMessage: {
         findMany: vi.fn(async () => [
           {
@@ -1415,6 +1554,89 @@ describe("answerRunInput", () => {
     );
   });
 
+  it("resumes an answered creation intro as the user's turn", async () => {
+    const answerIntro = async (answer: string) => {
+      const tx = {
+        $queryRaw: vi.fn().mockResolvedValue([{ id: "thread-1" }]),
+        message: {
+          findFirst: vi.fn().mockResolvedValue({
+            id: "message-1",
+            blocks: [
+              {
+                kind: "ask",
+                text: "What do you want me for?",
+                status: "pending",
+                actions: [
+                  { id: "choice-1", label: "Just testing things out" },
+                  { id: "choice-2", label: "Research and one-off tasks" },
+                ],
+              },
+            ],
+          }),
+          update: vi.fn().mockResolvedValue({ id: "message-1" }),
+        },
+        run: {
+          findFirst: vi.fn().mockResolvedValue({
+            botId: "bot-2",
+            trigger: "created",
+            task: { prompt: "You were just created." },
+          }),
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+          findUnique: vi.fn().mockResolvedValue({
+            status: "queued",
+            createdAt: new Date("2026-08-16T12:00:00.000Z"),
+            threadId: "thread-1",
+          }),
+        },
+        task: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+        thread: { update: vi.fn().mockResolvedValue({ nextEventSeq: 10 }) },
+        event: {
+          create: vi.fn(async ({ data }: { data: { seq: number; type: string } }) => ({
+            ...event(data.seq),
+            type: data.type,
+          })),
+          findFirst: vi.fn().mockResolvedValue(null),
+        },
+      };
+      const prisma = {
+        $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
+      } as unknown as PrismaClient;
+      await expect(
+        answerRunInput(prisma, {
+          spaceId: "workspace-1",
+          threadId: "thread-1",
+          runId: "run-1",
+          messageId: "message-1",
+          answeredByUserId: "user-1",
+          answer,
+        }),
+      ).resolves.toBe(true);
+      return tx;
+    };
+
+    // The executor gives a "user" run the thread and every tool; the answer is its prompt,
+    // which the restored ask_user call receives as its result.
+    const chosen = await answerIntro("choice-2");
+    expect(chosen.run.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { status: "queued", trigger: "user", checkpoint: null },
+      }),
+    );
+    expect(chosen.task.updateMany).toHaveBeenCalledWith({
+      where: { runs: { some: { id: "run-1" } } },
+      data: { prompt: "Selected choice choice-2: Research and one-off tasks" },
+    });
+
+    const typed = await answerIntro("Track our competitors' launches");
+    expect(typed.run.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ trigger: "user" }) }),
+    );
+    expect(typed.task.updateMany).toHaveBeenCalledWith({
+      where: { runs: { some: { id: "run-1" } } },
+      data: { prompt: "Track our competitors' launches" },
+    });
+  });
+
   it("records a spoken call answer as a user utterance with the call identity", async () => {
     const fanout = new TestFanout();
     const tx = {
@@ -2017,6 +2239,11 @@ describe("answerRunInput", () => {
           update: vi.fn().mockResolvedValue({ id: "effect-1" }),
         },
         actionApprovalRule: {
+          findMany: vi.fn().mockResolvedValue([
+            { id: "rule-0", matchValue: matchValue.toUpperCase() },
+            { id: "rule-other", matchValue: `${matchValue}.other` },
+          ]),
+          deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
           upsert: vi.fn().mockResolvedValue({ id: "rule-1" }),
         },
         thread: { update: vi.fn().mockResolvedValue({ nextEventSeq: 10 }) },
@@ -2050,6 +2277,9 @@ describe("answerRunInput", () => {
       expect(tx.externalEffect.update).toHaveBeenCalledWith({
         where: { id: "effect-1" },
         data: { status: "approved" },
+      });
+      expect(tx.actionApprovalRule.deleteMany).toHaveBeenCalledWith({
+        where: { id: { in: ["rule-0"] } },
       });
       expect(tx.actionApprovalRule.upsert).toHaveBeenCalledWith({
         where: {
@@ -2209,6 +2439,43 @@ describe("answerRunInput", () => {
       }),
     ).resolves.toBe(false);
     expect(tx.externalEffect.findFirst).not.toHaveBeenCalled();
+    expect(tx.run.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects a secret answer over the value limit without storing it", async () => {
+    const store = vi.fn();
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: "thread-1" }]),
+      run: {
+        findFirst: vi.fn().mockResolvedValue({ botId: "bot-1", userId: "user-1" }),
+        updateMany: vi.fn(),
+      },
+      message: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: "message-1",
+          blocks: [{ kind: "ask", text: "Code", input: "secret", status: "pending" }],
+        }),
+      },
+    };
+    const prisma = {
+      $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
+    } as unknown as PrismaClient;
+    await expect(
+      answerRunInput(
+        prisma,
+        {
+          spaceId: "workspace-1",
+          threadId: "thread-1",
+          runId: "run-1",
+          messageId: "message-1",
+          answeredByUserId: "user-1",
+          answer: "x".repeat(BOT_SECRET_VALUE_MAX_LENGTH + 1),
+        },
+        new TestFanout(),
+        { store },
+      ),
+    ).rejects.toThrow(AnswerTooLongError);
+    expect(store).not.toHaveBeenCalled();
     expect(tx.run.updateMany).not.toHaveBeenCalled();
   });
 
@@ -2837,6 +3104,9 @@ describe("sendUserMessage", () => {
     };
     const prisma = {
       message: { findUnique: vi.fn().mockResolvedValue(null) },
+      run: {
+        findFirst: vi.fn().mockResolvedValue({ id: "run-1", taskId: "task-1" }),
+      },
       $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => {
         const result = await callback(tx);
         committed = true;
@@ -2892,7 +3162,6 @@ describe("sendUserMessage", () => {
       id: "message-1",
       seq: 4,
       createdAt,
-      sourceRuns: [{ id: "run-1", taskId: "task-1" }],
     } as never);
     await sendUserMessage(
       prisma,
@@ -3582,6 +3851,7 @@ describe("clearThread", () => {
     const fanout = new TestFanout();
     const publish = vi.spyOn(fanout, "publish");
     const tx = {
+      externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       thread: {
         update: vi
           .fn()
@@ -3589,11 +3859,16 @@ describe("clearThread", () => {
           .mockResolvedValue({ nextEventSeq: 1 }),
       },
       run: {
-        findMany: vi.fn().mockResolvedValue([{ id: "run-1", taskId: "task-1" }]),
+        findMany: vi
+          .fn()
+          .mockResolvedValue([
+            { id: "run-1", taskId: "task-1", userId: "user-1", spaceId: "workspace-1" },
+          ]),
         updateMany: vi.fn(),
       },
       attempt: { updateMany: vi.fn() },
       task: { updateMany: vi.fn() },
+      secret: { deleteMany: vi.fn() },
       computerExecutionLease: { updateMany: vi.fn() },
       computer: { updateMany: vi.fn() },
       message: { deleteMany: vi.fn() },
@@ -3638,11 +3913,16 @@ describe("clearThread", () => {
       },
     });
     expect(publish).toHaveBeenCalledWith("thread:thread-1", JSON.stringify({ cursor: 0 }));
+    // A cleared chat never resumes its run to read a waiting secret answer.
+    expect(tx.secret.deleteMany).toHaveBeenCalledWith({
+      where: { OR: [{ userId: "user-1", spaceId: "workspace-1", kind: "run-secret:run-1" }] },
+    });
   });
 
   it("scopes group clear lease cleanup to cancelled run ids", async () => {
     const fanout = new TestFanout();
     const tx = {
+      externalEffect: { deleteMany: vi.fn(async () => ({ count: 0 })) },
       thread: {
         update: vi
           .fn()
@@ -3658,6 +3938,7 @@ describe("clearThread", () => {
       },
       attempt: { updateMany: vi.fn() },
       task: { updateMany: vi.fn() },
+      secret: { deleteMany: vi.fn() },
       computerExecutionLease: { updateMany: vi.fn() },
       computer: { updateMany: vi.fn() },
       message: { deleteMany: vi.fn() },
@@ -3912,7 +4193,10 @@ describe("appendEvent", () => {
     };
     const tx = {
       thread: { update: vi.fn().mockResolvedValue({ nextEventSeq: 4 }) },
-      run: { findUnique: vi.fn().mockResolvedValue({ status: "running" }) },
+      run: {
+        findUnique: vi.fn().mockResolvedValue({ status: "running" }),
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
       event: { create: vi.fn().mockResolvedValue(created) },
     };
     const prisma = {
@@ -4201,4 +4485,35 @@ describe("discardAnsweredSteering", () => {
       },
     });
   });
+});
+
+it("checks cross-space peer permission inside the message transaction before creating a run", async () => {
+  const tx = {
+    thread: { update: vi.fn(async () => ({ nextMessageSeq: 1 })) },
+    message: { create: vi.fn(async () => ({ id: "message-1", seq: 0 })) },
+    task: { create: vi.fn() },
+    run: { create: vi.fn(), findMany: vi.fn() },
+    $queryRaw: vi.fn(async () => [
+      { id: "sender", spaceId: "a", crossSpaceCommunication: true, archivedAt: null },
+      { id: "target", spaceId: "b", crossSpaceCommunication: false, archivedAt: null },
+    ]),
+  };
+  const prisma = {
+    message: { findUnique: vi.fn(async () => null) },
+    $transaction: vi.fn(async (callback: (client: typeof tx) => Promise<unknown>) => callback(tx)),
+  } as unknown as PrismaClient;
+  await expect(
+    sendUserMessage(prisma, {
+      spaceId: "b",
+      threadId: "thread",
+      botId: "target",
+      userId: "owner",
+      blocks: [{ kind: "text", text: "peer reply" }],
+      prompt: "peer reply",
+      trigger: "messaging",
+      crossSpaceSenderBotId: "sender",
+    }),
+  ).rejects.toBeInstanceOf(CrossSpaceCommunicationBlockedError);
+  expect(tx.task.create).not.toHaveBeenCalled();
+  expect(tx.run.create).not.toHaveBeenCalled();
 });

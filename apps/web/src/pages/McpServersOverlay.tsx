@@ -29,7 +29,7 @@ import {
 } from "@rakazo/ui-web";
 import { Disclosure } from "@rakazo/ui-web/components/ui/disclosure";
 import { Check, LoaderCircle, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { McpServerHealthLine } from "../components/McpServerHealthLine";
 import { connectMcpOauth, MCP_OAUTH_CHANNEL, mcpOAuthRedirectUri } from "../lib/mcp-connect";
 import { rpc } from "../lib/rpc";
@@ -57,7 +57,7 @@ function envName(value: string): string {
 function oauthStatusText(server: McpServer): string | null {
   if (server.oauthStatus === "connected") return t`OAuth connected`;
   if (server.oauthStatus === "reconnect") return t`OAuth expired`;
-  return server.hasSecret ? t`credential saved` : null;
+  return server.hasSecret ? t`Credential saved` : null;
 }
 
 function oauthActionLabel(server: McpServer, pending: boolean): string {
@@ -65,9 +65,17 @@ function oauthActionLabel(server: McpServer, pending: boolean): string {
   return server.oauthStatus === "none" ? t`Connect OAuth` : t`Reconnect OAuth`;
 }
 
-export function McpServersOverlay({ onClose }: { onClose: () => void }) {
+export function McpServersOverlay({
+  onClose,
+  editServerId,
+}: {
+  onClose: () => void;
+  /** Opens with this server's form, as an import's setup checklist does. */
+  editServerId?: string;
+}) {
   const { t } = useLingui();
   const [servers, setServers] = useState<McpServer[]>([]);
+  const [editing, setEditing] = useState<McpServer | null>(null);
   const [bots, setBots] = useState<Bot[]>([]);
   const [botAssignments, setBotAssignments] = useState<Record<string, BotMcpServer[]>>({});
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
@@ -117,6 +125,15 @@ export function McpServersOverlay({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     void refresh().catch((err: unknown) => setError(errorText(err, t`Could not load MCP servers`)));
   }, []);
+
+  const openedEditServer = useRef(false);
+  useEffect(() => {
+    if (!editServerId || openedEditServer.current) return;
+    const server = servers.find((item) => item.id === editServerId);
+    if (!server) return;
+    openedEditServer.current = true;
+    startEditing(server);
+  }, [editServerId, servers]);
 
   useEffect(() => {
     // BroadcastChannel instead of window.opener messaging: provider login
@@ -172,7 +189,43 @@ export function McpServersOverlay({ onClose }: { onClose: () => void }) {
       .map((row) => row.name),
   );
 
-  async function addServer() {
+  function resetForm() {
+    setEditing(null);
+    setName("");
+    setEndpoint("");
+    setSecret("");
+    setHeaderName("Authorization");
+    setHeaderValue("");
+    setOauthClientId("");
+    setOauthClientSecret("");
+    setOauthAuthorizationServer("");
+    setOauthScope("");
+    setOauthParams("");
+    setCommand("");
+    setArgs("");
+    setEnvRows([emptyEnvRow()]);
+    setSelectedBotIds([]);
+  }
+
+  /** Stored values are never sent back to the client, so a blank one keeps what is stored. */
+  function startEditing(server: McpServer) {
+    resetForm();
+    setError(null);
+    setEditing(server);
+    setName(server.name);
+    setTransport(server.transport);
+    setEndpoint(server.endpoint ?? "");
+    setCommand(server.command ?? "");
+    setArgs(server.args.join(" "));
+    setHeaderName(server.headerKeys[0] ?? "Authorization");
+    const rows = [
+      ...server.envKeys.map((name) => ({ ...emptyEnvRow(), name })),
+      ...server.fileKeys.map((name) => ({ ...emptyEnvRow(), name, file: true })),
+    ];
+    if (rows.length > 0) setEnvRows(rows);
+  }
+
+  async function saveServer() {
     if (transport === "stdio" && duplicateNames.size > 0) return;
     setError(null);
     if (!name.trim()) {
@@ -190,9 +243,12 @@ export function McpServersOverlay({ onClose }: { onClose: () => void }) {
     setSaving(true);
     try {
       const slug = deriveMcpSlug(name);
-      const headers = headerValue.trim()
-        ? { [headerName.trim() || "Authorization"]: headerValue.trim() }
-        : {};
+      const headers = {
+        ...Object.fromEntries((editing?.headerKeys ?? []).map((key) => [key, ""])),
+        ...(headerValue.trim()
+          ? { [headerName.trim() || "Authorization"]: headerValue.trim() }
+          : {}),
+      };
       const oauthBase = oauthClientId.trim()
         ? {
             clientId: oauthClientId.trim(),
@@ -207,14 +263,18 @@ export function McpServersOverlay({ onClose }: { onClose: () => void }) {
             .filter((row) => row.name && row.file === file)
             .map((row) => [row.name, row.value]),
         );
-      const created =
+      const config =
         transport === "stdio"
-          ? await rpc.mcp.servers.create({
+          ? {
               slug,
               name: name.trim(),
               transport,
               command: command.trim(),
-              args: args.split(/\s+/).filter(Boolean),
+              // Untouched arguments keep their boundaries, spaces included.
+              args:
+                editing && args === editing.args.join(" ")
+                  ? editing.args
+                  : args.split(/\s+/).filter(Boolean),
               env: envEntries(false),
               files: envEntries(true),
               secret: secret || undefined,
@@ -222,8 +282,8 @@ export function McpServersOverlay({ onClose }: { onClose: () => void }) {
                 ? { ...oauthBase, authorizationServer: oauthAuthorizationServer.trim() }
                 : undefined,
               enabled: true,
-            })
-          : await rpc.mcp.servers.create({
+            }
+          : {
               slug,
               name: name.trim(),
               transport,
@@ -232,7 +292,22 @@ export function McpServersOverlay({ onClose }: { onClose: () => void }) {
               secret: secret || undefined,
               oauthClient: oauthBase,
               enabled: true,
-            });
+            };
+      if (editing) {
+        await rpc.mcp.servers.update({
+          id: editing.id,
+          config: {
+            ...config,
+            slug: editing.slug,
+            description: editing.description,
+            enabled: editing.enabled,
+          },
+        });
+        await refresh();
+        resetForm();
+        return;
+      }
+      const created = await rpc.mcp.servers.create(config);
       // replace() overwrites the bot's whole list, so merge with what it already has.
       await Promise.all(
         selectedBotIds.map((botId) => {
@@ -249,21 +324,9 @@ export function McpServersOverlay({ onClose }: { onClose: () => void }) {
         }),
       );
       await refresh();
-      setName("");
-      setEndpoint("");
-      setSecret("");
-      setHeaderValue("");
-      setOauthClientId("");
-      setOauthClientSecret("");
-      setOauthAuthorizationServer("");
-      setOauthScope("");
-      setOauthParams("");
-      setCommand("");
-      setArgs("");
-      setEnvRows([emptyEnvRow()]);
-      setSelectedBotIds([]);
+      resetForm();
     } catch (err) {
-      setError(errorText(err, t`Could not add MCP server`));
+      setError(errorText(err, editing ? t`Could not save` : t`Could not add MCP server`));
     } finally {
       setSaving(false);
     }
@@ -320,6 +383,7 @@ export function McpServersOverlay({ onClose }: { onClose: () => void }) {
     setError(null);
     try {
       await rpc.mcp.servers.remove({ id: server.id });
+      if (editing?.id === server.id) resetForm();
       await refresh();
     } catch (err) {
       setError(errorText(err, t`Could not delete MCP server`));
@@ -373,7 +437,7 @@ export function McpServersOverlay({ onClose }: { onClose: () => void }) {
         className="flex max-h-[calc(100%-2rem)] w-[960px] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden rounded-2xl bg-card p-0 sm:max-w-[960px]"
       >
         <DialogHeader className="flex-row items-center justify-between border-b border-border px-6 py-5">
-          <DialogTitle className="text-xl text-foreground">
+          <DialogTitle className="text-heading2 text-foreground">
             <Trans>MCP servers</Trans>
           </DialogTitle>
           <DialogClose
@@ -393,9 +457,7 @@ export function McpServersOverlay({ onClose }: { onClose: () => void }) {
         <div className="rk-scroll grid min-h-0 grid-cols-1 gap-5 overflow-y-auto p-6 lg:grid-cols-2">
           <Card className="self-start">
             <CardHeader>
-              <CardTitle>
-                <Trans>Add server</Trans>
-              </CardTitle>
+              <CardTitle>{editing ? editing.name : <Trans>Add server</Trans>}</CardTitle>
             </CardHeader>
             <CardContent>
               <FieldGroup className="gap-4">
@@ -669,7 +731,7 @@ export function McpServersOverlay({ onClose }: { onClose: () => void }) {
                     ) : null}
                   </div>
                 </Disclosure>
-                {bots.length > 0 ? (
+                {bots.length > 0 && !editing ? (
                   <Field>
                     <FieldTitle>
                       <Trans>Agents:</Trans>
@@ -683,7 +745,6 @@ export function McpServersOverlay({ onClose }: { onClose: () => void }) {
                             type="button"
                             variant={selected ? "default" : "outline"}
                             size="xs"
-                            className="rounded-full"
                             aria-pressed={selected}
                             onClick={() => toggleBot(bot.id)}
                           >
@@ -700,10 +761,31 @@ export function McpServersOverlay({ onClose }: { onClose: () => void }) {
                 type="button"
                 className="mt-5 w-full"
                 disabled={saving || (transport === "stdio" && duplicateNames.size > 0)}
-                onClick={() => void addServer()}
+                onClick={() => void saveServer()}
               >
-                {saving ? <Trans>Adding…</Trans> : <Trans>Add server</Trans>}
+                {editing ? (
+                  saving ? (
+                    <Trans>Saving…</Trans>
+                  ) : (
+                    <Trans>Save</Trans>
+                  )
+                ) : saving ? (
+                  <Trans>Adding…</Trans>
+                ) : (
+                  <Trans>Add server</Trans>
+                )}
               </Button>
+              {editing ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="mt-2 w-full"
+                  disabled={saving}
+                  onClick={resetForm}
+                >
+                  <Trans>Cancel</Trans>
+                </Button>
+              ) : null}
             </CardContent>
           </Card>
           <div>
@@ -755,7 +837,6 @@ export function McpServersOverlay({ onClose }: { onClose: () => void }) {
                                 type="button"
                                 variant={assigned ? "default" : "outline"}
                                 size="xs"
-                                className="rounded-full"
                                 aria-pressed={assigned}
                                 onClick={() => void toggleAssignment(server, bot.id)}
                               >
@@ -789,6 +870,14 @@ export function McpServersOverlay({ onClose }: { onClose: () => void }) {
                               ) : null}
                             </>
                           ) : null}
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => startEditing(server)}
+                          >
+                            <Trans>Edit</Trans>
+                          </Button>
                           <Button
                             type="button"
                             variant="outline"

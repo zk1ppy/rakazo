@@ -10,6 +10,7 @@ import {
   FieldLabel,
   NativeSelect,
   NativeSelectOption,
+  Spinner,
   Toggle,
 } from "@rakazo/ui-web";
 import { XIcon } from "lucide-react";
@@ -83,6 +84,7 @@ export function MemorySettingsOverlay({
   const [pending, setPending] = useState<"connect" | "disconnect" | "scope" | "extract" | null>(
     null,
   );
+  const [addingProvider, setAddingProvider] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -133,6 +135,7 @@ export function MemorySettingsOverlay({
     markPending("disconnect");
     try {
       await rpc.memory.disconnectProvider();
+      setAddingProvider(false);
       onConfigChange(null);
     } catch (err) {
       setError(errorText(err, t`Could not disconnect memory provider`));
@@ -184,7 +187,7 @@ export function MemorySettingsOverlay({
       {!embedded ? (
         <div className="flex items-start justify-between px-6 pt-6 sm:px-8 sm:pt-7">
           <div>
-            <DialogTitle className="text-2xl font-medium text-foreground">
+            <DialogTitle className="text-heading2 font-medium text-foreground">
               <Trans>Memory</Trans>
             </DialogTitle>
           </div>
@@ -202,14 +205,16 @@ export function MemorySettingsOverlay({
         <div className="space-y-5">
           {error ? <p className="text-[13px] text-destructive">{error}</p> : null}
 
+          <SpaceMemorySection />
+
           {config === undefined ? (
             <p className="text-[13px] text-muted-foreground">
-              <Trans>Loading memory settings…</Trans>
+              <Spinner aria-label={t`Loading memory settings…`} />
             </p>
           ) : config ? (
             <section className="rounded-xl border border-border px-4 py-4">
               <div className="flex items-center justify-between gap-3">
-                <h3 className="text-[15px] font-medium text-foreground">
+                <h3 className="text-heading3 font-medium text-foreground">
                   {registration?.name ?? config.provider}
                 </h3>
                 <span className="text-[13px] text-success">
@@ -238,7 +243,7 @@ export function MemorySettingsOverlay({
                 type="button"
                 disabled={busy}
                 onClick={() => void disconnect()}
-                className="mt-5 rounded-full"
+                className="mt-5"
               >
                 {pending === "disconnect" ? (
                   <Trans>Disconnecting…</Trans>
@@ -247,11 +252,23 @@ export function MemorySettingsOverlay({
                 )}
               </Button>
             </section>
+          ) : !addingProvider ? (
+            <Button
+              variant="outline"
+              type="button"
+              onClick={() => setAddingProvider(true)}
+              className="rounded-full"
+            >
+              <Trans>Connect memory provider</Trans>
+            </Button>
           ) : registration ? (
             <section className="rounded-xl border border-border px-4 py-4">
-              <h3 id={providerSelectId} className="text-[15px] font-medium text-foreground">
+              <h3 id={providerSelectId} className="text-heading3 font-medium text-foreground">
                 <Trans>Provider</Trans>
               </h3>
+              <p className="mt-1 text-[13px] text-muted-foreground">
+                <Trans>Lets bots save and recall facts by meaning, alongside MEMORY.md.</Trans>
+              </p>
               {MEMORY_PROVIDER_SETTINGS.length > 1 ? (
                 <div className="mt-3">
                   <NativeSelect
@@ -271,9 +288,6 @@ export function MemorySettingsOverlay({
               ) : (
                 <p className="mt-3 text-[14px] text-foreground">{registration.name}</p>
               )}
-              {registration.description ? (
-                <p className="mt-2 text-[13px] text-muted-foreground">{registration.description}</p>
-              ) : null}
 
               <div className="mt-4">
                 <ScopePicker value={defaultScope} disabled={busy} onChange={setDefaultScope} />
@@ -286,7 +300,6 @@ export function MemorySettingsOverlay({
               <Trans>The selected memory provider is not available in this build.</Trans>
             </p>
           )}
-          <SpaceMemorySection />
         </div>
       </div>
     </>

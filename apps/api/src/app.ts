@@ -14,7 +14,11 @@ import type {
   SandboxProvider,
   TransactionalEmailProvider,
 } from "@rakazo/adapter-kit";
-import { SandboxRateLimitError, VoiceAccountError } from "@rakazo/adapter-kit";
+import {
+  SandboxRateLimitError,
+  SandboxUnavailableError,
+  VoiceAccountError,
+} from "@rakazo/adapter-kit";
 import type {
   ComposioProvider,
   ConnectorRegistry,
@@ -25,6 +29,8 @@ import {
   ChatSdkMessagingSurface,
   CodexCatalogCache,
   ComposioConnector,
+  createAgentHomeStore,
+  createArtifactStore,
   createBackgroundJobHandlers,
   createCloudAgentConnection,
   createConnectorStack,
@@ -32,6 +38,7 @@ import {
   createMessagingContextLoader,
   createMessagingTeamChatHistory,
   createMessagingTeamChatSender,
+  createModelCreditReconciler,
   createProductAnalytics,
   createRunExecutor,
   createRunSandbox,
@@ -39,11 +46,10 @@ import {
   createSecretStore,
   createTicketChangeNotifier,
   createWebProvider,
-  deletePushToken,
+  deploymentModelUsageLookup,
   destroyBot,
   EmailEmulator,
   ExpoPushProvider,
-  endSessionPushToken,
   GraphileJobPublisher,
   InMemoryJobQueue,
   InMemoryRealtimeFanout,
@@ -52,8 +58,6 @@ import {
   isComposioEnabled,
   isMessagingSurfaceEnabled,
   isPipedreamEnabled,
-  LocalAgentHomeStore,
-  LocalArtifactStore,
   McpConnector,
   McpOAuthBroker,
   messagingPlatformsFromEnv,
@@ -61,13 +65,15 @@ import {
   PiOAuthLogins,
   PipedreamConnector,
   PostgresRealtimeFanout,
+  PrismaPushTokenStore,
   pipedreamConfigFromEnv,
   piSessionsRoot,
+  RunJobPublisher,
   reconcileCloudAgents,
   reconcileComputerUpdates,
   removePiUserSessions,
+  resolveDeploymentModel,
   ScriptedAgentRuntime,
-  SmtpEmailProvider,
   SpaceMemoryProviderResolver,
   StripeBillingProvider,
   sandboxProviderOptionsFromEnv,
@@ -78,10 +84,9 @@ import {
 import { createAuth, isBlockedAuthPath, loopbackTwinOrigins } from "@rakazo/auth";
 import type { Actor, AuthCapabilities } from "@rakazo/contracts";
 import { SERVER_BUILD_HEADER } from "@rakazo/contracts";
-import { signupAllowlistBootUpdate, signupPolicyFromEnv } from "@rakazo/core";
+import { signupPolicyFromEnv } from "@rakazo/core";
 import type { Pool, PrismaClient } from "@rakazo/db";
 import {
-  contentEncryptionOf,
   createBoardEvents,
   createDb,
   createPool,
@@ -125,10 +130,11 @@ import {
 } from "./client-ip.js";
 import { cspReportRoutes } from "./csp-report.js";
 import { mountDiagramScript } from "./diagram-script.js";
+import { configuredEmailProvider } from "./email.js";
 import type { AppEnv } from "./env.js";
 import { loadEnv } from "./env.js";
 import { healthRoutes } from "./health.js";
-import { mountLocalSettings } from "./local-settings.js";
+import { mountLocalComputerHost } from "./local-settings.js";
 import {
   createMessagingInboundHandler,
   teamChatSenderCanWakeMessageRoutines,
@@ -202,6 +208,7 @@ type CreateAppOverrides = Partial<AppEnv> & {
   notifications?: NotificationProvider;
   billing?: BillingProvider;
   remoteConnectors?: RemoteConnectorDependencies;
+  modelConnectionFetch?: typeof fetch;
   logger?: Logger;
   runtime?: AgentRuntime;
   contextStrategy?: AgentContextStrategy;
@@ -220,6 +227,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     notifications: notificationsOverride,
     billing: billingOverride,
     remoteConnectors,
+    modelConnectionFetch,
     logger: loggerOverride,
     runtime: runtimeOverride,
     contextStrategy,
@@ -272,7 +280,8 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   const ticketBoardEnabled = env.ticketBoardEnabled;
   const boardEvents = createBoardEvents(realtime);
   const environmentSignupPolicy = signupPolicyFromEnv(env);
-  const deploymentSettings = await prisma.deploymentSettings.upsert({
+  // Mirror the env policy for the previous release during a rolling deploy.
+  await prisma.deploymentSettings.upsert({
     where: { id: "default" },
     create: {
       id: "default",
@@ -280,35 +289,12 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       signupAllowlist: environmentSignupPolicy.allowlist.join(","),
       signupPolicyInitialized: true,
     },
-    update: {},
+    update: {
+      signupsEnabled: environmentSignupPolicy.enabled,
+      signupAllowlist: environmentSignupPolicy.allowlist.join(","),
+      signupPolicyInitialized: true,
+    },
   });
-  if (!deploymentSettings.signupPolicyInitialized) {
-    // Older versions created this row with schema defaults even though auth
-    // still enforced the environment policy. Copy that effective policy once
-    // so upgrades preserve behavior. Later starts reapply a non-empty
-    // SIGNUP_ALLOWLIST; a blank value leaves the stored list alone.
-    await prisma.deploymentSettings.updateMany({
-      where: { id: "default", signupPolicyInitialized: false },
-      data: {
-        signupsEnabled: environmentSignupPolicy.enabled,
-        signupAllowlist: environmentSignupPolicy.allowlist.join(","),
-        signupPolicyInitialized: true,
-      },
-    });
-  } else {
-    const signupAllowlist = signupAllowlistBootUpdate(
-      deploymentSettings.signupAllowlist,
-      env.signupAllowlist,
-      true,
-    );
-    if (signupAllowlist !== null) {
-      await prisma.deploymentSettings.update({
-        where: { id: "default" },
-        data: { signupAllowlist },
-      });
-      logger.info("applied SIGNUP_ALLOWLIST from the environment");
-    }
-  }
 
   const jobKind = env.wakeupDriver;
   const inMemoryJobs = jobKind === "memory" ? new InMemoryJobQueue() : undefined;
@@ -325,11 +311,16 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   const jobPool = created.pool ?? ownedJobPool;
   const jobs = inMemoryJobs
     ? inMemoryJobs
-    : new GraphileJobPublisher(
-        jobPool ??
-          (() => {
-            throw new Error("Graphile job publisher requires a PostgreSQL pool");
-          })(),
+    : new RunJobPublisher(
+        prisma,
+        realtime,
+        new GraphileJobPublisher(
+          jobPool ??
+            (() => {
+              throw new Error("Graphile job publisher requires a PostgreSQL pool");
+            })(),
+          prisma,
+        ),
       );
   const ticketChanges = createTicketChangeNotifier({
     boardEvents,
@@ -360,8 +351,8 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   );
   const memoryProviders = new SpaceMemoryProviderResolver(prisma, secrets, jobs);
   const oauthLogins = new PiOAuthLogins();
-  const home = new LocalAgentHomeStore(env.dataDir);
-  const artifacts = new LocalArtifactStore(env.dataDir, contentEncryptionOf(prisma)?.ring);
+  const home = createAgentHomeStore(env.dataDir, prisma);
+  const artifacts = createArtifactStore(env.dataDir, prisma);
   const memory = new MarkdownMemoryStore(prisma);
   const mcp = new McpConnector(
     prisma,
@@ -393,8 +384,9 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     })
       ? new ChatSdkMessagingSurface(messagingPlatforms)
       : undefined);
+  const configuredEmail = emailOverride ?? configuredEmailProvider(env);
   const localEmailEmulator =
-    !emailOverride && !env.smtpUrl && env.emailEmulator
+    !configuredEmail && env.emailEmulator
       ? new EmailEmulator((message) => {
           getLogger().info("email emulator captured message", {
             "email.subject": message.subject,
@@ -404,17 +396,27 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   if (localEmailEmulator && !isLoopbackHost(env.apiHost)) {
     throw new Error("EMAIL_EMULATOR requires API_HOST to be a loopback host");
   }
-  const email: TransactionalEmailProvider | undefined =
-    emailOverride ??
-    (env.smtpUrl
-      ? new SmtpEmailProvider({ url: env.smtpUrl, from: env.emailFrom ?? "" })
-      : localEmailEmulator);
+  const email: TransactionalEmailProvider | undefined = configuredEmail ?? localEmailEmulator;
   const stripeBilling = stripeBillingConfigFromEnv(env);
   const billingProvider: BillingProvider | undefined =
     billingOverride ?? (stripeBilling ? new StripeBillingProvider(stripeBilling) : undefined);
   const billing = billingProvider
-    ? createBillingService({ prisma, provider: billingProvider, webOrigin: env.webOrigin })
+    ? createBillingService({
+        prisma,
+        provider: billingProvider,
+        webOrigin: env.webOrigin,
+        managedModelsAvailable: resolveDeploymentModel().configured,
+      })
     : undefined;
+  const modelCreditsEnabled = billing?.modelCreditsEnabled ?? false;
+  await prisma.deploymentSettings.upsert({
+    where: { id: "default" },
+    create: {
+      id: "default",
+      modelCreditsEnabled,
+    },
+    update: { modelCreditsEnabled },
+  });
   const installed = new InstalledConnectorProvider(
     prisma,
     secrets,
@@ -445,9 +447,10 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       : new PiAgentRuntime({
           sessionRoot: env.piSessionRecording ? piSessionsRoot(env.dataDir) : undefined,
         }));
+  const pushTokens = new PrismaPushTokenStore(prisma, env.encryptionKey);
   const notifications =
     notificationsOverride ??
-    new ExpoPushProvider(env.dataDir, {
+    new ExpoPushProvider(pushTokens, {
       sessionExpiresAt: (sessionId) => pushSessionExpiresAt(prisma, sessionId),
       jobs,
       accessToken: env.expoAccessToken,
@@ -499,20 +502,20 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
         ),
       );
       await removePiUserSessions(env.dataDir, userId);
-      await deletePushToken(env.dataDir, userId).catch((error) =>
-        getLogger().error("push token removal failed", error),
-      );
+      await pushTokens
+        .remove(userId)
+        .catch((error) => getLogger().error("push token removal failed", error));
     },
-    // The session change already happened, so a token file failure must not fail sign-out.
+    // The session change already happened, so a registration cleanup failure must not fail sign-out.
     afterDeleteSession: async (session) => {
-      await endSessionPushToken(env.dataDir, session.userId, session.id).catch((error) =>
-        getLogger().error("push token removal failed", error),
-      );
+      await pushTokens
+        .endSession(session.userId, session.id)
+        .catch((error) => getLogger().error("push token removal failed", error));
     },
     afterReplaceSession: async (previous, session) => {
-      await endSessionPushToken(env.dataDir, session.userId, previous.id, session.id).catch(
-        (error) => getLogger().error("push token session update failed", error),
-      );
+      await pushTokens
+        .endSession(session.userId, previous.id, session.id)
+        .catch((error) => getLogger().error("push token session update failed", error));
     },
   });
   const oauthTokenUpgrade = auth
@@ -536,6 +539,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   // resolution alike, so a list call warms the run path in this process.
   const codexCatalog = new CodexCatalogCache();
   const executor = createRunExecutor({
+    billingEnabled: modelCreditsEnabled,
     maxUploadSizeBytes: env.maxUploadSizeBytes,
     contextStrategy,
     prisma,
@@ -590,6 +594,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     prisma,
     sandbox,
     home,
+    artifacts,
     jobs,
     events,
     workerId: "api",
@@ -611,6 +616,10 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
         jobs,
         events,
         notifications,
+        reconcileModelCredits: createModelCreditReconciler({
+          prisma,
+          lookup: deploymentModelUsageLookup(),
+        }),
         reconcileCloudAgents: () => reconcileCloudAgents({ prisma, jobs, cloudAgent }),
         reconcileComputerUpdates: () => reconcileComputerUpdates({ prisma, jobs }),
         reconcileSecurityEventRetention: createSecurityEventPruner(
@@ -626,6 +635,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     cloudAgent,
     codexCatalog,
     prisma,
+    pushTokens,
     events,
     ticketChanges,
     boardEvents,
@@ -643,6 +653,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     composio: stack.composio,
     connectors: stack.connector,
     remoteConnectors,
+    modelConnectionFetch,
     artifacts,
     dataDir: env.dataDir,
     billing,
@@ -667,11 +678,11 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       screenProxySecret: env.screenProxySecret,
       sandboxProvider: env.sandboxProvider,
       gitSha: env.gitSha,
-      updaterUrl: env.updaterUrl,
-      updaterToken: env.updaterToken,
-      imageTag: env.imageTag,
       integrationsCatalogUrl: env.integrationsCatalogUrl,
       mcpAllowPrivateEndpoint: env.mcpAllowPrivateEndpoint,
+      desktopHostChoiceEnabled: Boolean(env.desktopStackToken),
+      mcpStdioEnabled: env.mcpStdioEnabled,
+      mcpStdioAllowedCommands: env.mcpStdioAllowedCommands,
     },
   });
   const rpc = new RPCHandler(router, {
@@ -756,7 +767,11 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     await auditAuthResponse(path, ip, response);
     return response;
   });
-  mountLocalSettings(app, { token: env.desktopStackToken, prisma, rpc });
+  mountLocalComputerHost(app, {
+    token: env.desktopStackToken,
+    sandboxProvider: env.sandboxProvider,
+    prisma,
+  });
   const requestSession = async (request: Request) => {
     // The bearer plugin turns a signed `Authorization: Bearer` into the session cookie.
     const session = await auth.api.getSession({ headers: request.headers });
@@ -837,6 +852,12 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
         signupAllowlist: env.signupAllowlist,
       },
       acknowledge: receipts?.acknowledge,
+      storeAttachment: ({ spaceId, userId, ...input }) =>
+        storeInboundAttachment(
+          { prisma, artifacts, maxUploadSizeBytes: env.maxUploadSizeBytes },
+          { spaceId, userId },
+          input,
+        ),
     } satisfies Parameters<typeof createMessagingInboundHandler>[0];
     const inbound = createMessagingInboundHandler(inboundDeps);
     const handleTeamChatInbound = async (
@@ -1250,10 +1271,21 @@ export function handleRpcError(error: unknown, path: readonly string[]): void {
       cause: error,
     });
   }
-  logUnexpectedRpcError(error, path);
+  // The computer provider did not start the computer in time: an outage on its side the user
+  // can retry, not a server failure.
+  if (error instanceof SandboxUnavailableError) {
+    getLogger().warn(`rpc ${path.join("/")} computer unavailable`, {
+      reason: error.cause instanceof Error ? error.cause.message : undefined,
+    });
+    throw new ORPCError("SERVICE_UNAVAILABLE", { message: error.message, cause: error });
+  }
   if (error instanceof SandboxRateLimitError) {
+    getLogger().warn(`rpc ${path.join("/")} computer rate limited`, {
+      reason: error.cause instanceof Error ? error.cause.message : undefined,
+    });
     throw new ORPCError("TOO_MANY_REQUESTS", { message: error.message, cause: error });
   }
+  logUnexpectedRpcError(error, path);
 }
 
 export function logUnexpectedRpcError(error: unknown, path: readonly string[]): void {

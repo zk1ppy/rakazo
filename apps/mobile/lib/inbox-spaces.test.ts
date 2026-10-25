@@ -9,6 +9,7 @@ import {
 import { activateUiLocale } from "./i18n";
 import {
   canDeleteInboxSpace,
+  deleteSpaceTitle,
   type InboxSpace,
   inboxHasNoChats,
   inboxNeedsCreateHint,
@@ -201,25 +202,22 @@ describe("spaceInboxItems", () => {
     };
     const items = spaceInboxItems([space({ isDefault: true, bots: [bot], groups: [group] })]);
     expect(items.map((item) => item.type)).toEqual(["bot", "group"]);
-    expect(items[0]).toMatchObject({ type: "bot", depth: 0, hasChildren: false });
+    expect(items[0]).toMatchObject({ type: "bot", bot });
   });
 
-  it("nests child bots under their parent and can collapse them", () => {
-    const parent = { ...bot, id: "parent", parentBotId: null };
-    const child = { ...bot, id: "child", parentBotId: "parent" };
-    const expanded = spaceInboxItems([space({ isDefault: true, bots: [parent, child] })]);
-    expect(expanded.map((item) => ("bot" in item ? [item.bot.id, item.depth] : item.type))).toEqual(
-      [
-        ["parent", 0],
-        ["child", 1],
-      ],
+  it("lists created bots as peers in roster order, ignoring saved parent collapse state", () => {
+    const chief = { ...bot, id: "chief", parentBotId: null };
+    const created = { ...bot, id: "created", parentBotId: "chief" };
+    const peer = { ...bot, id: "peer", parentBotId: null };
+    const items = spaceInboxItems(
+      [space({ isDefault: true, bots: [created, peer, chief] })],
+      new Set(["chief"]),
     );
-    expect(expanded[0]).toMatchObject({ hasChildren: true });
-    const collapsed = spaceInboxItems(
-      [space({ isDefault: true, bots: [parent, child] })],
-      new Set(["parent"]),
-    );
-    expect(collapsed.map((item) => ("bot" in item ? item.bot.id : item.type))).toEqual(["parent"]);
+    expect(items).toEqual([
+      { type: "bot", bot: created },
+      { type: "bot", bot: peer },
+      { type: "bot", bot: chief },
+    ]);
   });
 
   it("collapses one section heading and counts its chats", () => {
@@ -306,12 +304,26 @@ describe("spaceInboxItems", () => {
     expect(canDeleteInboxSpace(space({ canDelete }))).toBe(false);
   });
 
-  it("offers deletion for an explicitly authorized empty non-default space", () => {
+  it("offers deletion for an explicitly authorized non-default space", () => {
     expect(canDeleteInboxSpace(space())).toBe(true);
   });
 
-  it("hides deletion while a space still has content", () => {
-    expect(canDeleteInboxSpace(space({ hasContent: true }))).toBe(false);
+  it("offers deletion for a space that still has bots, which go with it", () => {
+    expect(canDeleteInboxSpace(space({ hasContent: true, bots: [bot] }))).toBe(true);
+  });
+
+  it("names every bot deletion removes, not only the visible ones", () => {
+    expect(deleteSpaceTitle(space({ bots: [bot], botCount: 3 }))).toBe(
+      "Delete Work and its 3 bots?",
+    );
+    expect(deleteSpaceTitle(space({ bots: [], botCount: 1 }))).toBe("Delete Work and its bot?");
+    expect(deleteSpaceTitle(space({ bots: [bot], botCount: 0 }))).toBe("Delete Work?");
+    // Older servers send no count; fall back to the listed bots.
+    expect(deleteSpaceTitle(space({ bots: [bot] }))).toBe("Delete Work and its bot?");
+  });
+
+  it("never offers deletion for the default space", () => {
+    expect(canDeleteInboxSpace(space({ isDefault: true }))).toBe(false);
   });
 });
 

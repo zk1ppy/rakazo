@@ -100,7 +100,6 @@ test("adds a stdio MCP server with encrypted environment variables", async ({ pa
   await page.getByRole("button", { name: "Connect apps", exact: true }).click();
   await expandAdvancedSection(page.getByTestId("integrations-advanced"));
   await page.getByRole("button", { name: "Manage MCP servers", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
 
   await page.getByLabel("Server name").fill("Invoices");
   await page.getByRole("tab", { name: "STDIO", exact: true }).click();
@@ -234,7 +233,6 @@ test("shows MCP server health, error details, and tests the connection on demand
   await page.getByRole("button", { name: "Connect apps", exact: true }).click();
   await expandAdvancedSection(page.getByTestId("integrations-advanced"));
   await page.getByRole("button", { name: "Manage MCP servers", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
 
   // OAuth being connected must not read as "working": health is the primary status.
   const health = page.getByTestId("mcp-health");
@@ -273,9 +271,9 @@ test("polls the server list while a stdio package is installing", async ({ page 
   await completeOnboarding(page);
 
   let listCalls = 0;
+  let installing = true;
   await page.context().route("**/rpc/mcp/servers/list", async (route) => {
     listCalls += 1;
-    const installing = listCalls < 3;
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
@@ -302,7 +300,10 @@ test("polls the server list while a stdio package is installing", async ({ page 
   const health = page.getByTestId("mcp-health");
   await expect(health).toHaveAttribute("data-status", "installing");
   await expect(page.getByRole("button", { name: "Test connection", exact: true })).toBeDisabled();
+  const beforePoll = listCalls;
+  installing = false;
   await expect(health).toHaveAttribute("data-status", "ok", { timeout: 15_000 });
+  expect(listCalls).toBeGreaterThan(beforePoll);
   await expect(health).toContainText("Running · 1 tool");
 
   // Polling stops once nothing is installing.
