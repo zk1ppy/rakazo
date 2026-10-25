@@ -97,9 +97,9 @@ import { isCloudMetadataAddress, isPrivateAddress } from "./network-address.js";
 import { isPrivateRemoteMcpHostname } from "./remote-mcp.js";
 import {
   classifySerenityEndpointTrust,
-  serenityEndpointRequiresDeploymentOwner,
+  serenityEndpointRequiresPrivateEndpoint,
 } from "./serenity-client.js";
-import { MemoryProviderDeploymentOwnerRequiredError } from "./serenity-memory-provider.js";
+import { MemoryProviderPrivateEndpointRequiredError } from "./serenity-memory-provider.js";
 
 export const NEO4J_PROVIDER_ID = "neo4j";
 
@@ -189,7 +189,7 @@ export function isClusterLocalNeo4jHost(hostname: string): boolean {
 export function neo4jEndpointRequiresDeploymentOwner(uri: string): boolean {
   const parsed = parseNeo4jUri(uri);
   if (isMetadataHost(parsed.hostname) || isClusterLocalNeo4jHost(parsed.hostname)) return true;
-  return serenityEndpointRequiresDeploymentOwner(trustProbeUrl(parsed.hostname));
+  return serenityEndpointRequiresPrivateEndpoint(trustProbeUrl(parsed.hostname));
 }
 
 export function neo4jRequiresDeploymentOwner(settings: Record<string, string>): boolean {
@@ -301,7 +301,7 @@ export async function prepareNeo4jConnection(
 ): Promise<{ settings: Record<string, string>; credentials: Record<string, string> }> {
   const classified = await classifyNeo4jConnectionSettings(settings, deps);
   if (classified.endpointTrust === "private" && options?.allowPrivateEndpoint === false) {
-    throw new MemoryProviderDeploymentOwnerRequiredError();
+    throw new MemoryProviderPrivateEndpointRequiredError();
   }
   const password = parsePassword(credentials.password);
   const connection: Neo4jMemoryConnection = {

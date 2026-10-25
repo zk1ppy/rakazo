@@ -2,21 +2,19 @@ import { randomUUID } from "node:crypto";
 import type { AdapterContext, BackgroundJob, JobPublisher } from "@rakazo/adapter-kit";
 import { createLogger, createTestSink, getLogger, installLogger } from "@rakazo/logging";
 import { describe, expect, it, vi } from "vitest";
-import {
-  createMemoryProvider,
-  memoryProviderRequiresDeploymentOwner,
-} from "./memory-provider-factory.js";
+import { createMemoryProvider } from "./memory-provider-factory.js";
 import type { Neo4jMemoryDriver, Neo4jMemoryRows, Neo4jRunOptions } from "./neo4j-memory-client.js";
 import { NEO4J_MEMORY_SCHEMA_STATEMENTS } from "./neo4j-memory-client.js";
 import {
   acquireNeo4jMemoryDriver,
+  neo4jRequiresDeploymentOwner,
   classifyNeo4jConnectionSettings,
   createNeo4jProvider,
   Neo4jMemoryProvider,
   parseNeo4jUri,
   prepareNeo4jConnection,
 } from "./neo4j-memory-provider.js";
-import { MemoryProviderDeploymentOwnerRequiredError } from "./serenity-memory-provider.js";
+import { MemoryProviderPrivateEndpointRequiredError } from "./serenity-memory-provider.js";
 
 const context: AdapterContext = {
   operationId: "op-1",
@@ -121,30 +119,30 @@ describe("Neo4jMemoryProvider", () => {
   });
 
   it("requires a deployment owner for private and cluster-local hosts only", () => {
-    expect(memoryProviderRequiresDeploymentOwner("neo4j", { uri: "bolt://127.0.0.1:7687" })).toBe(
+    expect(neo4jRequiresDeploymentOwner({ uri: "bolt://127.0.0.1:7687" })).toBe(
       true,
     );
-    expect(memoryProviderRequiresDeploymentOwner("neo4j", { uri: "bolt://neo4j:7687" })).toBe(true);
+    expect(neo4jRequiresDeploymentOwner({ uri: "bolt://neo4j:7687" })).toBe(true);
     expect(
-      memoryProviderRequiresDeploymentOwner("neo4j", { uri: "bolt://host.docker.internal:7687" }),
+      neo4jRequiresDeploymentOwner({ uri: "bolt://host.docker.internal:7687" }),
     ).toBe(true);
     expect(
-      memoryProviderRequiresDeploymentOwner("neo4j", {
+      neo4jRequiresDeploymentOwner({
         uri: "neo4j://graph.svc.cluster.local:7687",
       }),
     ).toBe(true);
     expect(
-      memoryProviderRequiresDeploymentOwner("neo4j", {
+      neo4jRequiresDeploymentOwner({
         uri: "neo4j+s://example.databases.neo4j.io",
       }),
     ).toBe(false);
     expect(
-      memoryProviderRequiresDeploymentOwner("neo4j", {
+      neo4jRequiresDeploymentOwner({
         uri: "neo4j+s://db.example.test",
         endpointTrust: "private",
       }),
     ).toBe(true);
-    expect(memoryProviderRequiresDeploymentOwner("neo4j", {})).toBe(false);
+    expect(neo4jRequiresDeploymentOwner({})).toBe(false);
   });
 
   it("classifies private DNS without opening a driver", async () => {
@@ -166,7 +164,7 @@ describe("Neo4jMemoryProvider", () => {
       endpointTrust: "private",
     });
     expect(opened).toBe(false);
-    expect(memoryProviderRequiresDeploymentOwner("neo4j", classified)).toBe(true);
+    expect(neo4jRequiresDeploymentOwner(classified)).toBe(true);
   });
 
   it("keeps extraction settings and rejects an invalid chunk size", async () => {
@@ -296,7 +294,7 @@ describe("Neo4jMemoryProvider", () => {
         { openDriver: () => driver },
         { allowPrivateEndpoint: false },
       ),
-    ).rejects.toBeInstanceOf(MemoryProviderDeploymentOwnerRequiredError);
+    ).rejects.toBeInstanceOf(MemoryProviderPrivateEndpointRequiredError);
     expect(driver.databases).toEqual([]);
   });
 
