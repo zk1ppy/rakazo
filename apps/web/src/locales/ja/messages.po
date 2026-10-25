@@ -1247,6 +1247,10 @@ msgstr "フォルダを選択"
 msgid "Choose how to use Rakazo"
 msgstr "Rakazoの使い方を選択"
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Chunk size"
+msgstr ""
+
 #: src/lib/localized-provider-hint.ts
 msgid "Claude subscription"
 msgstr "Claudeサブスクリプション"
@@ -1467,6 +1471,7 @@ msgstr "確認"
 
 #: src/components/integrations/IntegrationSetup.tsx
 #: src/pages/memory-providers/HonchoSettingsForm.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/memory-providers/SerenitySettingsForm.tsx
 #: src/pages/memory-providers/SupermemorySettingsForm.tsx
 #: src/pages/model-settings/role-model-picker.tsx
@@ -1541,6 +1546,7 @@ msgstr "接続しました。次のメッセージからツールを使用でき
 
 #: src/pages/McpServersOverlay.tsx
 #: src/pages/memory-providers/HonchoSettingsForm.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/memory-providers/SerenitySettingsForm.tsx
 #: src/pages/memory-providers/SupermemorySettingsForm.tsx
 #: src/pages/shell/message-cards.tsx
@@ -1560,6 +1566,18 @@ msgstr "接続テストに失敗しました。"
 #: src/pages/PluginsOverlay.tsx
 msgid "Connection to {0} is still pending. You can close this and check again."
 msgstr "{0}への接続はまだ保留中です。閉じてから後で再確認できます。"
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Consolidation output tokens"
+msgstr ""
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Consolidation reasoning"
+msgstr ""
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Consolidation timeout (ms)"
+msgstr ""
 
 #: src/pages/shell/agent-import.tsx
 #: src/pages/shell/import-status.ts
@@ -2055,6 +2073,10 @@ msgstr "請求情報を更新できませんでした"
 msgid "Could not update computer"
 msgstr "コンピューターを更新できませんでした"
 
+#: src/pages/MemorySettingsOverlay.tsx
+msgid "Could not update extraction"
+msgstr ""
+
 #: src/pages/AccountSettingsOverlay.tsx
 msgid "Could not update name"
 msgstr "名前を更新できませんでした"
@@ -2194,6 +2216,10 @@ msgstr "ボットのアバターをカスタマイズ"
 #: src/pages/AccountSettingsOverlay.tsx
 msgid "Dark"
 msgstr "ダーク"
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Database"
+msgstr ""
 
 #: src/lib/billing.ts
 #: src/pages/RoutineSchedule.tsx
@@ -2456,6 +2482,10 @@ msgstr "スキルの下書き"
 msgid "Drag, drop, or paste an image"
 msgstr "画像をドラッグ＆ドロップまたは貼り付け"
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Dream mode"
+msgstr ""
+
 #: src/pages/BotContextMenu.tsx
 msgid "Duplicate"
 msgstr "複製"
@@ -2644,6 +2674,14 @@ msgstr "非常に高い"
 #: src/lib/model-catalog.ts
 msgid "Extra high"
 msgstr "非常に高い"
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Extract entities"
+msgstr ""
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Extraction model"
+msgstr ""
 
 #: src/components/CloudAgentCard.tsx
 msgid "failed"
@@ -3453,6 +3491,11 @@ msgstr "ボットを最小化"
 msgid "Minimize call"
 msgstr "通話を最小化"
 
+#: src/pages/model-settings/compatible-model-fields.tsx
+#: src/pages/Onboarding.tsx
+msgid "Minimum reasoning effort"
+msgstr ""
+
 #: src/pages/RoutineSchedule.tsx
 msgid "minute"
 msgstr "分"
@@ -3613,6 +3656,10 @@ msgstr "対応が必要"
 #: src/pages/shell/import-status.ts
 msgid "Needs: {names}"
 msgstr "必要: {names}"
+
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Neo4j URI is required."
+msgstr ""
 
 #: src/pages/shell/chat-context.tsx
 msgid "New"
@@ -3840,6 +3887,11 @@ msgstr "OAuth接続に失敗しました"
 msgid "OAuth expired"
 msgstr "OAuthの有効期限切れ"
 
+#: src/pages/model-settings/compatible-model-fields.tsx
+#: src/pages/Onboarding.tsx
+msgid "Off"
+msgstr ""
+
 #: src/pages/model-settings/connection-controls.tsx
 #: src/pages/Onboarding.tsx
 msgid "Ollama API key"
@@ -3971,6 +4023,10 @@ msgstr "出力"
 msgid "Owner"
 msgstr "オーナー"
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "Owner aliases"
+msgstr ""
+
 #: src/pages/RoutineEditor.tsx
 msgid "PagerDuty incident"
 msgstr "PagerDutyインシデント"
@@ -3986,6 +4042,7 @@ msgstr "パスキー"
 #: src/components/AskCard.tsx
 #: src/pages/AccountSettingsOverlay.tsx
 #: src/pages/Auth.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/shell/bot-credentials.tsx
 msgid "Password"
 msgstr "パスワード"
@@ -5006,6 +5063,7 @@ msgstr "選択した項目の一部はここでは使えません。チェック
 msgid "Space"
 msgstr "スペース"
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/shell/bot-panel.tsx
 msgid "Space default"
 msgstr "スペースのデフォルト"
@@ -5581,6 +5639,10 @@ msgstr "アップロード"
 msgid "Urgent"
 msgstr "緊急"
 
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
+msgid "URI"
+msgstr ""
+
 #: src/components/SidebarFooter.tsx
 #: src/pages/SettingsOverlay.tsx
 msgid "Usage"
@@ -5647,6 +5709,7 @@ msgid "User peer"
 msgstr "ユーザーピア"
 
 #: src/components/AskCard.tsx
+#: src/pages/memory-providers/Neo4jSettingsForm.tsx
 #: src/pages/shell/bot-credentials.tsx
 msgid "Username"
 msgstr "ユーザー名"
