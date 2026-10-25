@@ -600,10 +600,6 @@ msgstr "詳細設定..."
 msgid "Agent computer"
 msgstr "エージェントのコンピューター"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Agent connections"
-msgstr "エージェントの接続"
-
 #: src/pages/McpServersOverlay.tsx
 msgid "Agents:"
 msgstr "エージェント:"
@@ -974,6 +970,7 @@ msgstr "ボット"
 
 #: src/lib/identity-display.ts
 #: src/pages/IntegrationSetup.tsx
+#: src/pages/MessagingSettingsOverlay.tsx
 #: src/pages/Shell.tsx
 #: src/pages/shell/agent-import.tsx
 #: src/pages/shell/avatar-studio-popover.tsx
@@ -997,10 +994,6 @@ msgstr "ボットの画面"
 #: src/pages/shell/computer-panel.tsx
 msgid "Bot screen preview"
 msgstr "ボットの画面プレビュー"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Bot to link"
-msgstr "リンクするボット"
 
 #: src/pages/RoutineEditor.tsx
 msgid "Bot's model"
@@ -1141,17 +1134,9 @@ msgstr "パスワードを変更"
 msgid "Changing…"
 msgstr "変更中…"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Channels"
-msgstr "チャンネル"
-
 #: src/pages/shell/message-cards.tsx
 msgid "Chart failed to render: {error}"
 msgstr "チャートを表示できませんでした: {error}"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Chat apps"
-msgstr "チャットアプリ"
 
 #: src/pages/shell/composer-mentions.tsx
 msgid "Chat Settings"
@@ -1232,10 +1217,6 @@ msgstr "ボットを選択"
 #: src/pages/shell/avatar-studio-popover.tsx
 msgid "Choose a bot shape, color, or upload an image"
 msgstr "ボットの形や色を選ぶか、画像をアップロード"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Choose a bot…"
-msgstr "ボットを選択…"
 
 #: src/pages/ModelSettingsOverlay.tsx
 msgid "Choose a model"
@@ -1497,6 +1478,10 @@ msgstr "接続"
 msgid "Connect {selectedProviderName}"
 msgstr "{selectedProviderName} に接続"
 
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Connect a chat app"
+msgstr ""
+
 #: src/pages/Onboarding.tsx
 msgid "Connect a model"
 msgstr "モデルを接続"
@@ -1614,6 +1599,10 @@ msgstr "クレジットで続行"
 #: src/pages/Auth.tsx
 msgid "Continue with email"
 msgstr "メールで続行"
+
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Conversations"
+msgstr ""
 
 #: src/components/ComputersUnavailableHint.tsx
 #: src/pages/model-settings/connection-controls.tsx
@@ -2358,6 +2347,7 @@ msgstr "録音を破棄"
 
 #: src/pages/McpServersOverlay.tsx
 #: src/pages/MemorySettingsOverlay.tsx
+#: src/pages/MessagingSettingsOverlay.tsx
 #: src/pages/ModelSettingsOverlay.tsx
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Disconnect"
@@ -3154,10 +3144,6 @@ msgstr "ライト"
 msgid "Linear issue"
 msgstr "Linear課題"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Link a chat app"
-msgstr "チャットアプリを連携"
-
 #: src/components/AccountAccess.tsx
 msgid "Link SSO"
 msgstr "SSOを連携"
@@ -3674,10 +3660,6 @@ msgstr "新しいチケット"
 msgid "Next settings sections"
 msgstr "次の設定セクション"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No agent connections yet."
-msgstr "エージェント接続はまだありません。"
-
 #: src/pages/PluginsOverlay.tsx
 msgid "No apps match your search."
 msgstr "検索に一致するアプリはありません。"
@@ -3702,14 +3684,6 @@ msgstr "ボットなし"
 #: src/pages/shell/bot-picker.tsx
 msgid "No bots match"
 msgstr "一致するボットはありません"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No chat apps linked yet."
-msgstr "連携済みのチャットアプリはまだありません。"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No group chats yet."
-msgstr "グループチャットはまだありません。"
 
 #: src/components/AskCard.tsx
 msgid "No longer active"
@@ -3778,10 +3752,6 @@ msgstr "実行はまだありません"
 #: src/pages/KnowledgeSection.tsx
 msgid "No skills yet"
 msgstr "スキルはまだありません"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No team conversations yet."
-msgstr "チームの会話はまだありません。"
 
 #: src/pages/Board.tsx
 msgid "No tickets yet"
@@ -4067,6 +4037,10 @@ msgstr "APIキーを貼り付けてから、もう一度テストしてくださ
 #: src/pages/shell/import-status.ts
 msgid "Paused"
 msgstr "一時停止中"
+
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Pending"
+msgstr ""
 
 #: src/pages/shell/bot-panel.tsx
 msgid "Permissions"
@@ -4458,6 +4432,10 @@ msgstr "{0}に返信中"
 msgid "Request a new code"
 msgstr "新しいコードをリクエスト"
 
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Requests"
+msgstr ""
+
 #: src/pages/shell/message-cards.tsx
 msgid "Research & writing"
 msgstr "リサーチと執筆"
@@ -4776,8 +4754,8 @@ msgid "Send"
 msgstr "送信"
 
 #: src/pages/MessagingSettingsOverlay.tsx
-msgid "Send <0>{linkCode}</0> to the line from your chat app within 10 minutes. You'll get a confirmation reply once linked."
-msgstr "10分以内にチャットアプリから<0>{linkCode}</0>をこの番号に送信してください。連携が完了すると確認の返信が届きます。"
+msgid "Send <0>{linkCode}</0> from {linkApp} within 10 minutes."
+msgstr ""
 
 #: src/components/AskCard.tsx
 msgid "Send answer"
@@ -4998,6 +4976,10 @@ msgstr "Slackメッセージ"
 msgid "Slack not enabled"
 msgstr "Slackが有効になっていません"
 
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Slack workspace"
+msgstr ""
+
 #: src/components/composer/HoldToTalk.tsx
 msgid "Slide up to lock"
 msgstr "上にスライドしてロック"
@@ -5174,10 +5156,6 @@ msgstr "チーム"
 #: src/pages/shell/computer-view.tsx
 msgid "Team Computer"
 msgstr "チームのコンピューター"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Team conversations"
-msgstr "チームの会話"
 
 #: src/pages/RoutineEditor.tsx
 msgid "Teams message"

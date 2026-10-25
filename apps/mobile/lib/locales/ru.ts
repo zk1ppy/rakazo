@@ -1015,4 +1015,11 @@ export const RU_MESSAGES: Record<string, string> = {
   "How big is your team?": "Сколько человек в вашей команде?",
   "How did you hear about us?": "Как вы о нас узнали?",
   "Welcome to Rakazo": "Добро пожаловать в Rakazo",
+  "Choose a bot…": "Выберите бота…",
+  "Connect Slack workspace": "Подключить рабочее пространство Slack",
+  "Link a chat app": "Привязать чат-приложение",
+  Messaging: "Сообщения",
+  "Send {code} to the chat app in a direct message within 10 minutes.":
+    "Отправьте {code} чат-приложению в личном сообщении в течение 10 минут.",
+  Unlink: "Отвязать",
 };

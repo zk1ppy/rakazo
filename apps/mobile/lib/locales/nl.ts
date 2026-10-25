@@ -973,4 +973,11 @@ export const NL_MESSAGES: Record<string, string> = {
   "How big is your team?": "Hoe groot is je team?",
   "How did you hear about us?": "Hoe heb je over ons gehoord?",
   "Welcome to Rakazo": "Welkom bij Rakazo",
+  "Choose a bot…": "Kies een bot…",
+  "Connect Slack workspace": "Slack-werkruimte verbinden",
+  "Link a chat app": "Chatapp koppelen",
+  Messaging: "Berichten",
+  "Send {code} to the chat app in a direct message within 10 minutes.":
+    "Stuur {code} binnen 10 minuten in een privébericht naar de chatapp.",
+  Unlink: "Ontkoppelen",
 };

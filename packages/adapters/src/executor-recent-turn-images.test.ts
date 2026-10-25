@@ -347,7 +347,6 @@ describe("recent turn images follow model vision", () => {
     if (!resolve) throw new Error("Backup resolver is missing");
     prisma.spaceModelPreference.findFirst.mockResolvedValue({
       modelId: backup.modelId,
-      isDefault: false,
       thinkingLevel: null,
       credential: {
         id: "backup-credential",

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { notifyManager } from "@tanstack/react-query";
 import type { CSSProperties, ReactNode, Ref } from "react";
 import { act, createElement, useEffect, useImperativeHandle } from "react";
 import type { Root } from "react-dom/client";
@@ -14,6 +15,7 @@ import { ModelPickerList } from "../components/model-picker-list";
 import type { ModelConnectionRequest } from "./model-connection-request";
 import { modelConnectionRequest, openModelConnection } from "./model-connection-request";
 import { modelPickerRequest } from "./model-picker-selection";
+import { queryClient } from "./query";
 
 const mocks = vi.hoisted(() => ({
   scrollToLocation: vi.fn(),
@@ -93,6 +95,9 @@ vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 vi.mock("./appearance", () => ({ mobileTokens: () => ({}) }));
 vi.mock("./message-action-sheet", () => ({ presentMessageActionSheet: vi.fn() }));
 
+vi.mock("./session", () => ({ currentSessionGeneration: () => 1 }));
+// Cache updates reach the screen inside act instead of on a later timer.
+notifyManager.setScheduler((callback) => callback());
 vi.mock("./api", () => ({
   currentApiBase: () => "https://app.example.test",
   captureApiRequestContext: async () => ({ headers: {} }),
@@ -583,6 +588,7 @@ beforeEach(() => {
   mocks.menus.clear();
   mocks.rowAccessibilityActions.clear();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  queryClient.clear();
   container = document.createElement("div");
   root = createRoot(container);
 });

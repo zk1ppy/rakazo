@@ -28,6 +28,7 @@ export * from "./messaging.js";
 export * from "./model-credentials.js";
 export * from "./model-credits.js";
 export * from "./model-roles.js";
+export * from "./provider-transactions.js";
 export * from "./repos.js";
 export * from "./row-security.js";
 export * from "./run-secrets.js";

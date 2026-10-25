@@ -5,6 +5,7 @@ import {
   OPENAI_COMPATIBLE_PROVIDER_ID,
 } from "@rakazo/contracts";
 import { popularModelProvidersFirst } from "@rakazo/core";
+import { isCancelledError, useQuery } from "@tanstack/react-query";
 import type { Href } from "expo-router";
 import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -22,8 +23,12 @@ import { closeModelConnection, openModelConnection } from "../../lib/model-conne
 import type { ModelPickerRequest } from "../../lib/model-picker-selection";
 import { closeModelPicker, openModelPicker } from "../../lib/model-picker-selection";
 import { native, useThemedStyles } from "../../lib/native";
+import { fetchFresh, queryClient, rpcQuery } from "../../lib/query";
 import { useSideInsets } from "../../lib/side-insets";
 import { errorText } from "../../lib/user-error";
+
+const noModels: MobileModel[] = [];
+const noCredentials: MobileModelCredential[] = [];
 
 /** The main and approval model lists; connecting a provider opens its own screen. */
 export default function Models() {
@@ -31,11 +36,17 @@ export default function Models() {
   const styles = useThemedStyles(createModelsStyles);
   const router = useRouter();
   const { t } = useI18n();
-  const [me, setMe] = useState<MobileMe | null>(null);
-  const [catalog, setCatalog] = useState<MobileModel[]>([]);
-  const [credentials, setCredentials] = useState<MobileModelCredential[]>([]);
-  const [loading, setLoading] = useState(true);
+  const me = useQuery({ ...rpcQuery<MobileMe>("me"), enabled: false }, queryClient).data ?? null;
+  const catalog =
+    useQuery({ ...rpcQuery<MobileModel[]>("models/list"), enabled: false }, queryClient).data ??
+    noModels;
+  const credentials =
+    useQuery(
+      { ...rpcQuery<MobileModelCredential[]>("models/credentials"), enabled: false },
+      queryClient,
+    ).data ?? noCredentials;
   const [error, setError] = useState<string | null>(null);
+  const openedRef = useRef(false);
   const pickerRequestRef = useRef<string | null>(null);
   const connectionRequestRef = useRef<string | null>(null);
   const returningFromPickerRef = useRef(false);
@@ -48,29 +59,32 @@ export default function Models() {
     [],
   );
 
-  const load = useCallback(async () => {
-    try {
-      const [nextMe, nextCatalog, nextCredentials] = await Promise.all([
-        rpc<MobileMe>("me"),
-        rpc<MobileModel[]>("models/list"),
-        rpc<MobileModelCredential[]>("models/credentials"),
-      ]);
-      setMe(nextMe);
-      setCatalog(nextCatalog);
-      setCredentials(nextCredentials);
-      setError(null);
-    } catch (err) {
-      setError(errorText(err, t("Could not load model settings")));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
+  /** Opening shares a read already in flight; after a change, the answer must come from a new one. */
+  const load = useCallback(
+    async (reuse = false) => {
+      try {
+        await Promise.all([
+          fetchFresh(rpcQuery<MobileMe>("me"), { reuse }),
+          fetchFresh(rpcQuery<MobileModel[]>("models/list"), { reuse }),
+          fetchFresh(rpcQuery<MobileModelCredential[]>("models/credentials"), { reuse }),
+        ]);
+        setError(null);
+      } catch (err) {
+        // A newer read replaced this one and reports for both.
+        if (!isCancelledError(err)) setError(errorText(err, t("Could not load model settings")));
+      }
+    },
+    [t],
+  );
 
   useFocusEffect(
     useCallback(() => {
       // A picker pick saves through the list itself; only connections change what loads here.
       if (returningFromPickerRef.current) returningFromPickerRef.current = false;
-      else void load();
+      else {
+        void load(!openedRef.current);
+        openedRef.current = true;
+      }
     }, [load]),
   );
 
@@ -182,7 +196,8 @@ export default function Models() {
     await load();
   }
 
-  if (loading && !me) {
+  // Only the first visit waits; a revisit paints what it saw last and refreshes behind it.
+  if (!me && !error) {
     return (
       <SafeAreaView edges={["bottom"]} style={[styles.screen, styles.centered]}>
         <ActivityIndicator color={native.secondaryLabel} />

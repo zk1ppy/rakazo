@@ -37,7 +37,6 @@ function credential(provider: string, defaultModel: string | null) {
     secretId: `secret-${provider}`,
     createdAt: new Date(0),
     updatedAt: new Date(0),
-    isDefault: false,
     defaultModel,
     thinkingLevel: null,
   };
@@ -197,7 +196,6 @@ describe("space catalog auth", () => {
   function storedPreference(input: {
     id: string;
     modelId: string | null;
-    isDefault: boolean;
     credentialId: string;
     secretId: string;
     iso: string;
@@ -205,7 +203,6 @@ describe("space catalog auth", () => {
     return {
       id: input.id,
       modelId: input.modelId,
-      isDefault: input.isDefault,
       updatedAt: stamp(input.iso),
       credential: storedCredential(input.credentialId, input.secretId, input.iso),
     };
@@ -309,7 +306,6 @@ describe("space catalog auth", () => {
         storedPreference({
           id: "pref-oauth",
           modelId: luna,
-          isDefault: true,
           credentialId: "cred-oauth",
           secretId: "secret-oauth",
           iso: "2026-01-02T00:00:00.000Z",
@@ -343,7 +339,6 @@ describe("space catalog auth", () => {
         storedPreference({
           id: "pref-oauth",
           modelId: luna,
-          isDefault: true,
           credentialId: "cred-oauth",
           secretId: "secret-oauth",
           iso: "2026-03-02T00:00:00.000Z",
@@ -351,7 +346,6 @@ describe("space catalog auth", () => {
         storedPreference({
           id: "pref-spark",
           modelId: spark,
-          isDefault: false,
           credentialId: "cred-api",
           secretId: "secret-api",
           iso: "2026-02-02T00:00:00.000Z",
@@ -390,7 +384,6 @@ describe("space catalog auth", () => {
         storedPreference({
           id: "pref-api",
           modelId: luna,
-          isDefault: true,
           credentialId: "cred-api",
           secretId: "secret-api",
           iso: "2026-03-02T00:00:00.000Z",
@@ -398,7 +391,6 @@ describe("space catalog auth", () => {
         storedPreference({
           id: "pref-spark",
           modelId: spark,
-          isDefault: false,
           credentialId: "cred-oauth",
           secretId: "secret-oauth",
           iso: "2026-02-02T00:00:00.000Z",
@@ -465,7 +457,6 @@ describe("space catalog auth", () => {
         storedPreference({
           id: "pref-api",
           modelId: luna,
-          isDefault: true,
           credentialId: "cred-api",
           secretId: "secret-api",
           iso: "2026-03-02T00:00:00.000Z",
@@ -473,7 +464,6 @@ describe("space catalog auth", () => {
         storedPreference({
           id: "pref-spark",
           modelId: spark,
-          isDefault: false,
           credentialId: "cred-oauth",
           secretId: "secret-oauth",
           iso: "2026-02-02T00:00:00.000Z",
@@ -911,7 +901,6 @@ describe("connected model credential selection", () => {
         id: "preference",
         credential: selected,
         modelId: "X",
-        isDefault: true,
         thinkingLevel: null,
         updatedAt: new Date(0),
       },
@@ -979,7 +968,7 @@ describe("connected model credential selection", () => {
     }
     expect(prisma.spaceModelPreference.upsert).not.toHaveBeenCalled();
     expect(preferences).toHaveLength(1);
-    expect(preferences[0]).toMatchObject({ modelId: "X", isDefault: true });
+    expect(preferences[0]).toMatchObject({ modelId: "X" });
   });
 });
 
@@ -1034,7 +1023,6 @@ describe("connected model validation", () => {
         if (args.where.credential?.provider === "openai-compatible") {
           return {
             credential: credential("openai-compatible", "newest-model"),
-            isDefault: true,
             modelId: "newest-model",
             thinkingLevel: null,
           };
@@ -1133,7 +1121,6 @@ describe("enabled openai-compatible models", () => {
           }
           return {
             credential: credential("openai-compatible", defaultModel),
-            isDefault: true,
             modelId: defaultModel,
             thinkingLevel: null,
           };
@@ -1256,7 +1243,6 @@ describe("bot model change validation", () => {
           if (!saved?.defaultModel) return null;
           return {
             credential: saved,
-            isDefault: true,
             modelId: saved.defaultModel,
             thinkingLevel: null,
           };

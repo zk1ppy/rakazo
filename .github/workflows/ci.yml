@@ -7,8 +7,10 @@ on:
 permissions:
   contents: read
 
+# Superseded PR checks cancel together; main revisions validate independently.
+# Only the production switch and mobile publication retain release locks below.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -184,6 +186,7 @@ jobs:
     concurrency:
       group: mobile-production-update
       cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -393,6 +396,7 @@ jobs:
     concurrency:
       group: production
       cancel-in-progress: false
+      queue: max
     environment:
       name: production
       url: https://app.rakazo.com

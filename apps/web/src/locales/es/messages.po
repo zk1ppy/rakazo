@@ -276,10 +276,6 @@ msgstr "Avanzado..."
 msgid "Agent computer"
 msgstr "Computadora del agente"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Agent connections"
-msgstr "Conexiones de agentes"
-
 #: src/pages/McpServersOverlay.tsx
 msgid "Agents:"
 msgstr "Agentes:"
@@ -656,16 +652,13 @@ msgstr "Vista previa de la pantalla del bot"
 msgid "Bot screen"
 msgstr "Pantalla del bot"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Bot to link"
-msgstr "Bot a vincular"
-
 #: src/pages/shell/message-view.tsx
 msgid "bot"
 msgstr "bot"
 
 #: src/lib/identity-display.ts
 #: src/pages/IntegrationSetup.tsx
+#: src/pages/MessagingSettingsOverlay.tsx
 #: src/pages/Shell.tsx
 #: src/pages/shell/agent-import.tsx
 #: src/pages/shell/avatar-studio-popover.tsx
@@ -817,17 +810,9 @@ msgstr "Cambiar {title}"
 msgid "Changing…"
 msgstr "Cambiando…"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Channels"
-msgstr "Canales"
-
 #: src/pages/shell/message-cards.tsx
 msgid "Chart failed to render: {error}"
 msgstr "No se pudo renderizar el gráfico: {error}"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Chat apps"
-msgstr "Apps de chat"
 
 #: src/pages/shell/composer-mentions.tsx
 msgid "Chat Settings"
@@ -908,10 +893,6 @@ msgstr "Elige una forma y color del bot, o sube una imagen"
 #: src/pages/shell/agent-import.tsx
 msgid "Choose a bot"
 msgstr "Elige un bot"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Choose a bot…"
-msgstr "Elige un bot…"
 
 #: src/pages/ModelSettingsOverlay.tsx
 msgid "Choose a model"
@@ -1164,6 +1145,10 @@ msgstr "Confirma que la URL es accesible desde esta sesión del navegador y vuel
 msgid "Confirmations"
 msgstr ""
 
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Connect a chat app"
+msgstr ""
+
 #: src/pages/Onboarding.tsx
 msgid "Connect a model"
 msgstr "Conectar un modelo"
@@ -1208,6 +1193,15 @@ msgstr "Conectar Treg"
 msgid "Connect {selectedProviderName}"
 msgstr "Conectar {selectedProviderName}"
 
+#: src/components/integrations/IntegrationSetup.tsx
+#: src/pages/memory-providers/HonchoSettingsForm.tsx
+#: src/pages/memory-providers/SerenitySettingsForm.tsx
+#: src/pages/memory-providers/SupermemorySettingsForm.tsx
+#: src/pages/model-settings/role-model-picker.tsx
+#: src/pages/VoiceSettingsOverlay.tsx
+msgid "Connect"
+msgstr "Conectar"
+
 #. placeholder {0}: selected.name
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Connected {0}."
@@ -1224,6 +1218,15 @@ msgstr "Conectado"
 #: src/pages/shell/message-cards.tsx
 msgid "Connected. Its tools are available from your next message."
 msgstr "Conectado: sus herramientas estarán disponibles desde tu próximo mensaje."
+
+#: src/pages/McpServersOverlay.tsx
+#: src/pages/memory-providers/HonchoSettingsForm.tsx
+#: src/pages/memory-providers/SerenitySettingsForm.tsx
+#: src/pages/memory-providers/SupermemorySettingsForm.tsx
+#: src/pages/shell/message-cards.tsx
+#: src/pages/VoiceSettingsOverlay.tsx
+msgid "Connecting…"
+msgstr "Conectando…"
 
 #: src/lib/model-connection-preflight.ts
 msgid "Connection test failed."
@@ -1288,6 +1291,10 @@ msgstr "Continuar con {0}"
 #: src/pages/shell/agent-import.tsx
 msgid "Continue"
 msgstr "Continuar"
+
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Conversations"
+msgstr ""
 
 #: src/components/ComputersUnavailableHint.tsx
 #: src/pages/model-settings/connection-controls.tsx
@@ -2048,6 +2055,7 @@ msgstr ""
 
 #: src/pages/McpServersOverlay.tsx
 #: src/pages/MemorySettingsOverlay.tsx
+#: src/pages/MessagingSettingsOverlay.tsx
 #: src/pages/ModelSettingsOverlay.tsx
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Disconnect"
@@ -2848,10 +2856,6 @@ msgstr "Claro"
 msgid "Linear issue"
 msgstr "Issue de Linear"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Link a chat app"
-msgstr "Vincular una app de chat"
-
 #: src/components/AccountAccess.tsx
 msgid "Link SSO"
 msgstr "Vincular SSO"
@@ -3377,10 +3381,6 @@ msgstr ""
 msgid "Next settings sections"
 msgstr ""
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No agent connections yet."
-msgstr "Aún no hay conexiones de agentes."
-
 #: src/pages/PluginsOverlay.tsx
 msgid "No apps match your search."
 msgstr "Ninguna app coincide con tu búsqueda."
@@ -3405,14 +3405,6 @@ msgstr ""
 #: src/pages/shell/command-palette.tsx
 msgid "No bots"
 msgstr ""
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No chat apps linked yet."
-msgstr "Aún no hay apps de chat vinculadas."
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No group chats yet."
-msgstr "Aún no hay chats de grupo."
 
 #: src/components/AskCard.tsx
 msgid "No longer active"
@@ -3481,10 +3473,6 @@ msgstr "Aún no hay ejecuciones"
 #: src/pages/KnowledgeSection.tsx
 msgid "No skills yet"
 msgstr "Aún no hay habilidades"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No team conversations yet."
-msgstr ""
 
 #: src/pages/Board.tsx
 msgid "No tickets yet"
@@ -3738,6 +3726,13 @@ msgstr "El inicio de sesión con contraseña está desactivado en este servidor"
 msgid "Password updated"
 msgstr "Contraseña actualizada"
 
+#: src/components/AskCard.tsx
+#: src/pages/AccountSettingsOverlay.tsx
+#: src/pages/Auth.tsx
+#: src/pages/shell/bot-credentials.tsx
+msgid "Password"
+msgstr "Contraseña"
+
 #: src/pages/AccountSettingsOverlay.tsx
 #: src/pages/Auth.tsx
 msgid "Passwords do not match"
@@ -3772,6 +3767,10 @@ msgstr "Pega tu clave de API y vuelve a probar."
 #: src/pages/shell/import-status.ts
 msgid "Paused"
 msgstr "En pausa"
+
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Pending"
+msgstr ""
 
 #: src/pages/shell/bot-panel.tsx
 msgid "Permissions"
@@ -4163,6 +4162,10 @@ msgstr ""
 msgid "Request a new code"
 msgstr "Solicita un código nuevo"
 
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Requests"
+msgstr ""
+
 #: src/pages/shell/message-cards.tsx
 msgid "Research & writing"
 msgstr ""
@@ -4477,8 +4480,8 @@ msgid "Self-hosted"
 msgstr "Autoalojado"
 
 #: src/pages/MessagingSettingsOverlay.tsx
-msgid "Send <0>{linkCode}</0> to the line from your chat app within 10 minutes. You'll get a confirmation reply once linked."
-msgstr "Envía <0>{linkCode}</0> a la línea desde tu app de chat en un plazo de 10 minutos. Recibirás una confirmación cuando esté vinculado."
+msgid "Send <0>{linkCode}</0> from {linkApp} within 10 minutes."
+msgstr ""
 
 #: src/components/AskCard.tsx
 msgid "Send answer"
@@ -4703,6 +4706,10 @@ msgstr "Mensaje de Slack"
 msgid "Slack not enabled"
 msgstr ""
 
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Slack workspace"
+msgstr ""
+
 #: src/components/composer/HoldToTalk.tsx
 msgid "Slide up to lock"
 msgstr "Desliza hacia arriba para bloquear"
@@ -4723,6 +4730,10 @@ msgstr "Se acaba de añadir algo con el mismo nombre. Vuelve a intentarlo."
 #: src/lib/agent-import-errors.ts
 msgid "Something you chose cannot work here. Untick it and try again."
 msgstr "Algo que elegiste no funciona aquí. Desmárcalo y vuelve a intentarlo."
+
+#: src/pages/shell/bot-panel.tsx
+msgid "Space default"
+msgstr "Predeterminado del Space"
 
 #: src/lib/identity-display.ts
 #: src/pages/SettingsOverlay.tsx
@@ -4871,10 +4882,6 @@ msgstr "Enseñanza en curso: detén la enseñanza antes de enviar un nuevo mensa
 #: src/pages/shell/computer-view.tsx
 msgid "Team Computer"
 msgstr "Team Computer"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Team conversations"
-msgstr ""
 
 #: src/pages/shell/bot-panel.tsx
 msgid "Team"
@@ -5371,6 +5378,11 @@ msgstr "Usa {oauthEnvReference} para el token de acceso."
 
 #: src/pages/memory-providers/HonchoSettingsForm.tsx
 msgid "User peer"
+msgstr ""
+
+#: src/components/AskCard.tsx
+#: src/pages/shell/bot-credentials.tsx
+msgid "Username"
 msgstr ""
 
 #: src/pages/shell/import-status.ts

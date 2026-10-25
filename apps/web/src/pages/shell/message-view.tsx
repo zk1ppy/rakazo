@@ -3,7 +3,7 @@ import { ChatMarkdown, LinkifiedText, withBlockMentions } from "@rakazo/chat-ui/
 import type { MessageReaction, ThreadMessage } from "@rakazo/contracts";
 import type { ChildBotBlock } from "@rakazo/core";
 import { isPeerReceiptBlocks, isSecretAskBlock, isToolActivityBlock } from "@rakazo/core";
-import { BotAvatar, Button, resolvePersonaColorDef } from "@rakazo/ui-web";
+import { BotAvatar, Button, cn, resolvePersonaColorDef } from "@rakazo/ui-web";
 import { UserRound } from "lucide-react";
 import { memo, useMemo } from "react";
 import { ArtifactFileCard } from "../../components/ArtifactFileCard";
@@ -270,7 +270,7 @@ export const MessageView = memo(function MessageView({
   return (
     <>
       {messageContext}
-      <div className="relative flex flex-col gap-2">
+      <div className={cn("relative flex flex-col gap-2", message.role === "user" && "items-end")}>
         {blocks.map((block, i) => {
           if (block.kind === "steps" && shouldRenderToolCard(block, showToolActivity)) {
             return (

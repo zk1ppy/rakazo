@@ -276,10 +276,6 @@ msgstr "Advanced..."
 msgid "Agent computer"
 msgstr "Agent computer"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Agent connections"
-msgstr "Agent connections"
-
 #: src/pages/McpServersOverlay.tsx
 msgid "Agents:"
 msgstr "Agents:"
@@ -656,16 +652,13 @@ msgstr "Bot screen preview"
 msgid "Bot screen"
 msgstr "Bot screen"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Bot to link"
-msgstr "Bot to link"
-
 #: src/pages/shell/message-view.tsx
 msgid "bot"
 msgstr "bot"
 
 #: src/lib/identity-display.ts
 #: src/pages/IntegrationSetup.tsx
+#: src/pages/MessagingSettingsOverlay.tsx
 #: src/pages/Shell.tsx
 #: src/pages/shell/agent-import.tsx
 #: src/pages/shell/avatar-studio-popover.tsx
@@ -817,17 +810,9 @@ msgstr "Change {title}"
 msgid "Changing…"
 msgstr "Changing…"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Channels"
-msgstr "Channels"
-
 #: src/pages/shell/message-cards.tsx
 msgid "Chart failed to render: {error}"
 msgstr "Chart failed to render: {error}"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Chat apps"
-msgstr "Chat apps"
 
 #: src/pages/shell/composer-mentions.tsx
 msgid "Chat Settings"
@@ -908,10 +893,6 @@ msgstr "Choose a bot shape, color, or upload an image"
 #: src/pages/shell/agent-import.tsx
 msgid "Choose a bot"
 msgstr "Choose a bot"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Choose a bot…"
-msgstr "Choose a bot…"
 
 #: src/pages/ModelSettingsOverlay.tsx
 msgid "Choose a model"
@@ -1164,6 +1145,10 @@ msgstr "Confirm the URL is reachable from this browser session, then test again.
 msgid "Confirmations"
 msgstr "Confirmations"
 
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Connect a chat app"
+msgstr "Connect a chat app"
+
 #: src/pages/Onboarding.tsx
 msgid "Connect a model"
 msgstr "Connect a model"
@@ -1208,6 +1193,15 @@ msgstr "Connect Treg"
 msgid "Connect {selectedProviderName}"
 msgstr "Connect {selectedProviderName}"
 
+#: src/components/integrations/IntegrationSetup.tsx
+#: src/pages/memory-providers/HonchoSettingsForm.tsx
+#: src/pages/memory-providers/SerenitySettingsForm.tsx
+#: src/pages/memory-providers/SupermemorySettingsForm.tsx
+#: src/pages/model-settings/role-model-picker.tsx
+#: src/pages/VoiceSettingsOverlay.tsx
+msgid "Connect"
+msgstr "Connect"
+
 #. placeholder {0}: selected.name
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Connected {0}."
@@ -1224,6 +1218,15 @@ msgstr "Connected"
 #: src/pages/shell/message-cards.tsx
 msgid "Connected. Its tools are available from your next message."
 msgstr "Connected. Its tools are available from your next message."
+
+#: src/pages/McpServersOverlay.tsx
+#: src/pages/memory-providers/HonchoSettingsForm.tsx
+#: src/pages/memory-providers/SerenitySettingsForm.tsx
+#: src/pages/memory-providers/SupermemorySettingsForm.tsx
+#: src/pages/shell/message-cards.tsx
+#: src/pages/VoiceSettingsOverlay.tsx
+msgid "Connecting…"
+msgstr "Connecting…"
 
 #: src/lib/model-connection-preflight.ts
 msgid "Connection test failed."
@@ -1288,6 +1291,10 @@ msgstr "Continue with {0}"
 #: src/pages/shell/agent-import.tsx
 msgid "Continue"
 msgstr "Continue"
+
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Conversations"
+msgstr "Conversations"
 
 #: src/components/ComputersUnavailableHint.tsx
 #: src/pages/model-settings/connection-controls.tsx
@@ -2048,6 +2055,7 @@ msgstr "Disconnect {disconnectName}?"
 
 #: src/pages/McpServersOverlay.tsx
 #: src/pages/MemorySettingsOverlay.tsx
+#: src/pages/MessagingSettingsOverlay.tsx
 #: src/pages/ModelSettingsOverlay.tsx
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Disconnect"
@@ -2848,10 +2856,6 @@ msgstr "Light"
 msgid "Linear issue"
 msgstr "Linear issue"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Link a chat app"
-msgstr "Link a chat app"
-
 #: src/components/AccountAccess.tsx
 msgid "Link SSO"
 msgstr "Link SSO"
@@ -3377,10 +3381,6 @@ msgstr "New"
 msgid "Next settings sections"
 msgstr "Next settings sections"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No agent connections yet."
-msgstr "No agent connections yet."
-
 #: src/pages/PluginsOverlay.tsx
 msgid "No apps match your search."
 msgstr "No apps match your search."
@@ -3405,14 +3405,6 @@ msgstr "No bots match"
 #: src/pages/shell/command-palette.tsx
 msgid "No bots"
 msgstr "No bots"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No chat apps linked yet."
-msgstr "No chat apps linked yet."
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No group chats yet."
-msgstr "No group chats yet."
 
 #: src/components/AskCard.tsx
 msgid "No longer active"
@@ -3481,10 +3473,6 @@ msgstr "No runs yet"
 #: src/pages/KnowledgeSection.tsx
 msgid "No skills yet"
 msgstr "No skills yet"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No team conversations yet."
-msgstr "No team conversations yet."
 
 #: src/pages/Board.tsx
 msgid "No tickets yet"
@@ -3738,6 +3726,13 @@ msgstr "Password sign-in is turned off on this server"
 msgid "Password updated"
 msgstr "Password updated"
 
+#: src/components/AskCard.tsx
+#: src/pages/AccountSettingsOverlay.tsx
+#: src/pages/Auth.tsx
+#: src/pages/shell/bot-credentials.tsx
+msgid "Password"
+msgstr "Password"
+
 #: src/pages/AccountSettingsOverlay.tsx
 #: src/pages/Auth.tsx
 msgid "Passwords do not match"
@@ -3772,6 +3767,10 @@ msgstr "Paste your API key, then test again."
 #: src/pages/shell/import-status.ts
 msgid "Paused"
 msgstr "Paused"
+
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Pending"
+msgstr "Pending"
 
 #: src/pages/shell/bot-panel.tsx
 msgid "Permissions"
@@ -4163,6 +4162,10 @@ msgstr "Replying to {0}"
 msgid "Request a new code"
 msgstr "Request a new code"
 
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Requests"
+msgstr "Requests"
+
 #: src/pages/shell/message-cards.tsx
 msgid "Research & writing"
 msgstr "Research & writing"
@@ -4477,8 +4480,8 @@ msgid "Self-hosted"
 msgstr "Self-hosted"
 
 #: src/pages/MessagingSettingsOverlay.tsx
-msgid "Send <0>{linkCode}</0> to the line from your chat app within 10 minutes. You'll get a confirmation reply once linked."
-msgstr "Send <0>{linkCode}</0> to the line from your chat app within 10 minutes. You'll get a confirmation reply once linked."
+msgid "Send <0>{linkCode}</0> from {linkApp} within 10 minutes."
+msgstr "Send <0>{linkCode}</0> from {linkApp} within 10 minutes."
 
 #: src/components/AskCard.tsx
 msgid "Send answer"
@@ -4703,6 +4706,10 @@ msgstr "Slack message"
 msgid "Slack not enabled"
 msgstr "Slack not enabled"
 
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Slack workspace"
+msgstr "Slack workspace"
+
 #: src/components/composer/HoldToTalk.tsx
 msgid "Slide up to lock"
 msgstr "Slide up to lock"
@@ -4723,6 +4730,10 @@ msgstr "Something with the same name was just added. Try again."
 #: src/lib/agent-import-errors.ts
 msgid "Something you chose cannot work here. Untick it and try again."
 msgstr "Something you chose cannot work here. Untick it and try again."
+
+#: src/pages/shell/bot-panel.tsx
+msgid "Space default"
+msgstr "Space default"
 
 #: src/lib/identity-display.ts
 #: src/pages/SettingsOverlay.tsx
@@ -4871,10 +4882,6 @@ msgstr "Teaching in progress. Stop teaching before sending a new message."
 #: src/pages/shell/computer-view.tsx
 msgid "Team Computer"
 msgstr "Team Computer"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Team conversations"
-msgstr "Team conversations"
 
 #: src/pages/shell/bot-panel.tsx
 msgid "Team"
@@ -5372,6 +5379,11 @@ msgstr "Use {oauthEnvReference} for the access token."
 #: src/pages/memory-providers/HonchoSettingsForm.tsx
 msgid "User peer"
 msgstr "User peer"
+
+#: src/components/AskCard.tsx
+#: src/pages/shell/bot-credentials.tsx
+msgid "Username"
+msgstr "Username"
 
 #: src/pages/shell/import-status.ts
 msgid "Uses files that are not imported"

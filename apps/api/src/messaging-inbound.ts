@@ -103,6 +103,8 @@ async function handleDirectEvent(
 
   const where = { provider_address: { provider: event.provider, address: event.from } } as const;
   const existing = await deps.prisma.messagingIdentity.findUnique({ where });
+  if (existing && event.installationSpaceId && existing.spaceId !== event.installationSpaceId)
+    return;
   if (existing) {
     // Any reply — even a content-free reaction — ends the consecutive-
     // outbound streak, but only real text wakes the bot. The conversation
@@ -123,7 +125,7 @@ async function handleDirectEvent(
     // account and bot; otherwise the line is silent unless the deployment
     // explicitly runs as an open Poke-style signup line.
     if (await tryRedeemLinkCode(deps, event)) return;
-    if (!deps.openSignup) return;
+    if (!deps.openSignup || event.installationSpaceId) return;
     // Media-only delivery is for linked identities; retain text-based signup.
     if (!text) return;
   }
@@ -409,6 +411,8 @@ async function tryRedeemLinkCode(
     provider: event.provider,
     address: event.from,
     dmThreadId: event.threadId,
+    spaceId: event.installationSpaceId,
+    installationId: event.installationId,
   });
   if (!redeemed) return false;
   const bot = await deps.prisma.bot.findUnique({

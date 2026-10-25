@@ -86,7 +86,7 @@ const scheduleCreateProperties = {
   prompt: {
     type: "string",
     description:
-      "Concrete steps for when the schedule fires: name the connected plugin tools to call (e.g. GITHUB_LIST_RELEASES for owner/repo), what to extract, and how to report. Prefer plugin tools over computer browser or web search for app data.",
+      "Concrete steps for when the schedule fires: what to use, what to extract, and how to report. Name the connected plugin tools to call when one covers the data (e.g. GITHUB_LIST_RELEASES for owner/repo), preferring them over the computer browser or web search; for a website without one, describe the pages and actions to take in the computer's browser. Keep the user's standing preferences separate from decisions that only applied this time, such as skipping an item that was out of stock, and write those as conditions.",
   },
   timezone: { type: "string", description: "IANA timezone (default: the user's timezone)." },
 };

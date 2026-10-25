@@ -214,6 +214,9 @@ type BotLifecycleDeps = {
   jobs: JobPublisher;
   dataDir?: string;
   artifacts?: ArtifactStore;
+  messagingInstallations?: {
+    removeForBot(bot: { id: string; spaceId: string; userId: string }): Promise<void>;
+  };
 };
 
 type LifecycleBot = {
@@ -386,6 +389,7 @@ export async function destroyBot(
     strictTeardown?: boolean;
   },
 ) {
+  await deps.messagingInstallations?.removeForBot(bot);
   const [dedicated, activeRuns, routines] = await Promise.all([
     deps.prisma.computer.findUnique({
       where: {

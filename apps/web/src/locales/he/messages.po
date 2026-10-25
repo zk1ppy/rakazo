@@ -276,10 +276,6 @@ msgstr "מתקדם..."
 msgid "Agent computer"
 msgstr "מחשב הסוכן"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Agent connections"
-msgstr "חיבורי סוכנים"
-
 #: src/pages/McpServersOverlay.tsx
 msgid "Agents:"
 msgstr "סוכנים:"
@@ -656,16 +652,13 @@ msgstr "תצוגה מקדימה של מסך הבוט"
 msgid "Bot screen"
 msgstr "מסך הבוט"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Bot to link"
-msgstr "בוט לקישור"
-
 #: src/pages/shell/message-view.tsx
 msgid "bot"
 msgstr "בוט"
 
 #: src/lib/identity-display.ts
 #: src/pages/IntegrationSetup.tsx
+#: src/pages/MessagingSettingsOverlay.tsx
 #: src/pages/Shell.tsx
 #: src/pages/shell/agent-import.tsx
 #: src/pages/shell/avatar-studio-popover.tsx
@@ -817,17 +810,9 @@ msgstr "שינוי {title}"
 msgid "Changing…"
 msgstr "משנה…"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Channels"
-msgstr "ערוצים"
-
 #: src/pages/shell/message-cards.tsx
 msgid "Chart failed to render: {error}"
 msgstr "לא ניתן להציג את התרשים: {error}"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Chat apps"
-msgstr "אפליקציות צ׳אט"
 
 #: src/pages/shell/composer-mentions.tsx
 msgid "Chat Settings"
@@ -908,10 +893,6 @@ msgstr "בחירת צורה או צבע לבוט, או העלאת תמונה"
 #: src/pages/shell/agent-import.tsx
 msgid "Choose a bot"
 msgstr "בחירת בוט"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Choose a bot…"
-msgstr "בחירת בוט…"
 
 #: src/pages/ModelSettingsOverlay.tsx
 msgid "Choose a model"
@@ -1164,6 +1145,10 @@ msgstr "יש לוודא שאפשר להגיע לכתובת ה-URL מסשן הד�
 msgid "Confirmations"
 msgstr ""
 
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Connect a chat app"
+msgstr ""
+
 #: src/pages/Onboarding.tsx
 msgid "Connect a model"
 msgstr "חיבור מודל"
@@ -1208,6 +1193,15 @@ msgstr "חיבור Treg"
 msgid "Connect {selectedProviderName}"
 msgstr "חיבור {selectedProviderName}"
 
+#: src/components/integrations/IntegrationSetup.tsx
+#: src/pages/memory-providers/HonchoSettingsForm.tsx
+#: src/pages/memory-providers/SerenitySettingsForm.tsx
+#: src/pages/memory-providers/SupermemorySettingsForm.tsx
+#: src/pages/model-settings/role-model-picker.tsx
+#: src/pages/VoiceSettingsOverlay.tsx
+msgid "Connect"
+msgstr "חיבור"
+
 #. placeholder {0}: selected.name
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Connected {0}."
@@ -1224,6 +1218,15 @@ msgstr "מחובר"
 #: src/pages/shell/message-cards.tsx
 msgid "Connected. Its tools are available from your next message."
 msgstr "מחובר. הכלים שלו יהיו זמינים החל מההודעה הבאה."
+
+#: src/pages/McpServersOverlay.tsx
+#: src/pages/memory-providers/HonchoSettingsForm.tsx
+#: src/pages/memory-providers/SerenitySettingsForm.tsx
+#: src/pages/memory-providers/SupermemorySettingsForm.tsx
+#: src/pages/shell/message-cards.tsx
+#: src/pages/VoiceSettingsOverlay.tsx
+msgid "Connecting…"
+msgstr "מתחבר…"
 
 #: src/lib/model-connection-preflight.ts
 msgid "Connection test failed."
@@ -1288,6 +1291,10 @@ msgstr "המשך עם {0}"
 #: src/pages/shell/agent-import.tsx
 msgid "Continue"
 msgstr "המשך"
+
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Conversations"
+msgstr ""
 
 #: src/components/ComputersUnavailableHint.tsx
 #: src/pages/model-settings/connection-controls.tsx
@@ -2048,6 +2055,7 @@ msgstr "לנתק את {disconnectName}?"
 
 #: src/pages/McpServersOverlay.tsx
 #: src/pages/MemorySettingsOverlay.tsx
+#: src/pages/MessagingSettingsOverlay.tsx
 #: src/pages/ModelSettingsOverlay.tsx
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Disconnect"
@@ -2848,10 +2856,6 @@ msgstr "בהיר"
 msgid "Linear issue"
 msgstr "Issue ב-Linear"
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Link a chat app"
-msgstr "קישור אפליקציית צ׳אט"
-
 #: src/components/AccountAccess.tsx
 msgid "Link SSO"
 msgstr "קישור SSO"
@@ -3377,10 +3381,6 @@ msgstr ""
 msgid "Next settings sections"
 msgstr ""
 
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No agent connections yet."
-msgstr "עדיין אין חיבורי סוכנים."
-
 #: src/pages/PluginsOverlay.tsx
 msgid "No apps match your search."
 msgstr "אין אפליקציות שתואמות לחיפוש."
@@ -3405,14 +3405,6 @@ msgstr "אין בוטים תואמים"
 #: src/pages/shell/command-palette.tsx
 msgid "No bots"
 msgstr "אין בוטים"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No chat apps linked yet."
-msgstr "עדיין לא קושרו אפליקציות צ׳אט."
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No group chats yet."
-msgstr "עדיין אין צ׳אטים קבוצתיים."
 
 #: src/components/AskCard.tsx
 msgid "No longer active"
@@ -3481,10 +3473,6 @@ msgstr "עדיין אין הרצות"
 #: src/pages/KnowledgeSection.tsx
 msgid "No skills yet"
 msgstr "עדיין אין מיומנויות"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "No team conversations yet."
-msgstr "עדיין אין שיחות צוות."
 
 #: src/pages/Board.tsx
 msgid "No tickets yet"
@@ -3738,6 +3726,13 @@ msgstr "התחברות באמצעות סיסמה מושבתת בשרת הזה"
 msgid "Password updated"
 msgstr "הסיסמה עודכנה"
 
+#: src/components/AskCard.tsx
+#: src/pages/AccountSettingsOverlay.tsx
+#: src/pages/Auth.tsx
+#: src/pages/shell/bot-credentials.tsx
+msgid "Password"
+msgstr "סיסמה"
+
 #: src/pages/AccountSettingsOverlay.tsx
 #: src/pages/Auth.tsx
 msgid "Passwords do not match"
@@ -3772,6 +3767,10 @@ msgstr "יש להדביק את מפתח ה-API ולבדוק שוב."
 #: src/pages/shell/import-status.ts
 msgid "Paused"
 msgstr "מושהה"
+
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Pending"
+msgstr ""
 
 #: src/pages/shell/bot-panel.tsx
 msgid "Permissions"
@@ -4163,6 +4162,10 @@ msgstr "תשובה ל-{0}"
 msgid "Request a new code"
 msgstr "יש לבקש קוד חדש"
 
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Requests"
+msgstr ""
+
 #: src/pages/shell/message-cards.tsx
 msgid "Research & writing"
 msgstr "מחקר וכתיבה"
@@ -4477,8 +4480,8 @@ msgid "Self-hosted"
 msgstr "באירוח עצמי"
 
 #: src/pages/MessagingSettingsOverlay.tsx
-msgid "Send <0>{linkCode}</0> to the line from your chat app within 10 minutes. You'll get a confirmation reply once linked."
-msgstr "יש לשלוח את <0>{linkCode}</0> לקו מאפליקציית הצ׳אט תוך 10 דקות. לאחר הקישור תתקבל תשובת אישור."
+msgid "Send <0>{linkCode}</0> from {linkApp} within 10 minutes."
+msgstr ""
 
 #: src/components/AskCard.tsx
 msgid "Send answer"
@@ -4703,6 +4706,10 @@ msgstr "הודעת Slack"
 msgid "Slack not enabled"
 msgstr "Slack לא מופעל"
 
+#: src/pages/MessagingSettingsOverlay.tsx
+msgid "Slack workspace"
+msgstr ""
+
 #: src/components/composer/HoldToTalk.tsx
 msgid "Slide up to lock"
 msgstr ""
@@ -4723,6 +4730,10 @@ msgstr "משהו עם אותו שם נוסף זה עתה. יש לנסות שוב
 #: src/lib/agent-import-errors.ts
 msgid "Something you chose cannot work here. Untick it and try again."
 msgstr "משהו שבחרת לא יכול לעבוד כאן. יש לבטל את הסימון ולנסות שוב."
+
+#: src/pages/shell/bot-panel.tsx
+msgid "Space default"
+msgstr "ברירת המחדל של המרחב"
 
 #: src/lib/identity-display.ts
 #: src/pages/SettingsOverlay.tsx
@@ -4871,10 +4882,6 @@ msgstr "לימוד בתהליך. יש להפסיק את הלימוד לפני ש
 #: src/pages/shell/computer-view.tsx
 msgid "Team Computer"
 msgstr "מחשב הצוות"
-
-#: src/pages/MessagingSettingsOverlay.tsx
-msgid "Team conversations"
-msgstr "שיחות צוות"
 
 #: src/pages/shell/bot-panel.tsx
 msgid "Team"
@@ -5372,6 +5379,11 @@ msgstr "השתמש ב-{oauthEnvReference} עבור אסימון הגישה."
 #: src/pages/memory-providers/HonchoSettingsForm.tsx
 msgid "User peer"
 msgstr ""
+
+#: src/components/AskCard.tsx
+#: src/pages/shell/bot-credentials.tsx
+msgid "Username"
+msgstr "שם משתמש"
 
 #: src/pages/shell/import-status.ts
 msgid "Uses files that are not imported"

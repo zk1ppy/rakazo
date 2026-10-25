@@ -709,6 +709,14 @@ function Home({ embedded, onSelectSpace }: InboxPaneProps & { embedded: boolean 
         const refresh = async () => {
           spaceActionRef.current.recoveryId = null;
           setSpaceRecoveryId(null);
+          // A space seen before opens as it was saved; polling stays off until it is painted.
+          const saved = await loadSavedInbox().catch(() => null);
+          if (saved?.me.spaceId === spaceId) {
+            setBots(saved.bots);
+            setBotSections(saved.botSections);
+            setGroups(saved.groups);
+            setMe(saved.me);
+          }
           spaceActionRef.current.busy = false;
           await refreshBots();
           await loadActivity();

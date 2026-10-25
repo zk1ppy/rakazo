@@ -77,6 +77,7 @@ export * from "./host-aware-sandbox.js";
 export * from "./http-decisions.js";
 export * from "./infisical-secret-store.js";
 export * from "./installed-connectors.js";
+export * from "./installed-messaging-surface.js";
 export * from "./integration-provider-settings.js";
 export * from "./jev-auto-review.js";
 export * from "./job-abort.js";
@@ -128,8 +129,10 @@ export {
   parseBackfillExtractArgs,
 } from "./memory-extract-backfill.js";
 export * from "./memory-provider-factory.js";
+export * from "./messaging-composition.js";
 export * from "./messaging-context.js";
 export * from "./messaging-delivery.js";
+export * from "./messaging-installations.js";
 export * from "./messaging-platforms.js";
 export * from "./messaging-team-chat-emulator.js";
 export * from "./model-connect.js";
@@ -185,6 +188,7 @@ export * from "./secrets.js";
 export * from "./sendblue-emulator.js";
 export { SerenityMemoryProvider } from "./serenity-memory-provider.js";
 export * from "./skill-tools.js";
+export * from "./slack-install-provider.js";
 export * from "./smtp-email.js";
 export * from "./storage-migration.js";
 export * from "./stripe-billing.js";

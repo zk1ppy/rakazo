@@ -38,6 +38,7 @@ export type SpaceDeletionDeps = {
   jobs: JobPublisher;
   artifacts: ArtifactStore;
   dataDir: string;
+  messagingInstallations?: Parameters<typeof destroyBot>[0]["messagingInstallations"];
 };
 
 /** Delete one of the actor's Spaces with everything in it; the owner-only rules live in the db layer.

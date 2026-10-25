@@ -1006,4 +1006,11 @@ export const JA_MESSAGES: Record<string, string> = {
   "Connect apps": "アプリを接続",
   "Bring your own key. ElevenLabs, OpenAI, Cartesia, and Fish Audio all plug into the same speak buttons.":
     "ご自身のキーを使用できます。ElevenLabs、OpenAI、Cartesia、Fish Audioはすべて同じ読み上げボタンで使えます。",
+  "Choose a bot…": "ボットを選択…",
+  "Connect Slack workspace": "Slackワークスペースを接続",
+  "Link a chat app": "チャットアプリを連携",
+  Messaging: "メッセージ",
+  "Send {code} to the chat app in a direct message within 10 minutes.":
+    "10分以内にチャットアプリへダイレクトメッセージで{code}を送信してください。",
+  Unlink: "連携解除",
 };

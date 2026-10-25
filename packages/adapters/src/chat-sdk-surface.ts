@@ -517,7 +517,8 @@ function plainTextWithLinks(message: Message): string {
 }
 
 export function providerOfThreadId(threadId: string): string {
-  return threadId.split(":", 1)[0] ?? "";
+  // Installed surfaces reserve ~ for the installation namespace.
+  return threadId.split(":", 1)[0]?.split("~", 1)[0] ?? "";
 }
 
 /** Adapter-native thread id ("telegram:42") → Rakazo thread id ("telegram-work:42"). */
@@ -559,7 +560,7 @@ function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T>
  * trustworthy Content-Length) is cut off at the cap instead of being
  * buffered whole. Returns null once the cap is exceeded.
  */
-async function readBoundedText(request: Request, maxBytes: number): Promise<string | null> {
+export async function readBoundedText(request: Request, maxBytes: number): Promise<string | null> {
   const reader = request.body?.getReader();
   if (!reader) return "";
   const chunks: Uint8Array[] = [];

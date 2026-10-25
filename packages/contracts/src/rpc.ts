@@ -73,6 +73,7 @@ import {
   MeSchema,
   MessagingAgentConnectionSchema,
   MessagingChannelMembershipSchema,
+  MessagingInstallationsStatusSchema,
   MessagingLinkedIdentitySchema,
   MessagingStatusSchema,
   ModelBackupChoiceSchema,
@@ -955,6 +956,11 @@ export const appContract = {
   },
   /** External messaging surface: link state, group channels, agent connections. */
   messaging: {
+    installations: {
+      list: oc.output(MessagingInstallationsStatusSchema),
+      start: oc.input(z.object({ botId: Id })).output(z.object({ url: z.string() })),
+      remove: oc.input(z.object({ id: Id })).output(z.object({ ok: z.literal(true) })),
+    },
     status: oc.output(MessagingStatusSchema),
     link: {
       /** Issue a short-lived code the user sends to the line from a chat app. */

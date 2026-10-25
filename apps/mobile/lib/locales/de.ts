@@ -1018,4 +1018,11 @@ export const DE_MESSAGES: Record<string, string> = {
   "How big is your team?": "Wie groß ist dein Team?",
   "How did you hear about us?": "Wie hast du von uns erfahren?",
   "Welcome to Rakazo": "Willkommen bei Rakazo",
+  "Choose a bot…": "Bot auswählen…",
+  "Connect Slack workspace": "Slack-Workspace verbinden",
+  "Link a chat app": "Chat-App verknüpfen",
+  Messaging: "Nachrichten",
+  "Send {code} to the chat app in a direct message within 10 minutes.":
+    "Sende {code} innerhalb von 10 Minuten in einer Direktnachricht an die Chat-App.",
+  Unlink: "Verknüpfung aufheben",
 };
