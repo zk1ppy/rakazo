@@ -116,7 +116,7 @@ const MEMORY_PROVIDER_ADAPTERS: ReadonlyMap<string, MemoryProviderAdapter> = new
   [
     NEO4J_PROVIDER_ID,
     {
-      requiresDeploymentOwner: neo4jRequiresDeploymentOwner,
+      requiresPrivateEndpoint: neo4jRequiresDeploymentOwner,
       classifySettings: classifyNeo4jConnectionSettings,
       prepare: (
         settings: Record<string, string>,

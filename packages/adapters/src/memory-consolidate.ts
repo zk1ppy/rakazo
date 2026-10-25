@@ -473,7 +473,7 @@ export interface ConsolidationDeferred extends ConsolidationDecline {
 
 export interface MemoryConsolidateDeps {
   runtime: AgentRuntime;
-  prisma: Pick<PrismaClient, "usageRecord">;
+  prisma: Pick<PrismaClient, "usageRecord" | "$transaction">;
   jobs: JobPublisher;
   resolveModel?: (scope: {
     userId: string;

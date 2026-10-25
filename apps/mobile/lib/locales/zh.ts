@@ -482,6 +482,7 @@ export const ZH_MESSAGES: Record<string, string> = {
   Max: "最高",
   Minimal: "最低",
   "Minimum reasoning effort": "最低推理强度",
+  "Off": "关闭",
   Medium: "中",
   "Members ({min}–{max})": "成员（{min}–{max}）",
   "Message…": "发消息…",
