@@ -77,7 +77,6 @@ export const MEMORY_PROVIDER_SETTINGS: readonly MemoryProviderSettingsRegistrati
   {
     id: "neo4j",
     name: "Neo4j",
-    description: "Graph memory stored in Neo4j.",
     SettingsForm: Neo4jSettingsForm,
     ConnectedSettings: Neo4jExtractionSettings,
     connectedLabel: (config) => {
