@@ -388,7 +388,7 @@ export const JA_MESSAGES: Record<string, string> = {
   "Could not create space": "スペースを作成できませんでした",
   "Create space": "スペースを作成",
   "Minimum reasoning effort": "最小推論労力",
-  "Off": "オフ",
+  Off: "オフ",
   "Customer support": "カスタマーサポート",
   "It could not be opened. Try again from the sidebar.":
     "開けませんでした。サイドバーからもう一度お試しください。",

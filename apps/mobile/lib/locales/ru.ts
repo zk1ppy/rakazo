@@ -165,7 +165,6 @@ export const RU_MESSAGES: Record<string, string> = {
   Medium: "Средний",
   Minimal: "Минимальный",
   "Minimum reasoning effort": "Минимальный уровень рассуждений",
-  "Off": "Выкл",
   "Open web app": "Открыть веб-приложение",
   "Project ID": "ID проекта",
   Reconnecting: "Повторное подключение",

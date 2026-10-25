@@ -471,7 +471,6 @@ export const NL_MESSAGES: Record<string, string> = {
   "Maximum output tokens": "Maximaal aantal uitvoertokens",
   "Model id": "Model-id",
   "Minimum reasoning effort": "Minimale redeneerinspanning",
-  "Off": "Uit",
   "Model updated.": "Model bijgewerkt.",
   "No matching models": "Geen overeenkomende modellen",
   "Not now": "Niet nu",
