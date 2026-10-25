@@ -7,10 +7,10 @@ import type { Neo4jMemoryDriver, Neo4jMemoryRows, Neo4jRunOptions } from "./neo4
 import { NEO4J_MEMORY_SCHEMA_STATEMENTS } from "./neo4j-memory-client.js";
 import {
   acquireNeo4jMemoryDriver,
-  neo4jRequiresDeploymentOwner,
   classifyNeo4jConnectionSettings,
   createNeo4jProvider,
   Neo4jMemoryProvider,
+  neo4jRequiresDeploymentOwner,
   parseNeo4jUri,
   prepareNeo4jConnection,
 } from "./neo4j-memory-provider.js";
@@ -119,13 +119,9 @@ describe("Neo4jMemoryProvider", () => {
   });
 
   it("requires a deployment owner for private and cluster-local hosts only", () => {
-    expect(neo4jRequiresDeploymentOwner({ uri: "bolt://127.0.0.1:7687" })).toBe(
-      true,
-    );
+    expect(neo4jRequiresDeploymentOwner({ uri: "bolt://127.0.0.1:7687" })).toBe(true);
     expect(neo4jRequiresDeploymentOwner({ uri: "bolt://neo4j:7687" })).toBe(true);
-    expect(
-      neo4jRequiresDeploymentOwner({ uri: "bolt://host.docker.internal:7687" }),
-    ).toBe(true);
+    expect(neo4jRequiresDeploymentOwner({ uri: "bolt://host.docker.internal:7687" })).toBe(true);
     expect(
       neo4jRequiresDeploymentOwner({
         uri: "neo4j://graph.svc.cluster.local:7687",

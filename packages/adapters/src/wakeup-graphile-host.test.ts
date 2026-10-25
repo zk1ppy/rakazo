@@ -12,8 +12,8 @@ import type { Runner } from "graphile-worker";
 import { makeWorkerUtils } from "graphile-worker";
 import type { Pool } from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearGraphileWorkerIds, graphileWorkerIds } from "./worker-locks.js";
 import { DREAM_CRON_ITEM } from "./memory-dream.js";
+import { clearGraphileWorkerIds, graphileWorkerIds } from "./worker-locks.js";
 
 const run = vi.hoisted(() => vi.fn());
 const withWorkerJobTelemetry = vi.hoisted(() => vi.fn((work: () => Promise<unknown>) => work()));
@@ -1140,5 +1140,4 @@ describe("fork additions: worker locks, memory serial queue, telemetry, graceful
     const unlock = queries.find((query) => query.sql.includes("force_unlock_workers"));
     expect(unlock?.params).toEqual([["pool-self"]]);
   });
-
 });
