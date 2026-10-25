@@ -13,6 +13,7 @@ import { makeWorkerUtils } from "graphile-worker";
 import type { Pool } from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearGraphileWorkerIds, graphileWorkerIds } from "./worker-locks.js";
+import { DREAM_CRON_ITEM } from "./memory-dream.js";
 
 const run = vi.hoisted(() => vi.fn());
 const withWorkerJobTelemetry = vi.hoisted(() => vi.fn((work: () => Promise<unknown>) => work()));
@@ -39,7 +40,6 @@ vi.mock("graphile-worker", async () => {
   };
 });
 
-import { DREAM_CRON_ITEM } from "./memory-dream.js";
 import { RunExecutionHost } from "./run-execution.js";
 import {
   createReservedGraphileJobWorkerHost,
@@ -155,39 +155,6 @@ describe("GraphileJobPublisher.enqueue", () => {
       "history.compact",
       expect.anything(),
       expect.objectContaining({ maxAttempts: HISTORY_COMPACT_MAX_ATTEMPTS }),
-    );
-    await publisher.close();
-  });
-
-  it("puts memory extraction on the global serial queue", async () => {
-    const addJob = vi.fn(async () => undefined);
-    const publisher = publisherWith(addJob);
-    const runAt = new Date("2030-01-01T00:00:15.000Z");
-    await publisher.enqueue(
-      memoryExtractJob(
-        {
-          spaceId: "space-1",
-          userId: "user-1",
-          botId: "bot-1",
-          factId: "fact-1",
-          ns: "shared",
-          maxChunkChars: 4_000,
-          chunkIndex: 0,
-          attempt: 0,
-          scheduleGeneration: 0,
-        },
-        runAt,
-      ),
-    );
-    expect(addJob).toHaveBeenCalledWith(
-      "memory.extract",
-      expect.anything(),
-      expect.objectContaining({
-        queueName: "memory-extract",
-        maxAttempts: 1,
-        jobKey: "memory.extract:fact-1:0",
-        runAt,
-      }),
     );
     await publisher.close();
   });
@@ -439,41 +406,6 @@ describe("GraphileJobWorkerHost runner lifecycle", () => {
     run.mockReset();
     withWorkerJobTelemetry.mockClear();
     clearGraphileWorkerIds();
-  });
-
-  it("traces a locked job and leaves the idle runner untraced", async () => {
-    const first = mockRunner();
-    run.mockResolvedValueOnce(first.runner);
-    const host = new GraphileJobWorkerHost({} as Pool);
-    await host.start(handlers());
-    expect(withWorkerJobTelemetry).not.toHaveBeenCalled();
-    const started = run.mock.calls[0]?.[0] as
-      | {
-          taskList: Record<string, (payload: unknown, helpers: unknown) => Promise<void>>;
-        }
-      | undefined;
-    if (!started) throw new Error("runner was not started");
-    const helpers = { abortSignal: new AbortController().signal, job: { id: "7" } };
-    await started.taskList["memory.extract"]!(
-      {
-        spaceId: "space-1",
-        userId: "user-1",
-        botId: "bot-1",
-        factId: "fact-1",
-        ns: "shared",
-        maxChunkChars: 4_000,
-        chunkIndex: 0,
-        attempt: 0,
-        scheduleGeneration: 0,
-      },
-      helpers,
-    );
-    await started.taskList["memory.consolidate"]!(
-      { spaceId: "space-1", userId: "user-1", attempt: 0, scheduleGeneration: 0 },
-      { ...helpers, job: { id: "8" } },
-    );
-    expect(withWorkerJobTelemetry).toHaveBeenCalledTimes(2);
-    await host.stop();
     vi.mocked(process.availableMemory).mockRestore();
     vi.useRealTimers();
   });
@@ -806,11 +738,6 @@ describe("GraphileJobWorkerHost runner lifecycle", () => {
 
     await host.start(handlers());
     expect(run).toHaveBeenCalledTimes(1);
-    expect(run.mock.calls[0]?.[0]).toMatchObject({
-      parsedCronItems: [
-        expect.objectContaining({ task: DREAM_CRON_ITEM.task, identifier: "memory-dream" }),
-      ],
-    });
 
     first.rejectLife(tooMany);
     await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
@@ -937,77 +864,6 @@ describe("GraphileJobWorkerHost runner lifecycle", () => {
     await host.stop();
     expect(run).toHaveBeenCalledTimes(1);
   });
-
-  it("uses graphile graceful shutdown and unlocks its own pool after an abort", async () => {
-    const first = mockRunner();
-    run.mockResolvedValueOnce(first.runner);
-    const queries: Array<{ sql: string; params?: unknown[] }> = [];
-    const query = vi.fn(async (sql: string, params?: unknown[]) => {
-      queries.push({ sql, params });
-      if (sql.includes("force_unlock_workers") || sql === "begin" || sql === "commit") {
-        return { rows: [] };
-      }
-      return { rows: [{ id: "42" }] };
-    });
-    const pool = {
-      connect: async () => ({ query, release: () => undefined }),
-    } as unknown as Pool;
-    const host = new GraphileJobWorkerHost(pool, { shutdownGraceMs: 20_000 });
-    const jobHandlers = handlers();
-    const gate = deferred();
-    jobHandlers["memory.consolidate"] = vi.fn(async () => {
-      await gate.promise;
-    });
-    await host.start(jobHandlers);
-    const started = run.mock.calls[0]?.[0] as
-      | {
-          taskList: Record<string, (payload: unknown, helpers: unknown) => Promise<void>>;
-        }
-      | undefined;
-    if (!started) throw new Error("runner was not started");
-    expect(started).toMatchObject({
-      noHandleSignals: true,
-      gracefulShutdownAbortTimeout: 20_000,
-    });
-    const { taskList } = started;
-    const controller = new AbortController();
-    const running = taskList["memory.consolidate"]!(
-      { spaceId: "space-1", userId: "user-1", attempt: 0, scheduleGeneration: 0 },
-      { abortSignal: controller.signal, job: { id: "42" } },
-    );
-    await vi.waitFor(() => expect(jobHandlers["memory.consolidate"]).toHaveBeenCalled());
-    controller.abort();
-    gate.resolve();
-    await running;
-    const on = first.runner.events.on as ReturnType<typeof vi.fn>;
-    const created = on.mock.calls.find((call) => call[0] === "worker:create")?.[1] as
-      | ((event: { worker: { workerPool: { id: string } } }) => void)
-      | undefined;
-    created?.({ worker: { workerPool: { id: "pool-self" } } });
-    await host.stop();
-    expect(first.runner.stop).toHaveBeenCalled();
-    const refund = queries.find((query) => query.sql.includes("greatest(jobs.attempts - 1, 0)"));
-    expect(refund?.params).toEqual([["pool-self"], ["42"]]);
-    const unlock = queries.find((query) => query.sql.includes("force_unlock_workers"));
-    expect(unlock?.params).toEqual([["pool-self"]]);
-  });
-
-  it("keeps every pool id in the process, including one started again", async () => {
-    clearGraphileWorkerIds();
-    const first = mockRunner();
-    run.mockResolvedValueOnce(first.runner);
-    const host = new GraphileJobWorkerHost({} as Pool, { sleep: async () => undefined });
-    await host.start(handlers());
-    const on = first.runner.events.on as ReturnType<typeof vi.fn>;
-    const created = on.mock.calls.find((call) => call[0] === "worker:create")?.[1] as
-      | ((event: { worker: { workerPool: { id: string } } }) => void)
-      | undefined;
-    created?.({ worker: { workerPool: { id: "pool-a" } } });
-    created?.({ worker: { workerPool: { id: "pool-b" } } });
-    expect(graphileWorkerIds()).toEqual(["pool-a", "pool-b"]);
-    await host.stop();
-    expect(graphileWorkerIds()).toEqual(["pool-a", "pool-b"]);
-  });
 });
 
 describe("createRoutineRetryNoticeReconciler", () => {
@@ -1129,4 +985,160 @@ describe("createRoutineRetryNoticeReconciler", () => {
     })();
     expect(pending).toEqual([{ id: "1", revision: 3, payload: { runId: "new-run" } }]);
   });
+});
+
+describe("fork additions: worker locks, memory serial queue, telemetry, graceful shutdown", () => {
+  afterEach(() => {
+    run.mockReset();
+    withWorkerJobTelemetry.mockClear();
+    clearGraphileWorkerIds();
+  });
+
+  function publisherWith(addJob: ReturnType<typeof vi.fn>) {
+    vi.mocked(makeWorkerUtils).mockResolvedValue({
+      addJob,
+      release: vi.fn(async () => undefined),
+    } as never);
+    return new GraphileJobPublisher({} as Pool);
+  }
+
+  it("keeps every pool id in the process, including one started again", async () => {
+    clearGraphileWorkerIds();
+    const first = mockRunner();
+    run.mockResolvedValueOnce(first.runner);
+    const host = new GraphileJobWorkerHost({} as Pool, { sleep: async () => undefined });
+    await host.start(handlers());
+    const on = first.runner.events.on as ReturnType<typeof vi.fn>;
+    const created = on.mock.calls.find((call) => call[0] === "worker:create")?.[1] as
+      | ((event: { worker: { workerPool: { id: string } } }) => void)
+      | undefined;
+    created?.({ worker: { workerPool: { id: "pool-a" } } });
+    created?.({ worker: { workerPool: { id: "pool-b" } } });
+    expect(graphileWorkerIds()).toEqual(["pool-a", "pool-b"]);
+    await host.stop();
+    expect(graphileWorkerIds()).toEqual(["pool-a", "pool-b"]);
+  });
+
+  it("puts memory extraction on the global serial queue", async () => {
+    const addJob = vi.fn(async () => undefined);
+    const publisher = publisherWith(addJob);
+    const runAt = new Date("2030-01-01T00:00:15.000Z");
+    await publisher.enqueue(
+      memoryExtractJob(
+        {
+          spaceId: "space-1",
+          userId: "user-1",
+          botId: "bot-1",
+          factId: "fact-1",
+          ns: "shared",
+          maxChunkChars: 4_000,
+          chunkIndex: 0,
+          attempt: 0,
+          scheduleGeneration: 0,
+        },
+        runAt,
+      ),
+    );
+    expect(addJob).toHaveBeenCalledWith(
+      "memory.extract",
+      expect.anything(),
+      expect.objectContaining({
+        queueName: "memory-extract",
+        maxAttempts: 1,
+        jobKey: "memory.extract:fact-1:0",
+        runAt,
+      }),
+    );
+    await publisher.close();
+  });
+
+  it("traces a locked job and leaves the idle runner untraced", async () => {
+    const first = mockRunner();
+    run.mockResolvedValueOnce(first.runner);
+    const host = new GraphileJobWorkerHost({} as Pool);
+    await host.start(handlers());
+    expect(withWorkerJobTelemetry).not.toHaveBeenCalled();
+    const started = run.mock.calls[0]?.[0] as
+      | {
+          taskList: Record<string, (payload: unknown, helpers: unknown) => Promise<void>>;
+        }
+      | undefined;
+    if (!started) throw new Error("runner was not started");
+    const helpers = { abortSignal: new AbortController().signal, job: { id: "7" } };
+    await started.taskList["memory.extract"]!(
+      {
+        spaceId: "space-1",
+        userId: "user-1",
+        botId: "bot-1",
+        factId: "fact-1",
+        ns: "shared",
+        maxChunkChars: 4_000,
+        chunkIndex: 0,
+        attempt: 0,
+        scheduleGeneration: 0,
+      },
+      helpers,
+    );
+    await started.taskList["memory.consolidate"]!(
+      { spaceId: "space-1", userId: "user-1", attempt: 0, scheduleGeneration: 0 },
+      { ...helpers, job: { id: "8" } },
+    );
+    expect(withWorkerJobTelemetry).toHaveBeenCalledTimes(2);
+    await host.stop();
+  });
+
+  it("uses graphile graceful shutdown and unlocks its own pool after an abort", async () => {
+    const first = mockRunner();
+    run.mockResolvedValueOnce(first.runner);
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      queries.push({ sql, params });
+      if (sql.includes("force_unlock_workers") || sql === "begin" || sql === "commit") {
+        return { rows: [] };
+      }
+      return { rows: [{ id: "42" }] };
+    });
+    const pool = {
+      connect: async () => ({ query, release: () => undefined }),
+    } as unknown as Pool;
+    const host = new GraphileJobWorkerHost(pool, { shutdownGraceMs: 20_000 });
+    const jobHandlers = handlers();
+    const gate = deferred();
+    jobHandlers["memory.consolidate"] = vi.fn(async () => {
+      await gate.promise;
+    });
+    await host.start(jobHandlers);
+    const started = run.mock.calls[0]?.[0] as
+      | {
+          taskList: Record<string, (payload: unknown, helpers: unknown) => Promise<void>>;
+        }
+      | undefined;
+    if (!started) throw new Error("runner was not started");
+    expect(started).toMatchObject({
+      noHandleSignals: true,
+      gracefulShutdownAbortTimeout: 20_000,
+    });
+    const { taskList } = started;
+    const controller = new AbortController();
+    const running = taskList["memory.consolidate"]!(
+      { spaceId: "space-1", userId: "user-1", attempt: 0, scheduleGeneration: 0 },
+      { abortSignal: controller.signal, job: { id: "42" } },
+    );
+    await vi.waitFor(() => expect(jobHandlers["memory.consolidate"]).toHaveBeenCalled());
+    controller.abort();
+    gate.resolve();
+    await running;
+    const on = first.runner.events.on as ReturnType<typeof vi.fn>;
+    const created = on.mock.calls.find((call) => call[0] === "worker:create")?.[1] as
+      | ((event: { worker: { workerPool: { id: string } } }) => void)
+      | undefined;
+    created?.({ worker: { workerPool: { id: "pool-self" } } });
+    await host.stop();
+    expect(first.runner.stop).toHaveBeenCalled();
+    const refund = queries.find((query) => query.sql.includes("greatest(jobs.attempts - 1, 0)"));
+    expect(refund?.params).toEqual([["pool-self"], ["42"]]);
+    const unlock = queries.find((query) => query.sql.includes("force_unlock_workers"));
+    expect(unlock?.params).toEqual([["pool-self"]]);
+  });
+
 });

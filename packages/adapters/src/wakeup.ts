@@ -319,7 +319,7 @@ export class GraphileJobWorkerHost implements JobWorkerHost {
         })
         .map((name) => [
           this.options.workload === "interactive" ? INTERACTIVE_RUN_TASK : name,
-          async (payload: unknown, helpers: JobHelpers) => {
+          async (payload: unknown, helpers?: JobHelpers) => {
             const unpacked = unwrapJobPayload(payload);
             const execute = (execution?: BackgroundJobExecution) =>
               runObservedJob({
@@ -328,10 +328,13 @@ export class GraphileJobWorkerHost implements JobWorkerHost {
                 correlation: unpacked.correlation,
                 run: () => dispatchJob(handlers, name, unpacked.payload, execution),
               }).finally(() => {
-                if (helpers.abortSignal.aborted) this.interruptedJobIds.add(String(helpers.job.id));
+                if (helpers?.abortSignal?.aborted)
+                  this.interruptedJobIds.add(String(helpers.job?.id ?? ""));
               });
             const guarded = (execution?: BackgroundJobExecution) =>
-              runWithJobAbort(helpers.abortSignal, () => execute(execution));
+              helpers
+                ? runWithJobAbort(helpers.abortSignal, () => execute(execution))
+                : execute(execution);
             if (name === "run.continue") await this.executions.execute(guarded);
             else await guarded();
           },
