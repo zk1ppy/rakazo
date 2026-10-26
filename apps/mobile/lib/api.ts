@@ -1,7 +1,6 @@
 import type {
   AccountSecurity,
   AuthCapabilities,
-  AvatarStyle,
   Bot,
   BotSection,
   ComputerMode,
@@ -29,6 +28,7 @@ import {
   cancelResponseBody,
   displayIdentityEvent,
   displayIdentityResult,
+  displayName,
   ensureAiDataConsent,
   isActive,
   isBackgroundRunTrigger,
@@ -44,19 +44,23 @@ import {
   reduceLiveMessageBlocks,
   replyMetadata,
   runFailureError,
+  settleRunSubagents,
   signupRequiresEmailVerification,
+  stopsRunHelpers,
   takeLiveMessage,
   updateCloudAgentMessages,
   upsertMessageById,
 } from "@rakazo/core";
+import { clientCorrelationHeaders, responseCorrelation } from "@rakazo/logging/monitoring";
 import * as SecureStore from "expo-secure-store";
 import { promptAiConsent } from "./ai-consent";
-import { getCachedAvatarStyle, saveAvatarStyle } from "./avatar-style";
 import type { EndpointResult } from "./endpoint";
 import { defaultApiBase, normalizeApiBase } from "./endpoint";
 import { t } from "./i18n";
 import { identityLabels } from "./identity-display";
 import { resumeLiveNotifications } from "./live-notifications";
+import { reportMobileError } from "./monitoring";
+import { API_BASE_STORAGE_KEY as ENDPOINT_KEY } from "./server-config";
 import {
   clearSessionToken,
   currentSessionGeneration,
@@ -71,7 +75,6 @@ import {
 import { clearUnsentSends } from "./thread-feedback";
 import { authResponseErrorText, errorText, sessionSaveErrorText } from "./user-error";
 
-const ENDPOINT_KEY = "rakazo.api_base";
 const SPACE_KEY = "rakazo.space_id";
 const SPACE_ROLLBACK_KEY = "rakazo.space_rollback";
 const RPC_TIMEOUT_MS = 8_000;
@@ -299,13 +302,11 @@ async function clearCredentialsForEndpointChange(): Promise<
       ok: true;
       previousToken: string;
       previousSpace: string;
-      previousAvatarStyle: AvatarStyle;
     }
   | { ok: false; result: EndpointResult }
 > {
   const previousToken = await snapshotSessionToken();
   const previousSpace = await snapshotSpace();
-  const previousAvatarStyle = getCachedAvatarStyle();
   if (!previousToken.ok || !previousSpace.ok) {
     return {
       ok: false,
@@ -330,24 +331,18 @@ async function clearCredentialsForEndpointChange(): Promise<
       ok: true,
       previousToken: previousToken.value,
       previousSpace: previousSpace.value,
-      previousAvatarStyle,
     };
   }
 
-  await restoreCredentials(previousToken.value, previousSpace.value, previousAvatarStyle);
+  await restoreCredentials(previousToken.value, previousSpace.value);
   return {
     ok: false,
     result: { ok: false, error: t("Could not clear the previous server session") },
   };
 }
 
-async function restoreCredentials(
-  previousToken: string,
-  previousSpace: string,
-  previousAvatarStyle: AvatarStyle,
-) {
+async function restoreCredentials(previousToken: string, previousSpace: string) {
   if (previousToken) await restoreSessionToken(previousToken);
-  await saveAvatarStyle(previousAvatarStyle);
   if (previousSpace) {
     cachedSpaceId = previousSpace;
     bumpSpaceSelectionGeneration();
@@ -411,7 +406,6 @@ export async function saveApiBase(input: string): Promise<EndpointResult> {
     | {
         previousToken: string;
         previousSpace: string;
-        previousAvatarStyle: AvatarStyle;
       }
     | undefined;
   if (parsed.url !== previous) {
@@ -423,11 +417,7 @@ export async function saveApiBase(input: string): Promise<EndpointResult> {
     await SecureStore.setItemAsync(ENDPOINT_KEY, parsed.url);
   } catch {
     if (cleared) {
-      await restoreCredentials(
-        cleared.previousToken,
-        cleared.previousSpace,
-        cleared.previousAvatarStyle,
-      );
+      await restoreCredentials(cleared.previousToken, cleared.previousSpace);
     }
     return { ok: false, error: t("Could not save the server URL") };
   }
@@ -443,7 +433,6 @@ export async function resetApiBase(): Promise<EndpointResult> {
     | {
         previousToken: string;
         previousSpace: string;
-        previousAvatarStyle: AvatarStyle;
       }
     | undefined;
   if (url !== previous) {
@@ -455,11 +444,7 @@ export async function resetApiBase(): Promise<EndpointResult> {
     await SecureStore.deleteItemAsync(ENDPOINT_KEY);
   } catch {
     if (cleared) {
-      await restoreCredentials(
-        cleared.previousToken,
-        cleared.previousSpace,
-        cleared.previousAvatarStyle,
-      );
+      await restoreCredentials(cleared.previousToken, cleared.previousSpace);
       return { ok: false, error: t("Could not clear the custom server URL") };
     }
   }
@@ -500,10 +485,13 @@ export function aiConsentCoalesceKey(requestContext: ApiRequestContext): string 
   return [requestContext.apiBase, requestContext.headers["x-rakazo-space-id"] ?? ""].join("\u0000");
 }
 
-export async function captureApiRequestContext(): Promise<ApiRequestContext> {
+/** Pins a request to the current server and session, and to a Space (the selected one by default). */
+export async function captureApiRequestContext(
+  spaceId: string | null = selectedSpaceId(),
+): Promise<ApiRequestContext> {
   const generation = currentSessionGeneration();
   const apiBase = currentApiBase();
-  const headers = await authHeaders(selectedSpaceId());
+  const headers = await authHeaders(spaceId);
   if (apiBase !== currentApiBase()) {
     throw new Error(t("The server changed while starting the request"));
   }
@@ -601,6 +589,30 @@ export async function requestPasswordReset(email: string, redirectTo: string): P
   if (!response.ok)
     throw new Error(
       authResponseErrorText(response.status, body, invalidJson, t("Could not send reset email")),
+    );
+}
+
+export async function updateAccountName(name: string): Promise<void> {
+  const nextName = name.trim();
+  if (!nextName || nextName.length > 80 || !displayName(nextName, "")) {
+    throw new Error(t("Could not update name"));
+  }
+  const { response, body, invalidJson } = await fetchMobileJson<unknown>(
+    `${currentApiBase()}/api/auth/update-user`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "rakazo://",
+        ...(await authHeaders()),
+      },
+      body: JSON.stringify({ name: nextName }),
+    },
+    {},
+  );
+  if (!response.ok)
+    throw new Error(
+      authResponseErrorText(response.status, body, invalidJson, t("Could not update name")),
     );
 }
 
@@ -785,18 +797,22 @@ export async function rpc<T>(
   const requestSessionGeneration = currentSessionGeneration();
   const requestApiBase = options.requestContext?.apiBase ?? currentApiBase();
   const uses = aiDataUsesForProcedure(proc, body);
+  const consentTarget = aiConsentTarget(body);
   const consentContext =
     options.requestContext ?? (uses.length ? await captureApiRequestContext() : undefined);
   await ensureAiDataConsent({
     uses,
     status: () =>
+      rpc("aiConsent/status", { uses, ...consentTarget }, { requestContext: consentContext }),
+    prompt: promptAiConsent,
+    allow: (input) =>
       rpc(
-        "aiConsent/status",
-        { uses, ...aiConsentTarget(body) },
+        "aiConsent/allow",
+        consentTarget.settingsScope
+          ? { ...input, settingsScope: consentTarget.settingsScope }
+          : input,
         { requestContext: consentContext },
       ),
-    prompt: promptAiConsent,
-    allow: (input) => rpc("aiConsent/allow", input, { requestContext: consentContext }),
     coalesceKey: consentContext ? aiConsentCoalesceKey(consentContext) : undefined,
   });
   // Abort with an explicit reason so every consumer of the signal (the fetch, the bounded body
@@ -829,6 +845,7 @@ export async function rpc<T>(
     )
       throw new Error(t("Something went wrong. Try again."));
     let res: Response;
+    const correlation = clientCorrelationHeaders();
     try {
       res = await fetch(`${consentContext?.apiBase ?? currentApiBase()}/rpc/${proc}`, {
         method: "POST",
@@ -836,6 +853,7 @@ export async function rpc<T>(
           "content-type": "application/json",
           origin: "rakazo://",
           ...requestHeaders,
+          ...correlation,
         },
         body: JSON.stringify({ json: body }),
         signal: controller.signal,
@@ -844,6 +862,8 @@ export async function rpc<T>(
       // The native fetch reports an aborted request with an implementation detail
       // ("FetchRequestCanceledException") and an unreachable server with a native stack
       // location; say what happened instead.
+      if (!controller.signal.aborted)
+        reportMobileError(error, "rpc.transport", responseCorrelation(new Headers(correlation)));
       throw requestError(error, controller.signal);
     }
     if (
@@ -1008,6 +1028,7 @@ export type MobileBot = Pick<
   | "thinkingLevel"
   | "autoSpeak"
   | "fleetManagement"
+  | "crossSpaceCommunication"
 > &
   Partial<Pick<Bot, "parentBotId" | "spaceId" | "instructions">>;
 
@@ -1024,12 +1045,13 @@ export type MobileMe = Pick<
   | "hostCredentialProvider"
   | "hostCredentialSource"
   | "needsModel"
-  | "avatarStyle"
   | "isDeploymentOwner"
->;
+  | "needsSignupSurvey"
+> & { billingEnabled?: boolean };
 
 export type MobileModel = ModelCatalogEntry;
 
+/** Shared DTO includes headerNames only; header values remain in the server secret. */
 export type MobileModelCredential = ModelCredential;
 
 export type MobileMessage = {
@@ -1144,12 +1166,21 @@ export function prependMobileMessagePage(
 
 export { messagingProviderLabel };
 
+function channelMessageLine(block: {
+  provider: Parameters<typeof messagingProviderLabel>[0];
+  transport?: Parameters<typeof messagingProviderLabel>[1];
+  fromLabel: string;
+  text: string;
+}): string {
+  return `${block.fromLabel} (${messagingProviderLabel(block.provider, block.transport)}): ${block.text}`;
+}
+
 /** The message's text exactly as written, for a view that selects part of it. */
 export function selectableMobileMessageText(message: MobileMessage): string {
   return message.blocks
     .map((block) => {
       if (block.kind === "channel_message") {
-        return `${messagingProviderLabel(block.provider, block.transport)} · ${block.fromLabel}: ${block.text}`;
+        return channelMessageLine(block);
       }
       if (block.kind === "text" || block.kind === "progress" || block.kind === "ask")
         return block.text;
@@ -1167,7 +1198,7 @@ export function blockText(message: MobileMessage) {
   return message.blocks
     .map((block) => {
       if (block.kind === "channel_message") {
-        return `${messagingProviderLabel(block.provider, block.transport)} · ${block.fromLabel}: ${block.text}`;
+        return channelMessageLine(block);
       }
       if (block.kind === "cloud_agent")
         return `${block.title}: ${block.status}${block.prUrl ? ` ${block.prUrl}` : ""}`;
@@ -1185,7 +1216,7 @@ export function blockText(message: MobileMessage) {
       if (block.kind === "steps") {
         return (block.steps ?? [])
           .map((step) => `${step.label}${step.count > 1 ? ` ×${step.count}` : ""}`)
-          .join(" · ");
+          .join(", ");
       }
       return ("text" in block ? block.text : "state" in block ? block.state : "") ?? "";
     })
@@ -1250,45 +1281,100 @@ export async function subscribeThread(
     throw httpError(`rpc threads/subscribe failed (${res.status})`, res);
   }
   const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (!signal.aborted) {
-    // A half-open socket never reports done, so give up on silence and let the caller reconnect.
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const read = await Promise.race([
-      reader.read().catch((error) => {
-        if (current() && !signal.aborted && isServerUnreachable(error)) noteServerReachable(false);
-        throw error;
-      }),
-      new Promise<"idle">((resolve) => {
-        timer = setTimeout(() => resolve("idle"), IDLE_TIMEOUT_MS);
-      }),
-    ]).finally(() => clearTimeout(timer));
-    if (read === "idle") {
-      void reader.cancel().catch(() => undefined);
-      return;
-    }
-    const { done, value } = read;
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const chunks = buffer.split("\n\n");
-    buffer = chunks.pop() ?? "";
-    for (const chunk of chunks) {
-      const data = chunk
+  let finished = false;
+  try {
+    const decoder = new TextDecoder();
+    let scratch: Uint8Array | undefined;
+    let used = 0;
+    let previousLf = false;
+    const appendFrameBytes = (bytes: Uint8Array) => {
+      const required = used + bytes.byteLength;
+      if (!scratch || scratch.byteLength < required) {
+        const capacity = Math.min(
+          MAX_MOBILE_RPC_RESPONSE_BYTES,
+          Math.max(required, scratch ? scratch.byteLength * 2 : 1024),
+        );
+        const grown = new Uint8Array(capacity);
+        if (scratch && used) grown.set(scratch.subarray(0, used));
+        scratch = grown;
+      }
+      scratch.set(bytes, used);
+      used = required;
+    };
+    const emitFrame = (bytes: Uint8Array) => {
+      const data = decoder
+        .decode(bytes)
         .split("\n")
         .filter((line) => line.startsWith("data:"))
         .map((line) => line.slice(5).trim())
         .join("");
-      if (!data || data === "[DONE]") continue;
+      if (!data || data === "[DONE]") return;
       try {
         const parsed = JSON.parse(data) as { json?: ThreadEvent; error?: { message?: string } };
         // Heartbeats prove liveness only; forwarding one would advance the caller's cursor.
         if (parsed.json?.type && parsed.json.type !== "heartbeat")
           onEvent(displayIdentityEvent(parsed.json, identityLabels()));
       } catch {
-        // ignore keepalives and partial frames
+        // Malformed frames and callback errors do not interrupt the subscription.
+      }
+    };
+    while (!signal.aborted) {
+      // A half-open socket never reports done, so let the caller reconnect after silence.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let onAbort: (() => void) | undefined;
+      const read = await Promise.race([
+        reader.read().catch((error) => {
+          if (current() && !signal.aborted && isServerUnreachable(error))
+            noteServerReachable(false);
+          throw error;
+        }),
+        new Promise<"idle" | "aborted">((resolve) => {
+          timer = setTimeout(() => resolve("idle"), IDLE_TIMEOUT_MS);
+          onAbort = () => resolve("aborted");
+          signal.addEventListener("abort", onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        }),
+      ]).finally(() => {
+        clearTimeout(timer);
+        if (onAbort) signal.removeEventListener("abort", onAbort);
+      });
+      if (read === "idle" || read === "aborted") return;
+      const { done, value } = read;
+      if (done) {
+        finished = true;
+        break;
+      }
+      let start = 0;
+      for (let index = 0; index < value.byteLength; index += 1) {
+        if (used + index - start >= MAX_MOBILE_RPC_RESPONSE_BYTES) {
+          throw new RangeError(`Thread SSE frame exceeds ${MAX_MOBILE_RPC_RESPONSE_BYTES} bytes`);
+        }
+        const isLf = value[index] === 10;
+        if (previousLf && isLf) {
+          let frame: Uint8Array = value.subarray(start, index + 1);
+          if (used) {
+            appendFrameBytes(frame);
+            frame = scratch!.subarray(0, used);
+          }
+          emitFrame(frame);
+          used = 0;
+          previousLf = false;
+          start = index + 1;
+        } else {
+          previousLf = isLf;
+        }
+      }
+      if (start < value.byteLength) appendFrameBytes(value.subarray(start));
+    }
+  } finally {
+    if (!finished) {
+      try {
+        void Promise.resolve(reader.cancel()).catch(() => undefined);
+      } catch {
+        // Cancellation is best-effort and must not delay releasing the reader.
       }
     }
+    reader.releaseLock();
   }
 }
 
@@ -1297,6 +1383,10 @@ export function applyMobileThreadEvent(
   event: ThreadEvent,
 ): MobileSnapshot | null {
   if (!prev || event.type === "heartbeat") return prev;
+  if (stopsRunHelpers(event)) {
+    const messages = settleRunSubagents(prev.messages, event.runId);
+    if (messages !== prev.messages) prev = { ...prev, messages };
+  }
   if (event.type === "thread.cleared") {
     return {
       ...prev,
@@ -1309,22 +1399,30 @@ export function applyMobileThreadEvent(
   }
   if (event.type === "run.started") {
     const cursor = event.seq ?? prev.cursor;
-    // Match web: background ticket work stays out of the transcript.
-    if (isBackgroundRunTrigger(event.payload?.trigger as string | undefined)) {
+    const trigger = typeof event.payload?.trigger === "string" ? event.payload.trigger : undefined;
+    if (isBackgroundRunTrigger(trigger)) {
       return cursor === prev.cursor ? prev : { ...prev, cursor };
     }
-    const members = prev.members?.map((member) =>
-      member.botId === event.botId ? { ...member, status: "running" } : member,
-    );
-    if (!event.runId) return { ...prev, cursor, members };
+    const members =
+      event.botId &&
+      prev.members?.some((member) => member.botId === event.botId && member.status !== "running")
+        ? prev.members.map((member) =>
+            member.botId === event.botId ? { ...member, status: "running" } : member,
+          )
+        : prev.members;
+    if (!event.runId) {
+      return cursor === prev.cursor && members === prev.members
+        ? prev
+        : { ...prev, cursor, members };
+    }
     const previousRun =
       prev.activeRuns?.find((candidate) => candidate.id === event.runId) ??
       (prev.run?.id === event.runId ? prev.run : undefined);
     const run = {
       ...previousRun,
       id: event.runId,
-      ...(event.botId ? { botId: event.botId } : {}),
       status: "running",
+      ...(event.botId ? { botId: event.botId } : {}),
       error: null,
     };
     const activeRuns = [

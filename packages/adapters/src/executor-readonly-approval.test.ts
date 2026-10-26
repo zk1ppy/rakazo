@@ -5,6 +5,7 @@ import type {
   ConnectorTool,
 } from "@rakazo/adapter-kit";
 import { MEMORY_REVISION_CONFLICT_ERROR } from "@rakazo/adapter-kit";
+import type { ModelRoleSettings } from "@rakazo/contracts";
 import type { ActionApprovalRule } from "@rakazo/core";
 import { inboundRoutineBlock } from "@rakazo/core";
 import { approvalEffectKey, toolEffectIdempotencyKey } from "@rakazo/core/node/approval-effect-key";
@@ -63,7 +64,12 @@ function fixture({
   catalog = false,
   readOnly = true,
   rules = [] as ActionApprovalRule[],
+  confirmationsOverride = false,
   autoReview = false,
+  approvalRole,
+  nativeReview = false,
+  checkerConnected = true,
+  skipApprovals = false,
   trigger = "user",
   secrets = [] as string[],
   prompt = "Read the item",
@@ -85,7 +91,10 @@ function fixture({
   fleetBots = [] as { id: string; name: string }[],
   secondResource = false,
   routines = [] as { name: string; prompt: string }[],
+  connectedApps = [] as string[],
 }: {
+  /** Apps connected through Composio. */
+  connectedApps?: string[];
   /** The bot's routines, as the owner wrote them. */
   routines?: { name: string; prompt: string }[];
   /** Adds `demo_get_other`, a read on a separate installed resource with the same name prefix. */
@@ -107,7 +116,13 @@ function fixture({
   catalog?: boolean;
   readOnly?: boolean;
   rules?: ActionApprovalRule[];
+  /** The Space has its own confirmations; otherwise `rules` and auto review are the account's. */
+  confirmationsOverride?: boolean;
   autoReview?: boolean;
+  approvalRole?: ModelRoleSettings;
+  nativeReview?: boolean;
+  checkerConnected?: boolean;
+  skipApprovals?: boolean;
   trigger?: string;
   secrets?: string[];
   prompt?: string;
@@ -285,13 +300,51 @@ function fixture({
       })),
     },
     task: { findUniqueOrThrow: vi.fn(async () => ({ id: run.taskId, prompt: taskPrompt })) },
-    connection: { findMany: vi.fn(async () => []) },
-    spaceModelPreference: { findFirst: vi.fn(async () => null) },
-    userModelCredential: { findFirst: vi.fn(async () => null) },
+    connection: {
+      findMany: vi.fn(async () =>
+        connectedApps.map((provider) => ({
+          id: `conn-${provider}`,
+          connectorId: "composio",
+          provider,
+          providerRef: null,
+          displayName: provider,
+          status: "connected",
+        })),
+      ),
+    },
+    userModelPreference: { findFirst: vi.fn(async () => null) },
+    userModelCredential: {
+      findFirst: vi.fn(async () =>
+        approvalRole && checkerConnected
+          ? {
+              id: "review-key",
+              userId: "user-1",
+              provider: "openrouter",
+              label: "Fixture",
+              secretId: "review-secret",
+              createdAt: new Date(0),
+              updatedAt: new Date(0),
+            }
+          : null,
+      ),
+    },
+    userModelRoleChoice: {
+      findMany: vi.fn(async () =>
+        approvalRole
+          ? [
+              ...(approvalRole.primary ? [{ ...approvalRole.primary, position: 0 }] : []),
+              ...approvalRole.backups.map((backup, index) => ({ ...backup, position: index + 1 })),
+            ]
+          : [],
+      ),
+    },
+    secret: { findFirst: vi.fn(async () => ({ id: "review-secret", ciphertext: "fake-cipher" })) },
+    usageRecord: { createMany: vi.fn(async () => ({ count: 1 })) },
+    modelCreditEntry: { findUnique: vi.fn(async () => null) },
     deploymentSettings: {
       findUnique: vi.fn(async () => ({
-        defaultModelProvider: "scripted",
-        defaultModelId: "scripted",
+        defaultModelProvider: "openrouter",
+        defaultModelId: "fixture-model",
       })),
     },
     taughtSkill: { findMany: vi.fn(async () => []) },
@@ -301,9 +354,27 @@ function fixture({
     botSecret: { findMany: vi.fn(async () => []) },
     agentSkill: { findMany: vi.fn(async () => []) },
     scratchpadItem: { findMany: vi.fn(async () => []) },
-    actionApprovalRule: { findMany: vi.fn(async () => rules) },
+    spaceSettingOverride: {
+      findUnique: vi.fn(
+        async (query: { where: { spaceId_userId_setting: { setting: string } } }) =>
+          confirmationsOverride && query.where.spaceId_userId_setting.setting === "confirmations"
+            ? { setting: "confirmations" }
+            : null,
+      ),
+    },
+    actionApprovalRule: { findMany: vi.fn(async () => (confirmationsOverride ? rules : [])) },
+    userActionApprovalRule: { findMany: vi.fn(async () => (confirmationsOverride ? [] : rules)) },
     routine: { findMany: vi.fn(async () => routines) },
-    actionAutoReviewPreference: { findUnique: vi.fn(async () => ({ enabled: autoReview })) },
+    actionAutoReviewPreference: {
+      findUnique: vi.fn(async () =>
+        confirmationsOverride ? { enabled: autoReview, skipApprovals } : null,
+      ),
+    },
+    userActionAutoReviewPreference: {
+      findUnique: vi.fn(async () =>
+        confirmationsOverride ? null : { enabled: autoReview, skipApprovals },
+      ),
+    },
     steeringMessage: {
       findFirst: vi.fn(async (_query: unknown) => (outsideSteering ? { id: "steer-1" } : null)),
     },
@@ -356,6 +427,7 @@ function fixture({
   });
   const enqueue = vi.fn(async (_job: unknown) => undefined);
   const executor = createRunExecutor({
+    deploymentModelKey: "fixture-model-key",
     prisma: transactionalPrisma,
     runtime: { describe: () => ({ capabilities: { scripted: false } }), run: runtimeRun },
     connector: {
@@ -423,11 +495,13 @@ function fixture({
     },
     jobs: { enqueue },
     secrets,
-    autoReview: autoReviewProvider,
+    autoReview: nativeReview ? undefined : autoReviewProvider,
+    secretStore: { load: async () => "fake-review-api-key" },
     shutdownSignal,
     web,
   } as unknown as Parameters<typeof createRunExecutor>[0]);
   return {
+    prisma: transactionalPrisma,
     effects,
     web,
     fetchedUrls,
@@ -680,6 +754,18 @@ describe("connector read-only metadata and approval enforcement", () => {
       },
     );
 
+    it("asks under the Space's own rules when it overrides the account's", async () => {
+      const f = fixture({
+        catalog,
+        confirmationsOverride: true,
+        rules: [{ effect: "require_approval", matchKind: "tool", matchValue: "demo_get_item" }],
+      });
+      await f.run();
+      expect(f.execute).not.toHaveBeenCalled();
+      expect(f.effects).toHaveLength(1);
+      expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+    });
+
     it("replays the approved arguments once and returns the result on retry", async () => {
       const f = fixture({
         catalog,
@@ -807,6 +893,64 @@ describe("connector read-only metadata and approval enforcement", () => {
       expect(reviewMock).not.toHaveBeenCalled();
     });
 
+    it("runs a write without asking or review when the owner skips approvals", async () => {
+      const f = fixture({
+        catalog,
+        name: "demo_send_message",
+        autoReview: true,
+        skipApprovals: true,
+      });
+      await f.run();
+      expect(f.execute).toHaveBeenCalledOnce();
+      expect(f.pauseRunForInput).not.toHaveBeenCalled();
+      expect(reviewMock).not.toHaveBeenCalled();
+    });
+
+    it("runs past an older ask rule in Never ask, which never waits", async () => {
+      const f = fixture({
+        catalog,
+        name: "demo_send_message",
+        skipApprovals: true,
+        rules: [{ effect: "require_approval", matchKind: "tool", matchValue: "demo_send_message" }],
+      });
+      await f.run();
+      expect(f.execute).toHaveBeenCalledOnce();
+      expect(f.pauseRunForInput).not.toHaveBeenCalled();
+    });
+
+    it("refuses a webhook-triggered write in Never ask instead of asking", async () => {
+      const f = fixture({
+        catalog,
+        name: "demo_send_message",
+        trigger: "webhook",
+        skipApprovals: true,
+      });
+      await f.run();
+      expect(f.execute).not.toHaveBeenCalled();
+      expect(f.pauseRunForInput).not.toHaveBeenCalled();
+      expect(JSON.stringify(f.results[0])).toContain("never asks");
+    });
+
+    it("refuses a blocked tool in Never ask without asking or running it", async () => {
+      const f = fixture({
+        catalog,
+        name: "demo_send_message",
+        skipApprovals: true,
+        rules: [{ effect: "deny", matchKind: "tool", matchValue: "demo_send_message" }],
+      });
+      await f.run();
+      expect(f.execute).not.toHaveBeenCalled();
+      expect(f.pauseRunForInput).not.toHaveBeenCalled();
+      expect(JSON.stringify(f.results[0])).toContain("blocked");
+    });
+
+    it("asks before an unlisted write in Ask mode", async () => {
+      const f = fixture({ catalog, name: "demo_send_message" });
+      await f.run();
+      expect(f.execute).not.toHaveBeenCalled();
+      expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+    });
+
     it("forces owner approval for webhook-triggered writes despite an allow rule", async () => {
       const f = fixture({
         catalog,
@@ -923,6 +1067,120 @@ describe("connector read-only metadata and approval enforcement", () => {
   });
 });
 
+describe("Composio batches", () => {
+  beforeEach(() => reviewMock.mockReset());
+  const batch = (...slugs: Array<string | undefined>) => ({
+    tools: slugs.map((slug) =>
+      slug ? { tool_slug: slug, arguments: { to: "a@example.com" } } : { arguments: {} },
+    ),
+  });
+  const batchFixture = (options: Parameters<typeof fixture>[0] = {}) =>
+    fixture({ name: "COMPOSIO_MULTI_EXECUTE_TOOL", readOnly: false, ...options });
+
+  it("runs a batch whose every action is allowed", async () => {
+    const f = batchFixture({
+      rules: [{ effect: "always_allow", matchKind: "tool", matchValue: "gmail_archive_thread" }],
+    });
+    f.setCalls([{ args: batch("GMAIL_ARCHIVE_THREAD"), executionId: "call-1" }]);
+    await f.run();
+    expect(f.execute).toHaveBeenCalledOnce();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+  });
+
+  it("asks when one action in the batch is not allowed", async () => {
+    const f = batchFixture({
+      rules: [{ effect: "always_allow", matchKind: "tool", matchValue: "gmail_archive_thread" }],
+    });
+    f.setCalls([
+      { args: batch("GMAIL_ARCHIVE_THREAD", "GMAIL_SEND_EMAIL"), executionId: "call-1" },
+    ]);
+    await f.run();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+  });
+
+  it("refuses the whole batch when one action is blocked, even in Never ask", async () => {
+    const f = batchFixture({
+      skipApprovals: true,
+      rules: [{ effect: "deny", matchKind: "tool", matchValue: "hubspot_delete_contact" }],
+    });
+    f.setCalls([
+      { args: batch("GMAIL_ARCHIVE_THREAD", "HUBSPOT_DELETE_CONTACT"), executionId: "call-1" },
+    ]);
+    await f.run();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+    expect(JSON.stringify(f.results[0])).toContain("blocked");
+  });
+
+  it("never lets an allow rule on the batch tool cover the actions in it", async () => {
+    const f = batchFixture({
+      rules: [
+        { effect: "always_allow", matchKind: "tool", matchValue: "composio_multi_execute_tool" },
+      ],
+    });
+    f.setCalls([{ args: batch("GMAIL_SEND_EMAIL"), executionId: "call-1" }]);
+    await f.run();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+  });
+
+  it("asks when an entry names no action, even under allow rules", async () => {
+    const f = batchFixture({
+      rules: [{ effect: "always_allow", matchKind: "tool", matchValue: "gmail_archive_thread" }],
+    });
+    f.setCalls([{ args: batch("GMAIL_ARCHIVE_THREAD", undefined), executionId: "call-1" }]);
+    await f.run();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+  });
+
+  it("names the actions in the batch on the approval card", async () => {
+    const f = batchFixture();
+    f.setCalls([{ args: batch("GMAIL_SEND_EMAIL", undefined), executionId: "call-1" }]);
+    await f.run();
+    const card = (
+      f.pauseRunForInput.mock.calls as unknown as [{ blocks: Array<Record<string, unknown>> }][]
+    )[0]?.[0].blocks[0];
+    expect(card).toMatchObject({
+      text: "Review before GMAIL_SEND_EMAIL, …",
+      detail: "GMAIL_SEND_EMAIL\nto: a@example.com\n…",
+    });
+  });
+
+  it("keeps read trust to the app a batch reached", async () => {
+    reviewMock.mockResolvedValue({ decision: "ask", reason: "Unexpected lookup", model: "mock" });
+    const f = batchFixture({ autoReview: true, connectedApps: ["gmail", "slack"] });
+    f.setCalls([
+      { args: batch("GMAIL_LIST_THREADS"), executionId: "call-1" },
+      { name: "web_search", args: { query: "news" }, executionId: "call-2" },
+      { args: batch("SLACK_LIST_CHANNELS"), executionId: "call-3" },
+    ]);
+    await f.run();
+    // The Gmail read runs untainted. After the search, Slack is a new app, so its read is checked.
+    expect(reviewMock).toHaveBeenCalledOnce();
+    expect(reviewMock.mock.calls[0]?.[0]).toMatchObject({
+      toolName: "COMPOSIO_MULTI_EXECUTE_TOOL",
+    });
+  });
+});
+
+describe("create_space", () => {
+  it("asks by default and skips the card when the owner skips approvals", async () => {
+    const asked = fixture({ name: "create_space", builtin: true, autoReview: true });
+    asked.setCalls([{ args: { name: "Support" }, executionId: "call-1" }]);
+    await asked.run();
+    expect(asked.pauseRunForInput).toHaveBeenCalledOnce();
+
+    const skipped = fixture({ name: "create_space", builtin: true, skipApprovals: true });
+    skipped.setCalls([{ args: { name: "Support" }, executionId: "call-1" }]);
+    // Past the gate, creation needs space tables this fixture does not mock.
+    await skipped.run(true);
+    expect(skipped.pauseRunForInput).not.toHaveBeenCalled();
+    expect(skipped.effects[0]?.status).not.toBe("intended");
+  });
+});
+
 describe("self instruction proposals", () => {
   const args = { instructions: "Draft only. Ask before sending.", reason: "Learned a preference" };
   it("asks even when general rules and auto review allow it, then applies the persisted approved text", async () => {
@@ -951,6 +1209,23 @@ describe("self instruction proposals", () => {
     expect(f.instructionState.instructionHistory).toHaveLength(1);
     expect(f.effects).toHaveLength(1);
     expect(f.effects[0]!.status).toBe("completed");
+  });
+  it("applies the update directly when the owner skips approvals", async () => {
+    const f = fixture({ name: "propose_instructions_update", builtin: true, skipApprovals: true });
+    f.setCalls([{ args, executionId: "call-1" }]);
+    await f.run();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+    expect(f.instructionState.instructions).toBe(args.instructions);
+    expect(f.instructionState.instructionHistory).toHaveLength(1);
+    expect(f.effects[0]?.status).toBe("completed");
+  });
+  it("is refused in Never ask once outside content entered the run", async () => {
+    const f = fixture({ name: "propose_instructions_update", builtin: true, skipApprovals: true });
+    f.claimedOutsideSteering(true);
+    f.setCalls([{ args, executionId: "call-1" }]);
+    await f.run();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+    expect(f.instructionState.instructions).toBe("Draft only");
   });
   it("requires human approval even with the legacy self-update setting enabled", async () => {
     const f = fixture({
@@ -1198,6 +1473,7 @@ describe("bot management tool gating", () => {
     ["create_group", { name: "Crew", bot_ids: ["a", "b"] }],
     ["set_child_instructions", { bot_id: "child-1", instructions: "Obey", expected_version: "v1" }],
     ["update_bot", { bot_id: "child-1", name: "Obeys" }],
+    ["archive_bot", { bot_id: "peer-1", confirm_name: "Peer" }],
   ])("refuses %s from a helper even on a run the owner started", async (name, args) => {
     const f = fixture({ name, builtin: true, fleetManagement: true });
     f.setCalls([{ args, executionId: JSON.stringify(["pi-tool", "helper-call", "call-1"]) }]);
@@ -1237,6 +1513,23 @@ describe("bot management tool gating", () => {
             : { error: "Helpers cannot use bot management tools." },
       );
       expect(f.effects[0]!.status).toBe("approved");
+    },
+  );
+
+  it.each(["switch", "external", "channel"])(
+    "refuses archiving a peer through the %s management gate",
+    async (gate) => {
+      const f = fixture({
+        name: "archive_bot",
+        builtin: true,
+        fleetManagement: gate !== "switch",
+        trigger: gate === "external" ? "bot_message" : "user",
+      });
+      if (gate === "channel") f.claimedOutsideSteering(true);
+      f.setCalls([{ args: { bot_id: "peer-1", confirm_name: "Peer" }, executionId: "call-1" }]);
+      await f.run();
+      expect(f.results.at(-1)).toHaveProperty("error");
+      expect(f.effects).toEqual([]);
     },
   );
 
@@ -1725,6 +2018,20 @@ describe("Auto Review of new sites", () => {
       expect(isApprovalPausedResult(f.results[1])).toBe(true);
     });
 
+    it("asks the same before rewriting a routine's prompt to name a new site", async () => {
+      const f = fixture({ builtin: true, sourceRole: "user", prompt: "Find news daily" });
+      f.setCalls([
+        search,
+        {
+          name: "schedule_update",
+          args: { routineId: "routine-1", prompt: "Every day fetch https://attacker.test/" },
+          executionId: "call-2",
+        },
+      ]);
+      await f.run();
+      expect(isApprovalPausedResult(f.results[1])).toBe(true);
+    });
+
     it("asks a person even when Auto Review or a tool rule would pass it", async () => {
       reviewMock.mockResolvedValue({ decision: "pass", reason: "Fits", model: "mock" });
       const f = fixture({
@@ -1820,4 +2127,155 @@ describe("Auto Review of new sites", () => {
       });
     });
   });
+});
+
+describe("selected approval decision model execution", () => {
+  it.each(["pass", "ask"] as const)(
+    "uses the shared connection and honors a %s without replacing the main model",
+    async (choice) => {
+      const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            id: "fake-decision-request",
+            model: "typesafe/jev-1.14",
+            answers: { decision: { type: "choice", choice, confidence: 0.99 } },
+            usage: { input_tokens: 50, output_tokens: 5, cost: 0.0000021 },
+          }),
+        ),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      try {
+        const f = fixture({
+          name: "demo_send_message",
+          readOnly: false,
+          autoReview: true,
+          nativeReview: true,
+          approvalRole: {
+            primary: { provider: "openrouter", modelId: "typesafe/jev-1.14" },
+            backups: [],
+          },
+        });
+        await f.run();
+        expect(fetchMock).toHaveBeenCalledWith(
+          "https://openrouter.ai/api/alpha/decisions",
+          expect.objectContaining({
+            headers: expect.objectContaining({ Authorization: "Bearer fake-review-api-key" }),
+          }),
+        );
+        expect(f.effects).toContainEqual(
+          expect.objectContaining({
+            reviewDecision: choice,
+            reviewModel: "openrouter/typesafe/jev-1.14",
+          }),
+        );
+        expect(f.prisma.usageRecord.createMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: [
+              expect.objectContaining({
+                operationId: "auto-review:run-1",
+                model: "typesafe/jev-1.14",
+                costUsd: 0.0000021,
+              }),
+            ],
+          }),
+        );
+        expect(f.execute).toHaveBeenCalledTimes(choice === "pass" ? 1 : 0);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+});
+
+it("tries a connected approval backup when the deployment checker is unavailable", async () => {
+  vi.stubEnv("RAKAZO_AUTO_REVIEW_PROVIDER", "missing-provider");
+  vi.stubEnv("RAKAZO_AUTO_REVIEW_MODEL", "missing-model");
+  const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        answers: { decision: { type: "choice", choice: "pass", confidence: 0.99 } },
+      }),
+    ),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  try {
+    const f = fixture({
+      name: "demo_send_message",
+      readOnly: false,
+      autoReview: true,
+      nativeReview: true,
+      approvalRole: {
+        primary: null,
+        backups: [{ provider: "openrouter", modelId: "typesafe/jev-1.14" }],
+      },
+    });
+    await f.run();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(f.execute).toHaveBeenCalledOnce();
+  } finally {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  }
+});
+
+it("asks instead of using deployment credentials after a selected approval connection disappears", async () => {
+  const fetchMock = vi.fn<typeof fetch>();
+  vi.stubGlobal("fetch", fetchMock);
+  try {
+    const f = fixture({
+      name: "demo_send_message",
+      readOnly: false,
+      autoReview: true,
+      nativeReview: true,
+      checkerConnected: false,
+      approvalRole: {
+        primary: { provider: "openrouter", modelId: "typesafe/jev-1.14" },
+        backups: [],
+      },
+    });
+    await f.run();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.effects).toContainEqual(expect.objectContaining({ reviewDecision: "error" }));
+    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("uses the OpenRouter environment key for a decision checker on another deployment provider", async () => {
+  vi.stubEnv("PI_DEFAULT_PROVIDER", "anthropic");
+  vi.stubEnv("RAKAZO_AUTO_REVIEW_PROVIDER", "openrouter");
+  vi.stubEnv("RAKAZO_AUTO_REVIEW_MODEL", "typesafe/jev-1.14");
+  vi.stubEnv("OPENROUTER_API_KEY", "fake-environment-review-key");
+  const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        answers: { decision: { type: "choice", choice: "pass", confidence: 0.99 } },
+      }),
+    ),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  try {
+    const f = fixture({
+      name: "demo_send_message",
+      readOnly: false,
+      autoReview: true,
+      nativeReview: true,
+      checkerConnected: false,
+    });
+    await f.run();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://openrouter.ai/api/alpha/decisions",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer fake-environment-review-key",
+        }),
+      }),
+    );
+    expect(f.execute).toHaveBeenCalledOnce();
+  } finally {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  }
 });

@@ -14,8 +14,17 @@ import {
   notifyArchivedChatsChanged,
   onArchivedChatsChanged,
 } from "./archived-chats";
+import { confirmDeleteGroup } from "./bot-lifecycle";
 
-vi.mock("./api", () => ({ rpc: vi.fn() }));
+const { groupRpc, groupAlert } = vi.hoisted(() => ({
+  groupRpc: vi.fn(),
+  groupAlert: vi.fn(),
+}));
+vi.mock("./api", () => ({ rpc: groupRpc }));
+vi.mock("react-native", () => ({ Alert: { alert: groupAlert } }));
+vi.mock("./i18n", () => ({ t: (text: string) => text }));
+vi.mock("./user-error", () => ({ errorText: () => "failure" }));
+vi.mock("./search-inbox", () => ({ removeFromSearchInbox: vi.fn() }));
 
 const testFileUrl = import.meta.url;
 const source = readFileSync(new URL("../app/index.tsx", testFileUrl), "utf8");
@@ -81,17 +90,22 @@ describe("archived chats row", () => {
       accessibilityLabel: string;
       onPress: () => void;
       style: (state: { pressed: boolean }) => object[];
-    }) => (
-      <button
-        type="button"
-        data-role={accessibilityRole}
-        aria-label={accessibilityLabel}
-        onClick={onPress}
-        style={Object.assign({}, ...style({ pressed: false }))}
-      >
-        {children}
-      </button>
-    ),
+    }) => {
+      const merged = Object.assign({}, ...style({ pressed: false }));
+      return (
+        <button
+          type="button"
+          data-role={accessibilityRole}
+          aria-label={accessibilityLabel}
+          // React Native's paddingHorizontal has no DOM equivalent, so expose it directly.
+          data-padding-horizontal={merged.paddingHorizontal}
+          onClick={onPress}
+          style={merged}
+        >
+          {children}
+        </button>
+      );
+    },
     ({ children, style }: { children: ReactNode; style: object }) => (
       <span style={style}>{children}</span>
     ),
@@ -133,13 +147,17 @@ describe("archived chats row", () => {
   });
 
   it.each([false, true])(
-    "aligns with inbox names and fills a 44pt tap target (compact: %s)",
+    "lines up with the section headers and fills a 44pt tap target (compact: %s)",
     (value) => {
       compact = value;
       const { container, root } = render(3);
       const button = container.querySelector("button")!;
-      const row = value ? { ...styles.row, ...styles.compactRow } : styles.row;
-      expect(button.style.paddingInlineStart).toBe(`${row.paddingHorizontal + 62 + row.gap}px`);
+      // The same inset as a section header, not the chat-name column past the avatar.
+      expect(button.style.paddingInlineStart).toBe("");
+      expect(button.getAttribute("data-padding-horizontal")).toBe(
+        String(styles.sectionToggle.paddingHorizontal),
+      );
+      expect(button.style.paddingTop).toBe(`${styles.sectionToggle.paddingTop}px`);
       expect(button.style.minHeight).toBe("44px");
       expect(button.style.width).toBe("100%");
       const label = button.querySelector("span")!;
@@ -155,7 +173,8 @@ describe("archived chats row", () => {
     const row = footer.indexOf("<ArchivedChatsRow");
     expect(row).toBeGreaterThan(footer.indexOf('t("Tap + to create a bot")'));
     expect(footer.slice(row)).toContain('onPress={() => router.push("/archived-bots")}');
-    expect(footer.slice(footer.indexOf("/>", row) + 2).trim()).toBe("</>\n            }");
+    // Nothing but the end of the footer follows the row, however the list is wrapped.
+    expect(footer.slice(footer.indexOf("/>", row) + 2).replace(/\s/g, "")).toBe("</>}");
   });
 });
 
@@ -294,8 +313,10 @@ describe("thread menu archive notifications", () => {
     const leave = vi.fn();
     const confirmDeleteBot = vi.fn();
     const alert = vi.fn();
+    const removeFromSearchInbox = vi.fn();
     const actions = new Function(
       "rpc",
+      "removeFromSearchInbox",
       "notifyArchivedChatsChanged",
       "leaveBot",
       "confirmDeleteBot",
@@ -307,8 +328,11 @@ describe("thread menu archive notifications", () => {
         ${actionsSource}
         return botActions;
       `),
-    )(rpc, notify, leave, confirmDeleteBot, { alert }) as { text: string; onPress: () => void }[];
-    return { rpc, notify, leave, confirmDeleteBot, alert, actions };
+    )(rpc, removeFromSearchInbox, notify, leave, confirmDeleteBot, { alert }) as {
+      text: string;
+      onPress: () => void;
+    }[];
+    return { rpc, removeFromSearchInbox, notify, leave, confirmDeleteBot, alert, actions };
   }
 
   it("notifies only after archive succeeds, including while the inbox stays mounted", async () => {
@@ -321,8 +345,10 @@ describe("thread menu archive notifications", () => {
     );
     h.actions.find((action) => action.text === "Archive")!.onPress();
     expect(h.notify).not.toHaveBeenCalled();
+    expect(h.removeFromSearchInbox).not.toHaveBeenCalled();
     finish();
     await Promise.resolve();
+    expect(h.removeFromSearchInbox).toHaveBeenCalledWith("bot-b");
     expect(h.notify).toHaveBeenCalledOnce();
     expect(h.leave).toHaveBeenCalledOnce();
     h.rpc.mockRejectedValueOnce(new Error("offline"));
@@ -330,6 +356,7 @@ describe("thread menu archive notifications", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(h.notify).toHaveBeenCalledOnce();
+    expect(h.removeFromSearchInbox).toHaveBeenCalledOnce();
     expect(h.alert).toHaveBeenCalledOnce();
   });
 
@@ -346,20 +373,19 @@ describe("thread menu archive notifications", () => {
 describe("group deletion archive notifications", () => {
   it("notifies after success and leaves the count unchanged on failure", async () => {
     const group = readFileSync(new URL("../app/group-settings.tsx", testFileUrl), "utf8");
-    const rpc = vi.fn().mockResolvedValueOnce({});
+    const rpc = groupRpc.mockReset().mockResolvedValueOnce({});
     const notify = vi.fn();
-    const alert = vi.fn();
+    const alert = groupAlert.mockReset();
     const remove = new Function(
-      "rpc",
+      "confirmDeleteGroup",
       "notifyArchivedChatsChanged",
-      "Alert",
       compile(`
       const groupId = "group-b", group = { name: "Group" };
-      const t = text => text, router = { replace() {} }, errorText = () => "failure";
+      const router = { replace() {} };
       ${group.slice(group.indexOf("  function remove()"), group.indexOf("  return ("))}
       return remove;
     `),
-    )(rpc, notify, { alert });
+    )(confirmDeleteGroup, notify);
     remove();
     alert.mock.calls[0]![2][1].onPress();
     expect(notify).not.toHaveBeenCalled();

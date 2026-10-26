@@ -714,7 +714,7 @@ export interface MemoryExtractStore {
 
 export interface MemoryExtractDeps {
   runtime: AgentRuntime;
-  prisma: Pick<PrismaClient, "usageRecord">;
+  prisma: Pick<PrismaClient, "usageRecord" | "$transaction">;
   jobs: JobPublisher;
   resolveModel?: (scope: {
     userId: string;

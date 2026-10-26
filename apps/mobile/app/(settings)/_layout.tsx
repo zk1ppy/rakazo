@@ -68,10 +68,32 @@ export default function SettingsLayout() {
       <Stack.Screen name="ai-data-sharing" options={glassHeaderOptions(t("AI data sharing"))} />
       <Stack.Screen name="archived-bots" options={{ title: t("Archived") }} />
       <Stack.Screen name="change-password" options={{ title: t("Change password") }} />
+      <Stack.Screen name="signup-survey" options={glassHeaderOptions(t("Welcome to Rakazo"))} />
       <Stack.Screen name="language" options={glassHeaderOptions(t("Language"))} />
       <Stack.Screen name="model-picker" options={glassHeaderOptions(t("Model"))} />
+      <Stack.Screen name="model-connection" options={glassHeaderOptions(t("Model"))} />
+      <Stack.Screen name="billing" options={glassHeaderOptions(t("Billing"))} />
       <Stack.Screen name="models" options={glassHeaderOptions(t("Models"))} />
       <Stack.Screen name="voice" options={glassHeaderOptions(t("Voice"))} />
+      <Stack.Screen
+        name="approvals"
+        options={{
+          ...glassHeaderOptions(t("Approvals")),
+          contentStyle: { backgroundColor: native.groupedPage },
+        }}
+      />
+      <Stack.Screen
+        name="space"
+        // Named after the Space it opened from.
+        options={({ route }) => ({
+          ...glassHeaderOptions(
+            (route.params as { name?: string } | undefined)?.name ?? t("Space"),
+          ),
+          contentStyle: { backgroundColor: native.groupedPage },
+        })}
+      />
+      <Stack.Screen name="messaging" options={glassHeaderOptions(t("Messaging"))} />
+      <Stack.Screen name="team-conversation" />
       <Stack.Screen name="integrations" options={glassHeaderOptions(t("Integrations"))} />
       <Stack.Screen
         name="integration-setup"

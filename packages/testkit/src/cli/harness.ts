@@ -5,6 +5,7 @@ import path from "node:path";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
 import { PostgreSqlContainer } from "@testcontainers/postgresql";
 import type { createApp } from "../../../../apps/api/src/app.ts";
+import { createModelConnectionFixtureFetch } from "../model-connection-fixture.js";
 import { runProcess } from "./process.js";
 
 loadRootEnv();
@@ -48,7 +49,7 @@ async function main() {
   const mode = integration ? "integration" : "e2e";
   const reportDir = path.resolve("test-report", mode);
   await mkdir(reportDir, { recursive: true });
-  const container = await new PostgreSqlContainer("postgres:16-alpine").start();
+  const container = await new PostgreSqlContainer("postgres:18-alpine").start();
   try {
     // Migrations run as the container superuser and the e2e API connects as the
     // runtime login, so row-level security is enforced as in a deployment.
@@ -94,6 +95,11 @@ async function main() {
     process.env.SIGNUP_ALLOWLIST = "";
     // Model and speech fixtures listen on loopback, and most test accounts are not the owner.
     process.env.MCP_ALLOW_PRIVATE_ENDPOINT = "true";
+    if (!integration) {
+      // The scripted bot registers a stdio server, and the MCP settings offer stdio.
+      process.env.MCP_STDIO_ENABLED = "true";
+      process.env.MCP_STDIO_ALLOWED_COMMANDS = "echo";
+    }
     process.env.CI = "1";
 
     execSync("pnpm --filter @rakazo/db generate", { stdio: "inherit", env: process.env });
@@ -175,6 +181,7 @@ async function main() {
       {
         ComposioConnector,
         FakeComposioClient,
+        listPiCatalog,
         DestinationEmulator,
         EmailEmulator,
         PipedreamConnector,
@@ -202,6 +209,7 @@ async function main() {
     const email = new EmailEmulator();
     const handles = await createApp({
       databaseUrl,
+      modelConnectionFetch: createModelConnectionFixtureFetch(listPiCatalog()),
       prisma: undefined,
       composio: new ComposioConnector({ client: new FakeComposioClient() }),
       connectors: [new DestinationEmulator()],

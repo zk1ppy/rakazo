@@ -25,8 +25,8 @@ test("a failed overlay chunk keeps the shell and the draft, and Refresh loads it
 
   await page.unroute(pluginsChunk);
   await page.getByRole("button", { name: "Connect apps", exact: true }).click();
+  // The reload keeps ?integrations, so the overlay opens on its own once the chunk loads.
   await failed.getByRole("button", { name: "Refresh", exact: true }).click();
-  await page.getByRole("button", { name: "Connect apps", exact: true }).click();
   await expect(page.getByPlaceholder("Search apps")).toBeVisible();
 });
 
@@ -49,8 +49,8 @@ test("a failed page chunk shows Refresh instead of a blank app", async ({ page }
 });
 
 for (const [failing, intact] of [
-  ["ScratchpadSection", "bot-knowledge"],
-  ["KnowledgeSection", "bot-scratchpad"],
+  ["ScratchpadSection", "bot-profile-header"],
+  ["KnowledgeSection", "bot-profile-header"],
 ] as const) {
   test(`a failed ${failing} chunk keeps the rest of the bot settings panel`, async ({ page }) => {
     const stamp = Date.now();
@@ -69,16 +69,15 @@ for (const [failing, intact] of [
       .click();
 
     const settings = page.getByTestId("bot-settings");
-    await settings.getByText("Advanced", { exact: true }).click();
     await expect(settings.getByText("Could not load", { exact: true })).toBeVisible();
     await expect(settings.getByTestId(intact)).toBeVisible();
-    await expect(settings.getByRole("button", { name: "Save", exact: true })).toBeVisible();
+    await expect(settings.getByRole("button", { name: "Save", exact: true })).toHaveCount(0);
     await expect(composer).toHaveValue("Keep this draft");
   });
 }
 
 for (const overlay of ["settings", "integrations"] as const) {
-  test(`preload recovery reopens ${overlay} once after an automatic reload`, async ({
+  test(`preload recovery reopens ${overlay} after an automatic reload`, async ({
     page,
   }, testInfo) => {
     await signup(
@@ -117,11 +116,10 @@ for (const overlay of ["settings", "integrations"] as const) {
       .click();
     await reloaded;
     await expect(opened).toBeVisible();
-    await expect(page).toHaveURL(originalUrl);
+    await expect(page).toHaveURL(
+      (url) => url.pathname === new URL(originalUrl).pathname && url.searchParams.has(overlay),
+    );
     await captureScreenshot(page, testInfo, `preload-recovered-${overlay}`);
-    await page.reload();
-    await expect(page.locator('[data-rakazo-app-state="ready"]')).toBeVisible();
-    await expect(opened).toHaveCount(0);
   });
 }
 
@@ -152,9 +150,14 @@ test("preload recovery keeps Settings bound to another space", async ({ page }, 
   await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
   await reloaded;
   const settings = page.getByTestId("user-settings");
-  await expect(settings).toHaveAttribute("data-settings-section", "models");
-  await expect(settings.getByTestId("settings-space")).toHaveText("Personal");
-  await expect(page).toHaveURL(originalUrl);
+  // A space's Settings opens its own Space section.
+  await expect(settings).toHaveAttribute("data-settings-section", "space");
+  await expect(page).toHaveURL(
+    (url) =>
+      url.pathname === new URL(originalUrl).pathname &&
+      url.searchParams.get("settings") === "space" &&
+      url.searchParams.has("space"),
+  );
   expect(await page.evaluate(() => localStorage.getItem("rakazo:space-id"))).toBe(selected);
   await captureScreenshot(page, testInfo, "preload-recovered-space-settings");
 });

@@ -49,6 +49,17 @@ afterEach(async () => {
 });
 
 describe("Pi OpenTelemetry", () => {
+  it("continues the request/job trace instead of starting an unrelated trace", async () => {
+    const { output, provider } = setup();
+    await runWithLogContext({ "trace.id": "a".repeat(32), "span.id": "b".repeat(16) }, () =>
+      withPiTelemetry(ids, async () => undefined),
+    );
+    await provider.forceFlush();
+    const [span] = output.getFinishedSpans();
+    expect(span?.spanContext().traceId).toBe("a".repeat(32));
+    expect(span?.parentSpanContext?.spanId).toBe("b".repeat(16));
+  });
+
   it.each([undefined, "", "  "])(
     "does not initialize or create spans with endpoint %j",
     async (endpoint) => {
@@ -586,6 +597,7 @@ function jobHandlers(): BackgroundJobHandlers {
     "call.expire": vi.fn(async () => undefined),
     "history.compact": vi.fn(async () => undefined),
     "messaging.deliver": vi.fn(async () => undefined),
+    "messaging.credential-cleanup": vi.fn(async () => undefined),
     "cloud_agent.poll": vi.fn(async () => undefined),
     "memory.extract": vi.fn(async () => undefined),
     "memory.consolidate": vi.fn(async () => undefined),

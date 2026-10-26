@@ -70,11 +70,13 @@ async function post(
   deps: OnboardingDeps,
   target: { spaceId: string; botId: string; threadId: string },
   blocks: MessageBlock[],
+  markUnread = true,
 ): Promise<string> {
   const committed = await deps.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const message = await createThreadMessageInTransaction(tx, {
       threadId: target.threadId,
       role: "bot",
+      markUnread,
       blocks,
     });
     const event = await appendEventInTransaction(tx, {
@@ -106,8 +108,9 @@ export async function startOnboarding(
   // user already engaged.
 }
 
-function messageHasChoice(blocks: MessageBlock[]): boolean {
-  return blocks.some((block) => block.kind === "choice");
+/** A focus card, or a question the bot asked itself; either way the thread already asks. */
+function messageHasChoiceOrAsk(blocks: MessageBlock[]): boolean {
+  return blocks.some((block) => block.kind === "choice" || block.kind === "ask");
 }
 
 function messageHasPendingChoice(blocks: MessageBlock[]): boolean {
@@ -139,10 +142,28 @@ export async function promptFocus(
       orderBy: { createdAt: "asc" },
     });
     if (recent.some((message) => message.role === "user")) return null;
-    if (recent.some((message) => messageHasChoice(message.blocks as MessageBlock[]))) return null;
+    if (recent.some((message) => messageHasChoiceOrAsk(message.blocks as MessageBlock[])))
+      return null;
+    // A bot whose creation intro is running asks what it is for itself (see enqueueBotIntroRun).
+    const intro = await tx.run.findFirst({
+      where: {
+        threadId: thread.id,
+        trigger: "created",
+        status: { notIn: ["failed", "cancelled"] },
+      },
+      select: { id: true },
+    });
+    if (intro) return null;
+    // An imported agent already has a role.
+    const imported = await tx.agentImport.findFirst({
+      where: { botId: bot.id },
+      select: { id: true },
+    });
+    if (imported) return null;
     const message = await createThreadMessageInTransaction(tx, {
       threadId: target.threadId,
       role: "bot",
+      markUnread: false,
       blocks,
     });
     const event = await appendEventInTransaction(tx, {
@@ -233,12 +254,17 @@ export async function chooseFocus(
 
   // Keep the name and title the user chose when creating the bot; the focus
   // step only suggests apps, it must not rename the bot.
-  await post(deps, target, [
-    {
-      kind: "text",
-      text: `Got it. ${capitalize(option.summary)}. I’ll see what’s already connected so I don’t make you set something up twice.`,
-    },
-  ]);
+  await post(
+    deps,
+    target,
+    [
+      {
+        kind: "text",
+        text: `Got it. ${capitalize(option.summary)}. I’ll see what’s already connected so I don’t make you set something up twice.`,
+      },
+    ],
+    false,
+  );
 
   const providers = deps.connectors.managedProviders();
   const catalog = (

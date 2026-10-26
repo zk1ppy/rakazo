@@ -8,8 +8,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { LinkFavicons } from "./markdown.web";
 import {
   ChatMarkdown,
+  defaultMarkdownCopy,
   LinkFaviconsContext,
   LinkifiedText,
+  MarkdownCopyProvider,
   RemoteImagesContext,
 } from "./markdown.web";
 
@@ -592,5 +594,42 @@ describe("web markdown code copy", () => {
     );
     expect(html.match(/<pre/g)).toHaveLength(3);
     expect(html.match(/aria-label="Copy code"/g)).toHaveLength(1);
+  });
+
+  it("renders provider copy in place of the English defaults", () => {
+    const rows = Array.from({ length: 12 }, (_, i) => `| ${i + 1} | v${i + 1} |`).join("\n");
+    const markdown = ["```ts", "const a = 1;", "```", "", "| N | V |", "|---|---|", rows].join(
+      "\n",
+    );
+    const html = renderToStaticMarkup(
+      <MarkdownCopyProvider
+        copy={{
+          ...defaultMarkdownCopy,
+          copyCode: "Copiar código",
+          copyRows: "Copiar filas",
+          rowRange: (from, to, total) => `${from} a ${to} de ${total} filas`,
+        }}
+      >
+        <ChatMarkdown>{markdown}</ChatMarkdown>
+      </MarkdownCopyProvider>,
+    );
+    expect(html).toContain('aria-label="Copiar código"');
+    expect(html).toContain('aria-label="Copiar filas"');
+    expect(html).toContain("1 a 10 de 12 filas");
+  });
+});
+
+describe("web markdown mentions", () => {
+  it("draws a mention the app renders and keeps an unknown one as its name", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        renderMention={(id, name) => (id === "bot-1" ? <b data-id={id}>{name}</b> : undefined)}
+      >
+        {"[Planner](rakazo-mention:bot-1) and [Other](rakazo-mention:bot-2)"}
+      </ChatMarkdown>,
+    );
+    expect(html).toContain('<b data-id="bot-1">Planner</b>');
+    expect(html).toContain("<span>Other</span>");
+    expect(html).not.toContain("<a");
   });
 });

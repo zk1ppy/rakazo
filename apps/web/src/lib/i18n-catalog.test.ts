@@ -1,13 +1,27 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { i18n } from "@lingui/core";
+import { formatter } from "@lingui/format-po";
 import { RUN_ERROR_LIMIT_MESSAGES } from "@rakazo/core";
 import { beforeEach, describe, expect, it } from "vitest";
 import { UI_LOCALES } from "./ui-locale";
 
 describe("lingui catalogs", () => {
   it("translates sign-out failures in every supported language", () => {
-    for (const locale of ["de", "es", "fr", "hi", "ko", "nl", "pt-BR", "ru", "tr", "zh-CN"]) {
+    for (const locale of [
+      "de",
+      "es",
+      "fr",
+      "hi",
+      "ja",
+      "ko",
+      "nl",
+      "pt-BR",
+      "ru",
+      "tr",
+      "zh-CN",
+      "zh-TW",
+    ]) {
       const catalog = readFileSync(
         fileURLToPath(new URL(`../locales/${locale}/messages.po`, import.meta.url)),
         "utf8",
@@ -25,6 +39,9 @@ describe("lingui catalogs", () => {
   it("localizes provider error guidance and retains its placeholders", () => {
     const messages = [
       ...Object.values(RUN_ERROR_LIMIT_MESSAGES).flatMap(Object.values),
+      "{summary} Your backup models also failed.",
+      "{summary} No backup model was usable for this request.",
+      "{summary} Backup models failed or were unavailable for this request.",
       "Your OpenRouter",
       "Your OpenAI",
       "Your Anthropic",
@@ -35,9 +52,26 @@ describe("lingui catalogs", () => {
       "{provider} rejected the API key. Check your connection settings.",
       "{provider} could not find the requested model.",
       "{provider} took too long to respond. Try again.",
+      "{provider} is overloaded right now. Try again in a moment.",
+      "{provider} couldn't be reached. Check that it's running.",
+      "This conversation is too long for the model. Retrying won't help. Start a new chat or shorten your message.",
       "Details",
     ];
-    for (const locale of ["de", "es", "fr", "he", "hi", "ko", "nl", "pt-BR", "ru", "tr", "zh-CN"]) {
+    for (const locale of [
+      "de",
+      "es",
+      "fr",
+      "he",
+      "hi",
+      "ja",
+      "ko",
+      "nl",
+      "pt-BR",
+      "ru",
+      "tr",
+      "zh-CN",
+      "zh-TW",
+    ]) {
       const catalog = readFileSync(
         fileURLToPath(new URL(`../locales/${locale}/messages.po`, import.meta.url)),
         "utf8",
@@ -59,6 +93,42 @@ describe("lingui catalogs", () => {
     }
   });
 
+  it("translates bot settings labels and retains placeholders in every locale", () => {
+    for (const locale of UI_LOCALES) {
+      const catalog = readFileSync(
+        fileURLToPath(new URL(`../locales/${locale}/messages.po`, import.meta.url)),
+        "utf8",
+      );
+      for (const message of [
+        "Advanced",
+        "Notifications",
+        "When it finishes or needs input",
+        "Model",
+        "Add a label",
+        "Add open work",
+        "Can edit and organise bots it creates",
+        "Disable a tool",
+        "Edit label",
+        "Edit name",
+        "Enable {0}",
+        "Encrypted and never shown again",
+        "How other bots see it",
+        "Model connections",
+        "Permissions",
+        "Skills",
+      ]) {
+        const entry = catalog
+          .split("\n\n")
+          .find((block) => block.includes(`msgid ${JSON.stringify(message)}\n`));
+        expect(entry, `${locale}: ${message}`).toMatch(/msgstr ".+"/);
+        const translated = entry?.split("msgstr ")[1] ?? "";
+        expect(translated.match(/\{\w+\}/g) ?? [], `${locale}: ${message}`).toEqual(
+          message.match(/\{\w+\}/g) ?? [],
+        );
+      }
+    }
+  });
+
   beforeEach(() => {
     i18n.load("en", {});
     i18n.activate("en");
@@ -69,7 +139,7 @@ describe("lingui catalogs", () => {
       "Command variable",
       "Available to this bot's shell commands as {commandVariable}",
       "{commandVariable} is reserved and cannot be used as a command variable. Choose another name.",
-      "Values are encrypted and never shown again.",
+      "Encrypted and never shown again",
     ];
     for (const locale of [
       "en",
@@ -78,12 +148,14 @@ describe("lingui catalogs", () => {
       "fr",
       "he",
       "hi",
+      "ja",
       "ko",
       "nl",
       "pt-BR",
       "ru",
       "tr",
       "zh-CN",
+      "zh-TW",
     ]) {
       const catalog = readFileSync(
         fileURLToPath(new URL(`../locales/${locale}/messages.po`, import.meta.url)),
@@ -102,7 +174,21 @@ describe("lingui catalogs", () => {
   });
 
   it("translates model connection preflight feedback in every non-English catalog", () => {
-    const locales = ["de", "es", "fr", "he", "hi", "ko", "nl", "pt-BR", "ru", "tr", "zh-CN"];
+    const locales = [
+      "de",
+      "es",
+      "fr",
+      "he",
+      "hi",
+      "ja",
+      "ko",
+      "nl",
+      "pt-BR",
+      "ru",
+      "tr",
+      "zh-CN",
+      "zh-TW",
+    ];
     const messages = [
       "A subscription credential is stored securely.",
       'Model "{modelId}" was not listed.',
@@ -166,4 +252,27 @@ describe("lingui catalogs", () => {
       }
     }
   });
+});
+
+it("keeps source placeholders and JSX markers in Traditional Chinese translations", async () => {
+  const readCatalog = async (locale: string) => {
+    const filename = fileURLToPath(new URL(`../locales/${locale}/messages.po`, import.meta.url));
+    return formatter().parse(readFileSync(filename, "utf8"), {
+      locale,
+      sourceLocale: "en",
+      filename,
+    });
+  };
+  const source = await readCatalog("en");
+  const translated = await readCatalog("zh-TW");
+  expect(Object.keys(translated).sort()).toEqual(Object.keys(source).sort());
+  const markers = (value: string) =>
+    [...new Set(value.match(/\{\w+(?=\s*[,}])|<\/?\d+\s*\/?>/g) ?? [])].sort();
+  for (const [id, entry] of Object.entries(source)) {
+    const message = entry.message ?? entry.translation ?? id;
+    // Untranslated entries fall back to English, as in every other catalog.
+    const translation = translated[id]?.translation;
+    if (!translation?.trim()) continue;
+    expect(markers(translation), message).toEqual(markers(message));
+  }
 });

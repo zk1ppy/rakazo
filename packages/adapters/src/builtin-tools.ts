@@ -7,11 +7,15 @@ import {
   FLEET_TOOL_NAMES,
   SecretAskPurpose,
   SecretHttpRequest,
+  TICKET_COMMENT_MAX_LENGTH,
+  TICKET_DESCRIPTION_MAX_LENGTH,
   TICKET_PRIORITIES,
   TICKET_STATUSES,
+  TICKET_TITLE_MAX_LENGTH,
 } from "@rakazo/contracts";
 import { z } from "zod";
 import { allowPrivateHttpSecretOrigins } from "./bot-secrets.js";
+import { BROWSER_ACT_KINDS } from "./browser-tools.js";
 import { messageUserMaxLength } from "./user-progress.js";
 
 // The owner flag can land in process.env after static imports run (loadRootEnv
@@ -82,9 +86,9 @@ const scheduleCreateProperties = {
   prompt: {
     type: "string",
     description:
-      "Concrete steps for when the schedule fires: name the connected plugin tools to call (e.g. GITHUB_LIST_RELEASES for owner/repo), what to extract, and how to report. Prefer plugin tools over computer browser or web search for app data.",
+      'Concrete steps for when the schedule fires: what to use, what to extract, and how to report. Name the connected plugin tools to call when one covers the data (e.g. GITHUB_LIST_RELEASES for owner/repo), preferring them over the computer browser or web search; for a website without one, describe the pages and actions to take in the computer\'s browser. This prompt is all a future run knows: state the user\'s full standing request, and keep each standing item and write anything decided only for this time as a rule ("2 oat milk, or 2 almond milk if oat milk is out of stock", not "2 almond milk"; "cheddar, skipped if out of stock", not "omit cheddar").',
   },
-  timezone: { type: "string", description: "IANA timezone (default UTC)." },
+  timezone: { type: "string", description: "IANA timezone (default: the user's timezone)." },
 };
 
 const scheduleTimingNames = [
@@ -113,7 +117,10 @@ const scheduleTimingSpecs = {
     enum: ["minutes", "hours", "days"],
     description: "Unit for every (minimum 1 minute).",
   },
-  runAt: { type: "string", description: "ISO datetime for a one-shot schedule." },
+  runAt: {
+    type: "string",
+    description: "ISO datetime for a one-shot schedule; without an offset, read in timezone.",
+  },
   delayMinutes: {
     type: "number",
     description: "Minutes from now for a one-shot schedule.",
@@ -148,6 +155,12 @@ const scheduleTimingSpecs = {
   },
 };
 
+const startAtSpec = {
+  type: "string",
+  description:
+    "ISO date or datetime a repeating schedule starts; the first run is the first match at or after it. Without an offset, read in timezone. If you already did this period's work yourself, set startAt so the first run does not repeat it.",
+};
+
 function scheduleCreateBranch(
   active: readonly (keyof typeof scheduleTimingSpecs)[],
   extraProperties: Record<string, unknown> = {},
@@ -157,6 +170,8 @@ function scheduleCreateBranch(
   for (const name of scheduleTimingNames) {
     properties[name] = activeNames.has(name) ? scheduleTimingSpecs[name] : blankScheduleTiming;
   }
+  properties.startAt =
+    activeNames.has("cron") || activeNames.has("every") ? startAtSpec : blankScheduleTiming;
   return {
     type: "object",
     properties,
@@ -178,8 +193,8 @@ const scheduleCreateInputSchema = {
 };
 
 const childRoutineTargetProperties = {
-  bot_id: { type: "string", description: "Id of a bot you created." },
-  bot_name: { type: "string", description: "Exact name of a bot you created." },
+  bot_id: { type: "string", description: "Id of a bot in this space." },
+  bot_name: { type: "string", description: "Exact name of a bot in this space." },
 };
 
 /** Same exactly-one-timing-method rule as schedule_create, plus the target bot. */
@@ -307,8 +322,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   },
   {
     name: "browser_act",
-    description:
-      'Click or fill page elements by ref from browser_snapshot (kinds: click, fill, type, upload, fill_secret). upload attaches your files to a "file upload" element; use it instead of clicking upload buttons. fill_secret types the username or password of a login saved with request_secret, only on the site it was saved for; you never see the value. Prefer this over computer_act for web pages. If the result includes fallback:"computer_act", use computer_act instead.',
+    description: `Click or fill page elements by ref from browser_snapshot (kinds: ${BROWSER_ACT_KINDS.join(", ")}). upload attaches your files to a "file upload" element; use it instead of clicking upload buttons. fill_secret types the username or password of a login saved with request_secret, only on the site it was saved for; you never see the value. type presses keys like a keyboard and replaces the field's text; use it for code boxes and fields that ignore fill. For a code split into one box per digit, type the whole code once into the first box, and to correct it type it again. Prefer this over computer_act for web pages. If the result includes fallback:"computer_act", use computer_act instead.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -319,10 +333,13 @@ export const builtinAgentTools: ConnectorTool[] = [
             properties: {
               kind: {
                 type: "string",
-                enum: ["click", "fill", "type", "upload", "fill_secret"],
+                enum: [...BROWSER_ACT_KINDS],
               },
               ref: { type: "string", description: "Element ref from browser_snapshot." },
-              text: { type: "string", description: "Text for fill or type." },
+              text: {
+                type: "string",
+                description: "Text for fill or type (type replaces the field's text).",
+              },
               paths: {
                 type: "array",
                 items: { type: "string" },
@@ -558,7 +575,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "add_mcp_server",
     description:
-      "Connect an MCP tool server to this Space when the user asks you to add one and provides the details (URL or command, optional token/headers/env). The server is created immediately and assigned to you. If it needs browser OAuth authorization, an approval card appears in the chat for the user to complete — tell them to click Authorize. Do not invent endpoints; only use details the user provided.",
+      "Connect an MCP tool server to this Space when the user asks you to add one and provides the details (URL or command, optional token/headers/env). The server is created immediately and an approval card appears in the chat; its tools reach you once the user approves it there. Do not invent endpoints; only use details the user provided.",
     inputSchema: {
       type: "object",
       properties: {
@@ -790,7 +807,7 @@ export const builtinAgentTools: ConnectorTool[] = [
     },
   },
   // Semantic-memory tools: exposed by selectMemoryTools() only when a
-  // Space memory provider is configured (which hides `remember`), and
+  // Space memory provider is configured (`remember` stays), and
   // forget_memory only when that provider can forget.
   {
     name: "save_memory",
@@ -942,8 +959,16 @@ export const builtinAgentTools: ConnectorTool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        title: { type: "string", description: "Short ticket title." },
-        description: { type: "string", description: "Optional detail." },
+        title: {
+          type: "string",
+          maxLength: TICKET_TITLE_MAX_LENGTH,
+          description: "Short ticket title.",
+        },
+        description: {
+          type: "string",
+          maxLength: TICKET_DESCRIPTION_MAX_LENGTH,
+          description: "Optional detail.",
+        },
         priority: {
           type: "string",
           enum: TICKET_PRIORITIES,
@@ -964,8 +989,8 @@ export const builtinAgentTools: ConnectorTool[] = [
       type: "object",
       properties: {
         id: { type: "string", description: "Ticket id." },
-        title: { type: "string" },
-        description: { type: "string" },
+        title: { type: "string", maxLength: TICKET_TITLE_MAX_LENGTH },
+        description: { type: "string", maxLength: TICKET_DESCRIPTION_MAX_LENGTH },
         priority: { type: "string", enum: TICKET_PRIORITIES },
         status: { type: "string", enum: TICKET_STATUSES },
         ownerBotId: { type: "string" },
@@ -980,7 +1005,11 @@ export const builtinAgentTools: ConnectorTool[] = [
       type: "object",
       properties: {
         id: { type: "string", description: "Ticket id." },
-        body: { type: "string", description: "Comment text." },
+        body: {
+          type: "string",
+          maxLength: TICKET_COMMENT_MAX_LENGTH,
+          description: "Comment text.",
+        },
       },
       required: ["id", "body"],
     },
@@ -988,13 +1017,34 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "schedule_create",
     description:
-      'Create a reminder or recurring job for this bot. Use for "remind me in 10 minutes" or "every morning send a joke". Repeats: cron or every/unit (min 1 minute). One-shot: runAt, delayMinutes, or delaySeconds.',
+      'Create a reminder or recurring job for this bot. Use for "remind me in 10 minutes" or "every morning send a joke". Repeats: cron or every/unit (min 1 minute), optionally from startAt. One-shot: runAt, delayMinutes, or delaySeconds.',
     inputSchema: scheduleCreateInputSchema,
   },
   {
     name: "schedule_list",
     description: "List this bot's active and inactive schedules (routines).",
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "schedule_update",
+    description:
+      "Edit one of this bot's schedules by routineId instead of cancelling and recreating it. Send only what changes. Timing fields replace the current timing; startAt alone moves the next run of the current repeat. active false pauses it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        routineId: { type: "string" },
+        ...scheduleCreateProperties,
+        active: { type: "boolean" },
+        cron: scheduleTimingSpecs.cron,
+        every: scheduleTimingSpecs.every,
+        unit: scheduleTimingSpecs.unit,
+        startAt: startAtSpec,
+        runAt: scheduleTimingSpecs.runAt,
+        delayMinutes: scheduleTimingSpecs.delayMinutes,
+        delaySeconds: scheduleTimingSpecs.delaySeconds,
+      },
+      required: ["routineId"],
+    },
   },
   {
     name: "schedule_cancel",
@@ -1156,7 +1206,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "create_space",
     description:
-      "Propose a new space in the current organization when the user asks for a separate data boundary. A space can contain many bots and groups, but its chats, files, memory, tools, and integrations stay isolated from other spaces. This always shows the user a confirmation card before creation. Creating the space is the whole action; do not create bots in it unless the user asks later.",
+      "Propose a new space in the current organization when the user asks for a separate data boundary. A space can contain many bots and groups, but its chats, files, memory, tools, and integrations stay isolated from other spaces. Creating the space is the whole action; do not create bots in it unless the user asks later.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1246,7 +1296,7 @@ export const builtinAgentTools: ConnectorTool[] = [
         },
         bot_id: {
           type: "string",
-          description: "A bot you created, to update its profile instead of yours.",
+          description: "A bot in this space, to update its profile instead of yours.",
         },
       },
     },
@@ -1254,14 +1304,14 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "list_fleet",
     description:
-      "List the bots and groups of this user with their ids, sections and pinned state, and which bots you created. Pass bot_id of a bot you created to read only its full instructions and instructionsVersion, which set_child_instructions needs as expected_version. Call this before changing the bots you manage.",
+      "List the bots and groups in this space with their ids, sections and pinned state, and which bots you created. Pass bot_id of a bot in this space to read only its full instructions and instructionsVersion, which set_child_instructions needs as expected_version. Call this before changing the bots you manage.",
     inputSchema: {
       type: "object",
       properties: {
         bot_id: {
           type: "string",
           description:
-            "A bot you created, to read its instructions and version instead of the roster.",
+            "A bot in this space, to read its instructions and version instead of the roster.",
         },
       },
       additionalProperties: false,
@@ -1316,7 +1366,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "set_child_instructions",
     description:
-      "Replace the instructions of a bot you created. Identify it by bot_id or bot_name (exact). Only bots you created. Pass expected_version from list_fleet with that bot_id. One instruction edit per bot per run. Needs the owner's approval.",
+      "Replace the instructions of a bot in this space. Identify it by bot_id or bot_name (exact). Pass expected_version from list_fleet with that bot_id. One instruction edit per bot per run. Needs the owner's approval.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1334,7 +1384,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "set_child_bot_model",
     description:
-      "Set the model of a bot you created, or reset it to the default with clear: true. Identify it by bot_id or bot_name (exact). Only bots you created. Needs the owner's approval.",
+      "Set the model of a bot in this space, or reset it to the default with clear: true. Identify it by bot_id or bot_name (exact). Needs the owner's approval.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1350,13 +1400,13 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "create_child_routine",
     description:
-      "Schedule a routine that wakes a bot you created in its own thread. Identify it by bot_id or bot_name (exact). Only bots you created. Repeats: cron or every/unit (min 1 minute). One-shot: runAt, delayMinutes, or delaySeconds. Needs the owner's approval.",
+      "Schedule a routine that wakes a bot in this space in its own thread. Identify it by bot_id or bot_name (exact). Repeats: cron or every/unit (min 1 minute). One-shot: runAt, delayMinutes, or delaySeconds. Needs the owner's approval.",
     inputSchema: createChildRoutineInputSchema,
   },
   {
     name: "archive_bot",
     description:
-      "Archive a bot this bot created. Archiving stops its work and routines, hides it from the active list, and preserves its conversation, memory, and files for the user to restore or delete later. confirm_name must exactly match its name. This cannot archive you, bots the user created, or bots another bot created.",
+      "Archive another bot in this space. Archiving stops its work and routines, hides it from the active list, and preserves its conversation, memory, and files for the user to restore or delete later. confirm_name must exactly match its name. This cannot archive you.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1364,7 +1414,7 @@ export const builtinAgentTools: ConnectorTool[] = [
         bot_id: {
           type: "string",
           description:
-            "Optional bot id. If omitted, the unique bot this bot created with confirm_name is archived.",
+            "Optional bot id. If omitted, the unique bot in this space with confirm_name is archived.",
         },
       },
       required: ["confirm_name"],
@@ -1395,10 +1445,15 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "handoff_to_bot",
     description:
-      "In a group chat only: transfer a genuinely distinct next stage to another current member. Appends a visible handoff and starts that bot asynchronously. Do not hand a stage back merely to report or repeat the same work; post results in the shared thread.",
+      "Transfer a genuinely distinct next stage to another current group member. In a group, stay in that group. Outside a group, supply group_id from your groups list to coordinate there. Appends a visible handoff and starts that bot asynchronously. Do not hand a stage back merely to report or repeat the same work; post results in the shared thread.",
     inputSchema: {
       type: "object",
       properties: {
+        group_id: {
+          type: "string",
+          description:
+            "Explicit destination from your groups list; required outside a group, omitted in a group.",
+        },
         bot_id: { type: "string", description: "Target member bot id." },
         confirm_name: {
           type: "string",

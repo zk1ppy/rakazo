@@ -5,6 +5,7 @@ import type { Root } from "react-dom/client";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import VoiceSettings from "../app/(settings)/voice";
+import { queryClient } from "./query";
 
 const mocks = vi.hoisted(() => ({
   calls: vi.fn(),
@@ -15,12 +16,14 @@ const mocks = vi.hoisted(() => ({
   focused: true,
   t: (text: string) => text,
 }));
+vi.mock("./side-insets", () => ({ useSideInsets: () => ({}) }));
 vi.mock("expo-router", () => ({
   useFocusEffect: (callback: () => void) => {
     useEffect(() => {
       if (mocks.focused) callback();
     }, [callback, mocks.focused]);
   },
+  useLocalSearchParams: () => ({}),
 }));
 vi.mock("./call-sounds", () => ({
   loadCallSoundsEnabled: mocks.calls,
@@ -30,9 +33,13 @@ vi.mock("./call-sounds", () => ({
   playCallCue: mocks.cue,
 }));
 vi.mock("./api", () => ({
+  currentApiBase: () => "https://app.example.test",
+  selectedSpaceId: () => "space-fixture",
+  captureApiRequestContext: async () => ({ apiBase: "https://app.example.test", headers: {} }),
   rpc: async (method: string) =>
     method === "voice/status" ? { configured: false, ready: false, provider: null } : [],
 }));
+vi.mock("./session", () => ({ currentSessionGeneration: () => 1 }));
 vi.mock("./device-voice", () => ({
   loadDeviceVoiceEnabled: async () => false,
   saveDeviceVoiceEnabled: vi.fn(),
@@ -85,6 +92,7 @@ let root: Root;
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.clearAllMocks();
+  queryClient.clear();
   mocks.focused = true;
   mocks.calls.mockResolvedValue(true);
   mocks.waiting.mockResolvedValue(true);

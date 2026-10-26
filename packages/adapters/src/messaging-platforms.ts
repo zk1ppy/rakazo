@@ -1,13 +1,20 @@
 import { createSlackAdapter } from "@chat-adapter/slack";
-import { createTelegramAdapter } from "@chat-adapter/telegram";
+import {
+  createTelegramAdapter,
+  escapeMarkdownV2,
+  TelegramFormatConverter,
+} from "@chat-adapter/telegram";
 import { createWhatsAppAdapter, splitMessage, WhatsAppApiError } from "@chat-adapter/whatsapp";
+import type { HttpInstance } from "@larksuiteoapi/node-sdk";
 import type { MessagingInboundMessage, MessagingOutboundStatus } from "@rakazo/adapter-kit";
 import { getLogger } from "@rakazo/logging";
 import type { Adapter } from "chat";
-import { createLarkAdapter, Domain } from "chat-adapter-lark";
+import { convertEmojiPlaceholders, markdownToPlainText } from "chat";
 import { createSendblueAdapter } from "chat-adapter-sendblue";
 import type { ClientOptions as SendblueClientOptions } from "sendblue";
 import type { MessagingPlatform } from "./chat-sdk-surface.js";
+import { LazyLarkAdapter } from "./lark/lazy-adapter.js";
+import { Domain } from "./lark/thread-id.js";
 import { isVitestRuntime } from "./test-runtime.js";
 
 /**
@@ -126,6 +133,8 @@ export function messagingPlatformsFromEnv(
     pollInboundMessages?: boolean;
     /** Test seam: point the Sendblue SDK at an emulator. */
     sendblueTransport?: Pick<SendblueClientOptions, "baseURL" | "fetch">;
+    /** Test seam: replace only the official Lark SDK HTTP boundary. */
+    larkTransport?: HttpInstance;
   } = {},
 ): MessagingPlatform[] {
   const platforms: MessagingPlatform[] = [];
@@ -165,6 +174,7 @@ export function messagingPlatformsFromEnv(
       provider: "sendblue",
       capabilities: { direct: true, groups: true, receipt: "typing" },
       adapter,
+      address: lineNumber,
       directThreadId: (address) =>
         adapter.encodeThreadId({ fromNumber: lineNumber, contactNumber: address }),
       peekStatuses: parseSendblueStatuses,
@@ -233,7 +243,7 @@ export function messagingPlatformsFromEnv(
     telegramTokens.add(env.telegramBotToken.trim());
     platforms.push({
       provider: "telegram",
-      capabilities: { direct: true, groups: false, receipt: null },
+      capabilities: { direct: true, groups: false, receipt: null, files: true },
       // Auto mode: uses the webhook route when Telegram has one registered
       // (checked via getWebhookInfo), and otherwise falls back to
       // long-polling getUpdates. Self-hosted/local deployments typically
@@ -268,7 +278,7 @@ export function messagingPlatformsFromEnv(
     platforms.push({
       provider: `telegram-${bot.name}`,
       adapterName: "telegram",
-      capabilities: { direct: true, groups: false, receipt: null },
+      capabilities: { direct: true, groups: false, receipt: null, files: true },
       adapter: createTelegramAdapter({
         botToken: bot.botToken,
         secretToken: bot.webhookSecret,
@@ -287,11 +297,11 @@ export function messagingPlatformsFromEnv(
       capabilities: { direct: true, groups: false, receipt: null },
       // Webhook-only: ws/long-connection incoming would consume events so
       // the HTTP webhook at /api/v1/messaging/webhook/lark never sees them.
-      adapter: createLarkAdapter({
+      adapter: new LazyLarkAdapter({
+        ...(options.larkTransport ? { httpInstance: options.larkTransport } : {}),
         appId: env.larkAppId,
         appSecret: env.larkAppSecret,
         verificationToken: env.larkVerificationToken,
-        incoming: { events: "webhook", callbacks: "webhook" },
         // Explicit defaults prevent the adapter from rereading untrimmed process.env values.
         encryptKey: env.larkEncryptKey ?? "",
         domain: env.larkDomain?.toLowerCase() === "lark" ? Domain.Lark : Domain.Feishu,
@@ -337,13 +347,57 @@ const SLACK_PERMANENT_ERRORS = new Set([
 /** Meta 131047: outside the 24-hour window only a template can reach the user. */
 const WHATSAPP_REENGAGEMENT_REQUIRED = 131047;
 
-/**
- * WhatsApp caps one text at 4096 characters and the adapter sends longer
- * ones as several messages. The outbox splits first, the same way, so each
- * part is its own row and a retry re-sends only the parts that failed.
- */
+/** Split before enqueueing so retries only resend the parts that failed. */
 export function splitOutboundBody(provider: string, body: string): string[] {
-  return provider === "whatsapp" ? splitMessage(body) : [body];
+  if (provider === "whatsapp") return splitMessage(body);
+  if (provider !== "telegram" && !provider.startsWith("telegram-")) return [body];
+
+  return splitTelegramPart(body);
+}
+
+const TELEGRAM_MESSAGE_LIMIT = 4096;
+const telegramFormat = new TelegramFormatConverter();
+
+function splitTelegramPart(body: string, literal = false): string[] {
+  const markdown = literal ? escapeMarkdownV2(body) : body;
+  const plainText = literal ? body : markdownToPlainText(body);
+  // The adapter truncates *after* rendering and emoji conversion, including
+  // its plain-text fallback. Measure both payloads in UTF-16 units as it does.
+  const payloads = [telegramFormat.fromMarkdown(markdown), plainText.trim() ? plainText : markdown];
+  if (
+    markdown.length <= TELEGRAM_MESSAGE_LIMIT &&
+    payloads.every(
+      (text) => convertEmojiPlaceholders(text, "gchat").length <= TELEGRAM_MESSAGE_LIMIT,
+    )
+  ) {
+    return [markdown];
+  }
+
+  // Parse before splitting: cutting Markdown can turn code into prose and
+  // consume literal backslashes. Oversized formatted replies use escaped text.
+  if (!literal && plainText !== body) return splitTelegramPart(plainText, true);
+
+  const parts = splitMessage(body);
+  // The shared helper counts UTF-16 units but can cut between surrogate pairs.
+  for (let index = 0; index < parts.length - 1; index++) {
+    const part = parts[index]!;
+    if (/[\uD800-\uDBFF]$/.test(part)) {
+      parts[index] = part.slice(0, -1);
+      parts[index + 1] = part.slice(-1) + parts[index + 1]!;
+    }
+  }
+  if (parts.length > 1) return parts.flatMap((part) => splitTelegramPart(part, literal));
+
+  // Refine only chunks that grow beyond the limit during rendering.
+  const midpoint = Math.floor(body.length / 2);
+  const prefix = body.slice(0, midpoint);
+  let boundary = Math.max(prefix.lastIndexOf("\n"), prefix.lastIndexOf(" "));
+  if (boundary < midpoint / 2) boundary = midpoint;
+  if (/[\uD800-\uDBFF]/.test(body[boundary - 1]!)) boundary--;
+  return [
+    ...splitTelegramPart(body.slice(0, boundary), literal),
+    ...splitTelegramPart(body.slice(boundary), literal),
+  ];
 }
 
 /** Sendblue reports outbound delivery as webhooks the Chat SDK ignores. */

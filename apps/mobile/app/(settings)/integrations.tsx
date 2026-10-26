@@ -1,4 +1,10 @@
-import type { CapabilityInstall, Connection, ConnectionCatalogItem } from "@rakazo/contracts";
+import type {
+  CapabilityInstall,
+  Connection,
+  ConnectionCatalogItem,
+  McpServer,
+} from "@rakazo/contracts";
+import { CONNECTION_LABEL_MAX_LENGTH } from "@rakazo/contracts";
 import {
   buildFeaturedConnectorTiles,
   CONNECTION_CATALOG_PAGE_SIZE,
@@ -13,6 +19,7 @@ import {
 import { useFocusEffect } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Linking,
   Pressable,
@@ -40,6 +47,7 @@ import {
 } from "../../lib/integrations-cache";
 import { loadLastBotId } from "../../lib/last-bot";
 import { native, useThemedStyles } from "../../lib/native";
+import { useSideInsets } from "../../lib/side-insets";
 import { errorText } from "../../lib/user-error";
 
 type SourceKind = "treg" | "executor" | "mcp" | "api" | "graphql";
@@ -48,6 +56,7 @@ type ConnectionTool = { name: string; description: string };
 const LOGO_SIZE = 32;
 
 export default function Integrations() {
+  const sideInsets = useSideInsets();
   const styles = useThemedStyles(createIntegrationsStyles);
   const { t } = useI18n();
   const { width } = useWindowDimensions();
@@ -56,6 +65,8 @@ export default function Integrations() {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [query, setQuery] = useState("");
   const [visibleCount, setVisibleCount] = useState(CONNECTION_CATALOG_PAGE_SIZE);
+  const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
+  const [mcpError, setMcpError] = useState<string | null>(null);
   const [sources, setSources] = useState<CapabilityInstall[]>([]);
   const [sourceKind, setSourceKind] = useState<SourceKind | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -168,6 +179,8 @@ export default function Integrations() {
     applySnapshot({ catalog: [], connections: [] });
     setCatalogReady(false);
     setSources([]);
+    setMcpServers([]);
+    setMcpError(null);
     setDetailKey(null);
     setLabelDrafts({});
     setPending(null);
@@ -198,6 +211,8 @@ export default function Integrations() {
       applySnapshot({ catalog: [], connections: [] });
       setCatalogReady(false);
       setSources([]);
+      setMcpServers([]);
+      setMcpError(null);
       setDetailKey(null);
       setLabelDrafts({});
     }
@@ -208,6 +223,27 @@ export default function Integrations() {
     }
     const generation = ++refreshGeneration.current;
     const sourceGeneration = ++sourcesGeneration.current;
+    void rpc<McpServer[]>("mcp/servers/list")
+      .then((servers) => {
+        if (
+          mounted.current &&
+          focus === focusGeneration.current &&
+          isIntegrationsScopeCurrent(scope) &&
+          sourceGeneration === sourcesGeneration.current
+        ) {
+          setMcpServers(servers);
+          setMcpError(null);
+        }
+      })
+      .catch((reason) => {
+        if (
+          mounted.current &&
+          focus === focusGeneration.current &&
+          isIntegrationsScopeCurrent(scope) &&
+          sourceGeneration === sourcesGeneration.current
+        )
+          setMcpError(errorText(reason, t("Could not load MCP servers")));
+      });
     void rpc<CapabilityInstall[]>("capabilities/list")
       .then((installs) => {
         if (
@@ -632,6 +668,7 @@ export default function Integrations() {
             <View key={row.id} style={styles.accountRow}>
               <TextInput
                 value={labelDrafts[row.id] ?? row.displayName}
+                maxLength={CONNECTION_LABEL_MAX_LENGTH}
                 onChangeText={(value) =>
                   setLabelDrafts((current) => ({ ...current, [row.id]: value }))
                 }
@@ -677,7 +714,10 @@ export default function Integrations() {
           {toolsOpen ? (
             <View style={styles.toolsBody}>
               {toolsLoading ? (
-                <Text style={styles.secondary}>{t("Loading tools…")}</Text>
+                <ActivityIndicator
+                  color={native.secondaryLabel}
+                  accessibilityLabel={t("Loading tools…")}
+                />
               ) : tools.length === 0 ? (
                 <Text style={styles.secondary}>{t("No tools available.")}</Text>
               ) : (
@@ -697,6 +737,7 @@ export default function Integrations() {
   return (
     <SafeAreaView edges={["bottom"]} style={styles.screen}>
       <ScrollView
+        style={sideInsets}
         contentContainerStyle={styles.content}
         contentInsetAdjustmentBehavior="automatic"
         keyboardShouldPersistTaps="handled"
@@ -716,6 +757,48 @@ export default function Integrations() {
             returnKeyType="search"
             style={styles.input}
           />
+        ) : null}
+
+        {!detailItem && (mcpServers.length > 0 || mcpError) ? (
+          <View testID="registered-mcp-servers" style={styles.catalogStack}>
+            <Text style={styles.section}>{t("MCP servers")}</Text>
+            {mcpError ? (
+              <View>
+                <Text style={styles.error}>{mcpError}</Text>
+                <NativeActionButton
+                  label={t("Retry")}
+                  fill={false}
+                  onPress={() => void retryRefresh()}
+                  prominence="secondary"
+                />
+              </View>
+            ) : null}
+            {mcpServers
+              .filter((server) =>
+                `${server.name} ${server.description}`
+                  .toLowerCase()
+                  .includes(query.trim().toLowerCase()),
+              )
+              .map((server) => (
+                <View key={server.id} testID="registered-mcp-server" style={styles.row}>
+                  <ConnectorIcon name={server.name} size={LOGO_SIZE} />
+                  <Text numberOfLines={1} style={[styles.title, styles.grow]}>
+                    {server.name}
+                  </Text>
+                  <Text style={styles.secondary}>
+                    {!server.enabled
+                      ? t("Disabled")
+                      : server.oauthStatus === "reconnect"
+                        ? t("OAuth expired")
+                        : server.oauthStatus === "connected"
+                          ? t("OAuth connected")
+                          : server.hasSecret
+                            ? t("Credential saved")
+                            : t("No auth")}
+                  </Text>
+                </View>
+              ))}
+          </View>
         ) : null}
 
         {catalogError ? (
@@ -939,8 +1022,9 @@ export default function Integrations() {
                   <View key={source.id} style={styles.row}>
                     <View style={styles.grow}>
                       <Text style={styles.title}>{source.name}</Text>
+                      <Text style={styles.secondary}>{source.kind.toUpperCase()}</Text>
                       <Text numberOfLines={1} style={styles.secondary}>
-                        {source.kind.toUpperCase()} · {source.source}
+                        {source.source}
                       </Text>
                     </View>
                     <NativeActionButton

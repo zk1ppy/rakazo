@@ -3,6 +3,7 @@ import { messagingDeliverJob, routineWakeupJob, runContinueJob } from "@rakazo/a
 import type { MessageBlock } from "@rakazo/contracts";
 import { stuckWorkStatusMessages } from "@rakazo/core";
 import type { Pool, PrismaClient, ThreadEvents } from "@rakazo/db";
+import { reconcileComputerRuns } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import type { PoolClient } from "pg";
 import { returnBotMessageOutcome } from "./bot-messages.js";
@@ -112,8 +113,12 @@ export function createJobReconciler(
     leadership?: ReconciliationLeadership;
     reconcileComputerUpdates?: () => Promise<void>;
     reconcileCloudAgents?: () => Promise<void>;
+    reconcileModelCredits?: () => Promise<void>;
     reconcileRoutineRetryNotices?: () => Promise<void>;
     reconcileSecurityEventRetention?: () => Promise<void>;
+    reconcileHomeStorage?: () => Promise<void>;
+    reconcileIdleComputers?: () => Promise<void>;
+    reconcileDeadJobs?: () => Promise<void>;
   },
   options: { intervalMs?: number; batchSize?: number } = {},
 ) {
@@ -121,6 +126,7 @@ export function createJobReconciler(
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
   let timer: ReturnType<typeof setInterval> | undefined;
   let reconciling: Promise<void> | undefined;
+  let lastCompletedAt = Date.now();
   let stuckCursor: Cursor | undefined;
   let runCursor: Cursor | undefined;
   let routineCursor: Cursor | undefined;
@@ -135,10 +141,15 @@ export function createJobReconciler(
       const auxiliary = await Promise.allSettled(
         [
           () => reconcileCallRequests(deps),
+          () => reconcileComputerRuns(deps.prisma),
           deps.reconcileCloudAgents,
+          deps.reconcileModelCredits,
           deps.reconcileComputerUpdates,
           deps.reconcileRoutineRetryNotices,
           deps.reconcileSecurityEventRetention,
+          deps.reconcileHomeStorage,
+          deps.reconcileIdleComputers,
+          deps.reconcileDeadJobs,
         ].map(async (reconcile) => reconcile?.()),
       );
       for (const result of auxiliary) {
@@ -390,9 +401,13 @@ export function createJobReconciler(
           ? { at: lastControl.controlLeaseExpiresAt, id: lastControl.id }
           : undefined;
       if (!controlCursor) controlScanDeadline = undefined;
-    })().finally(() => {
-      reconciling = undefined;
-    });
+    })()
+      .then(() => {
+        lastCompletedAt = Date.now();
+      })
+      .finally(() => {
+        reconciling = undefined;
+      });
     return reconciling;
   };
   const reconcileSafely = () => {
@@ -403,6 +418,7 @@ export function createJobReconciler(
 
   return {
     reconcileOnce,
+    lastCompletedAt: () => lastCompletedAt,
     start() {
       if (timer) return;
       reconcileSafely();

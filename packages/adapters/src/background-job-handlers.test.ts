@@ -1,6 +1,7 @@
 import type {
   AgentHomeStore,
   AgentRuntime,
+  ArtifactStore,
   BackgroundJob,
   JobPublisher,
   MessagingSurface,
@@ -45,6 +46,7 @@ describe("createBackgroundJobHandlers", () => {
       prisma: { run: owned() } as unknown as PrismaClient,
       sandbox: {} as unknown as SandboxProvider,
       home: {} as unknown as AgentHomeStore,
+      artifacts: {} as unknown as ArtifactStore,
       jobs,
       events: {} as unknown as ThreadEvents,
       workerId: "worker-1",
@@ -85,6 +87,7 @@ describe("createBackgroundJobHandlers", () => {
       prisma,
       sandbox: {} as unknown as SandboxProvider,
       home: {} as unknown as AgentHomeStore,
+      artifacts: {} as unknown as ArtifactStore,
       jobs,
       events: {} as unknown as ThreadEvents,
       workerId: "worker-1",
@@ -126,6 +129,7 @@ describe("createBackgroundJobHandlers", () => {
         prisma: { thread: owned() } as unknown as PrismaClient,
         sandbox: {} as unknown as SandboxProvider,
         home: {} as unknown as AgentHomeStore,
+        artifacts: {} as unknown as ArtifactStore,
         jobs: {} as unknown as JobPublisher,
         events: {} as unknown as ThreadEvents,
         workerId: "worker-fixture",
@@ -152,6 +156,7 @@ describe("createBackgroundJobHandlers", () => {
       prisma: { run: lookups } as unknown as PrismaClient,
       sandbox: {} as unknown as SandboxProvider,
       home: {} as unknown as AgentHomeStore,
+      artifacts: {} as unknown as ArtifactStore,
       jobs: {} as unknown as JobPublisher,
       events: {} as unknown as ThreadEvents,
       workerId: "worker-1",
@@ -167,9 +172,13 @@ describe("createBackgroundJobHandlers", () => {
       select: { spaceId: true, userId: true },
     });
 
+    const onRunStarted = vi.fn();
+    await handlers["run.continue"]({ runId: "run-1" }, { onRunStarted });
+    expect(continueRun).toHaveBeenLastCalledWith("run-1", "worker-1", onRunStarted);
+
     lookups.findUnique.mockResolvedValueOnce(null as never);
     await handlers["run.continue"]({ runId: "run-gone" });
-    expect(continueRun).toHaveBeenCalledTimes(1);
+    expect(continueRun).toHaveBeenCalledTimes(2);
   });
 
   it("does not call the model when the space has no Neo4j provider", async () => {
@@ -179,6 +188,7 @@ describe("createBackgroundJobHandlers", () => {
       prisma: {} as unknown as PrismaClient,
       sandbox: {} as unknown as SandboxProvider,
       home: {} as unknown as AgentHomeStore,
+      artifacts: {} as unknown as ArtifactStore,
       jobs: {} as unknown as JobPublisher,
       events: {} as unknown as ThreadEvents,
       workerId: "worker-1",
@@ -219,6 +229,7 @@ describe("createBackgroundJobHandlers", () => {
       prisma: {} as unknown as PrismaClient,
       sandbox: {} as unknown as SandboxProvider,
       home: {} as unknown as AgentHomeStore,
+      artifacts: {} as unknown as ArtifactStore,
       jobs: {} as unknown as JobPublisher,
       events: {} as unknown as ThreadEvents,
       workerId: "worker-1",
@@ -289,6 +300,7 @@ describe("createBackgroundJobHandlers", () => {
         prisma: {} as unknown as PrismaClient,
         sandbox: {} as unknown as SandboxProvider,
         home: {} as unknown as AgentHomeStore,
+        artifacts: {} as unknown as ArtifactStore,
         jobs,
         events: {} as unknown as ThreadEvents,
         workerId: "worker-1",
@@ -365,6 +377,7 @@ describe("createBackgroundJobHandlers", () => {
       prisma: {} as unknown as PrismaClient,
       sandbox: {} as unknown as SandboxProvider,
       home: {} as unknown as AgentHomeStore,
+      artifacts: {} as unknown as ArtifactStore,
       jobs: {} as unknown as JobPublisher,
       events: {} as unknown as ThreadEvents,
       workerId: "worker-1",
@@ -423,6 +436,7 @@ describe("createBackgroundJobHandlers", () => {
       prisma: {} as unknown as PrismaClient,
       sandbox: {} as unknown as SandboxProvider,
       home: {} as unknown as AgentHomeStore,
+      artifacts: {} as unknown as ArtifactStore,
       jobs: {} as unknown as JobPublisher,
       events: {} as unknown as ThreadEvents,
       workerId: "worker-1",
@@ -488,6 +502,7 @@ describe("createBackgroundJobHandlers", () => {
       } as unknown as PrismaClient,
       sandbox: {} as unknown as SandboxProvider,
       home: {} as unknown as AgentHomeStore,
+      artifacts: {} as unknown as ArtifactStore,
       jobs: { enqueue, cancel: vi.fn(), close: vi.fn() } as unknown as JobPublisher,
       events: {} as unknown as ThreadEvents,
       workerId: "worker-1",
@@ -509,7 +524,9 @@ describe("createBackgroundJobHandlers", () => {
 
   it("resolves the deployment model when no user credential is configured", async () => {
     const prisma = {
-      spaceModelPreference: { findFirst: vi.fn(async () => null) },
+      userModelPreference: { findFirst: vi.fn(async () => null) },
+      spaceSettingOverride: { findUnique: vi.fn(async () => null) },
+      userModelRoleChoice: { findMany: vi.fn(async () => []) },
       userModelCredential: { findFirst: vi.fn(async () => null) },
       deploymentSettings: { findUnique: vi.fn(async () => null) },
     } as unknown as PrismaClient;
@@ -533,7 +550,9 @@ describe("createBackgroundJobHandlers", () => {
 
   it("preserves a configured local model when resolving background compaction", async () => {
     const prisma = {
-      spaceModelPreference: { findFirst: vi.fn(async () => null) },
+      userModelPreference: { findFirst: vi.fn(async () => null) },
+      spaceSettingOverride: { findUnique: vi.fn(async () => null) },
+      userModelRoleChoice: { findMany: vi.fn(async () => []) },
       userModelCredential: { findFirst: vi.fn(async () => null) },
       deploymentSettings: {
         findUnique: vi.fn(async () => ({
@@ -557,4 +576,30 @@ describe("createBackgroundJobHandlers", () => {
       oauth: undefined,
     });
   });
+});
+
+it("retries retired messaging credentials without deleting a currently referenced credential", async () => {
+  const remove = vi.fn(async () => undefined);
+  const findUnique = vi.fn(async () => ({ ciphertext: "active-ref" }));
+  const handlers = createBackgroundJobHandlers({
+    prisma: { messagingInstallation: { findUnique } },
+    secretStore: { delete: remove },
+  } as unknown as Parameters<typeof createBackgroundJobHandlers>[0]);
+  await handlers["messaging.credential-cleanup"]({
+    installationId: "install-a",
+    ref: "active-ref",
+  });
+  expect(remove).not.toHaveBeenCalled();
+  await handlers["messaging.credential-cleanup"]({
+    installationId: "install-a",
+    ref: "retired-ref",
+  });
+  expect(remove).toHaveBeenCalledWith(
+    "retired-ref",
+    expect.objectContaining({ recordId: "install-a" }),
+  );
+  remove.mockRejectedValueOnce(new Error("secret store temporarily unavailable") as never);
+  await expect(
+    handlers["messaging.credential-cleanup"]({ installationId: "install-a", ref: "retired-ref" }),
+  ).rejects.toThrow("temporarily unavailable");
 });

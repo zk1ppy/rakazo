@@ -17,6 +17,7 @@ import {
   inboxRowActionList,
   inboxRowActions,
   unreadOverrideKey,
+  withoutArchiving,
 } from "./inbox-swipe";
 
 const testFileUrl = import.meta.url;
@@ -298,12 +299,17 @@ describe("iOS swipe row", () => {
     );
     expect(buttons.map(entry)).toEqual([
       ["Mark as Read", "checkmark.message.fill", null],
-      ["Archive", "eye.slash", "destructive"],
+      // Not destructive: SwiftUI would remove the row at the tap, and a failed archive left a gap.
+      ["Archive", "eye.slash", null],
       ["Unpin", "pin.slash", null],
     ]);
     expect(JSON.parse(buttons[0]!.dataset.modifiers!)).toContainEqual({
       name: "tint",
       value: { semantic: ["systemBlue"] },
+    });
+    expect(JSON.parse(buttons[1]!.dataset.modifiers!)).toContainEqual({
+      name: "tint",
+      value: { semantic: ["systemRed"] },
     });
     act(() => {
       for (const button of buttons) button.click();
@@ -320,7 +326,7 @@ describe("iOS swipe row", () => {
     act(() => root.unmount());
   });
 
-  it("offers read state, pin, notifications, move and archive last for a bot", () => {
+  it("offers read state, pin, notifications, move, then archive and delete last for a bot", () => {
     const { items, find, root } = render({
       unread: true,
       pinned: false,
@@ -332,7 +338,8 @@ describe("iOS swipe row", () => {
       ["Pin", "pin", null],
       ["Silence notifications", "bell.slash", null],
       ["Move to", "folder", null],
-      ["Archive", "eye.slash", "destructive"],
+      ["Archive", "eye.slash", null],
+      ["Delete…", "trash", "destructive"],
     ]);
     // Menu items keep their titles; only the swipe buttons are icon-only.
     for (const button of items.querySelectorAll<HTMLElement>("button")) {
@@ -355,7 +362,12 @@ describe("iOS swipe row", () => {
       "Unpin",
       "Move to",
       "Archive",
+      "Delete…",
     ]);
+    expect(items.querySelector('[data-label="Archive"]')?.getAttribute("data-role")).toBeNull();
+    expect(items.querySelector('[data-label="Delete…"]')?.getAttribute("data-role")).toBe(
+      "destructive",
+    );
     expect(entries(find('[data-ui="Menu"]')!)).toEqual([
       ["Work", "false", null],
       ["Home", "false", null],
@@ -381,7 +393,8 @@ describe("iOS swipe row", () => {
     press("New section");
     press("Rename section");
     press("Archive");
-    expect(onAction.mock.calls).toEqual([["unread"], ["pin"], ["archive"]]);
+    press("Delete…");
+    expect(onAction.mock.calls).toEqual([["unread"], ["pin"], ["archive"], ["delete"]]);
     // Choosing the current section again changes nothing.
     expect(onOrganize.mock.calls).toEqual([
       [{ notifyOnFinish: true }],
@@ -515,8 +528,13 @@ describe("inbox swipe handlers", () => {
   ) {
     const state = {
       overrides: new Map<string, boolean>() as ReadonlyMap<string, boolean>,
+      archiving: new Set<string>() as ReadonlySet<string>,
       bots: [{ id: "b1", unread: false }],
       groups: [{ id: "g1", unread: true }],
+      spaces: [
+        { id: "space-a", bots: [{ id: "b1" }], groups: [{ id: "g1" }] },
+        { id: "space-b", bots: [{ id: "x" }], groups: [{ id: "x" }] },
+      ],
     };
     const update =
       <K extends keyof typeof state>(key: K) =>
@@ -530,15 +548,21 @@ describe("inbox swipe handlers", () => {
       rpc: vi.fn(rpc),
       loadBots: vi.fn(async () => {}),
       setUnreadOverrides: update("overrides"),
+      setArchiving: update("archiving"),
       setBots: update("bots"),
       setGroups: update("groups"),
+      setSpaces: update("spaces"),
       Alert: { alert: vi.fn() },
       t: (text: string) => text,
       errorText: (_error: unknown, fallback: string) => fallback,
       chatTarget,
       unreadOverrideKey,
       afterChatNotifyChange: vi.fn(async () => {}),
+      confirmDeleteBot: vi.fn(),
+      confirmDeleteGroup: vi.fn(),
       notifyArchivedChatsChanged: vi.fn(),
+      removeFromSearchInbox: vi.fn(),
+      dismissThreadNotifications: vi.fn(async () => {}),
       currentApiBase: () => "",
       loadSessionToken: async () => null,
       selectedSpaceId: () => session.space,
@@ -555,7 +579,7 @@ describe("inbox swipe handlers", () => {
     const run = new Function(...Object.keys(scope), compiled)(...Object.values(scope)) as {
       runRowAction: (
         kind: "bot" | "group",
-        chat: { id: string; spaceId?: string },
+        chat: { id: string; name?: string; spaceId?: string },
         action: InboxRowAction,
       ) => Promise<void>;
       updateChat: (
@@ -586,6 +610,19 @@ describe("inbox swipe handlers", () => {
     await first;
     expect(h.state.bots[0]!.unread).toBe(false);
     expect(h.state.overrides.size).toBe(0);
+  });
+
+  it("clears a chat's delivered notifications when it is marked read, not unread", async () => {
+    const h = handlers(async () => undefined);
+    await h.runRowAction("bot", { id: "b1", threadId: "thread-b1" } as never, "read");
+    await h.runRowAction("bot", { id: "b2" }, "read");
+    await h.runRowAction("group", { id: "g1" }, "read");
+    await h.runRowAction("bot", { id: "b1" }, "unread");
+    expect(h.dismissThreadNotifications.mock.calls).toEqual([
+      [{ threadId: "thread-b1" }],
+      [{ botId: "b2" }],
+      [{ groupId: "g1" }],
+    ]);
   });
 
   it("drops a change that is undone before its turn", async () => {
@@ -676,6 +713,88 @@ describe("inbox swipe handlers", () => {
     expect(h.loadBots).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["bot", "confirmDeleteBot"],
+    ["group", "confirmDeleteGroup"],
+  ] as const)(
+    "%s delete asks with the chat's own confirmation and refreshes once deleted",
+    async (kind, confirm) => {
+      const h = handlers(async () => ({ ok: true }));
+      await h.runRowAction(kind, { id: "x", name: "Ada" }, "delete");
+      // Nothing is removed until the alert is confirmed.
+      expect(h.rpc).not.toHaveBeenCalled();
+      expect(h.loadBots).not.toHaveBeenCalled();
+      expect(h[confirm]).toHaveBeenCalledWith({ id: "x", name: "Ada" }, expect.any(Function));
+      h[confirm].mock.calls[0]![1]();
+      expect(h.loadBots).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("hides an archived chat at the tap and keeps it hidden from a reload until it settles", async () => {
+    let finish!: (value: unknown) => void;
+    const h = handlers(() => new Promise((resolve) => (finish = resolve)));
+    let finishReload!: () => void;
+    const reload = new Promise<void>((resolve) => (finishReload = resolve));
+    h.loadBots.mockImplementation(async () => {
+      await reload;
+      h.state.bots = h.state.bots.filter((bot) => bot.id !== "b1");
+    });
+    h.state.bots = [{ id: "b0", unread: false }, ...h.state.bots, { id: "b2", unread: false }];
+    const polledBots = [...h.state.bots];
+    const pending = h.runRowAction("bot", { id: "b1" }, "archive");
+    expect(h.state.archiving).toEqual(new Set(["bot:b1"]));
+    // A poll that still lists the chat doesn't bring the row back while the archive runs.
+    expect(withoutArchiving("bot", h.state.bots, h.state.archiving).map((bot) => bot.id)).toEqual([
+      "b0",
+      "b2",
+    ]);
+    await vi.waitFor(() => expect(h.rpc).toHaveBeenCalledTimes(1));
+    finish({ ok: true });
+    await vi.waitFor(() => expect(h.loadBots).toHaveBeenCalledTimes(1));
+    expect(h.state.bots.map((bot) => bot.id)).toEqual(["b0", "b2"]);
+    // A poll replaces the stored list while the post-archive reload is still pending.
+    h.state.bots = polledBots;
+    expect(h.state.archiving).toEqual(new Set(["bot:b1"]));
+    expect(withoutArchiving("bot", h.state.bots, h.state.archiving).map((bot) => bot.id)).toEqual([
+      "b0",
+      "b2",
+    ]);
+    finishReload();
+    await pending;
+    expect(h.state.bots.map((bot) => bot.id)).toEqual(["b0", "b2"]);
+    expect(h.state.spaces[0]!.bots).toEqual([]);
+    expect(h.loadBots).toHaveBeenCalledTimes(1);
+    expect(h.notifyArchivedChatsChanged).toHaveBeenCalledTimes(1);
+    expect(h.state.archiving.size).toBe(0);
+    expect(h.Alert.alert).not.toHaveBeenCalled();
+  });
+
+  it("keeps an archived chat gone when the reload after the archive fails", async () => {
+    const h = handlers(async () => ({ ok: true }));
+    // loadBots reports a failed load by resolving false and leaves the list as it was.
+    h.loadBots.mockImplementation(async () => false as never);
+    await h.runRowAction("group", { id: "g1" }, "archive");
+    expect(h.state.groups).toEqual([]);
+    expect(h.state.archiving.size).toBe(0);
+  });
+
+  it("puts a chat back in its place when the archive fails", async () => {
+    const h = handlers(async () => {
+      throw new Error("offline");
+    });
+    h.state.bots = [{ id: "b0", unread: false }, ...h.state.bots, { id: "b2", unread: false }];
+    await h.runRowAction("bot", { id: "b1" }, "archive");
+    expect(h.state.archiving.size).toBe(0);
+    expect(withoutArchiving("bot", h.state.bots, h.state.archiving).map((bot) => bot.id)).toEqual([
+      "b0",
+      "b1",
+      "b2",
+    ]);
+    expect(h.notifyArchivedChatsChanged).not.toHaveBeenCalled();
+    expect(h.Alert.alert).toHaveBeenCalledWith("Could not archive bot", "Try again.");
+    expect(h.loadBots).toHaveBeenCalledTimes(1);
+  });
+
   it("archives a chat from another space in that space", async () => {
     const h = handlers(async () => ({ ok: true }));
     await h.runRowAction("group", { id: "x", spaceId: "space-b" }, "archive");
@@ -723,6 +842,7 @@ describe("inbox swipe handlers", () => {
       "Could not update chat",
     ]);
     expect(h.notifyArchivedChatsChanged).not.toHaveBeenCalled();
+    expect(h.removeFromSearchInbox).not.toHaveBeenCalled();
   });
 
   it.each(["bot", "group"] as const)(
@@ -730,6 +850,8 @@ describe("inbox swipe handlers", () => {
     async (kind) => {
       const h = handlers(async () => ({ ok: true }));
       await h.runRowAction(kind, { id: "x" }, "archive");
+      // Search stops offering it at once, before the inbox reloads.
+      expect(h.removeFromSearchInbox).toHaveBeenCalledWith("x");
       expect(h.notifyArchivedChatsChanged).toHaveBeenCalledOnce();
       await h.runRowAction(kind, { id: "x" }, "pin");
       expect(h.notifyArchivedChatsChanged).toHaveBeenCalledOnce();

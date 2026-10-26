@@ -8,13 +8,18 @@ import type {
   CommandStatusResponse,
   CreateDownloadUrlRequest,
   CreateRequest,
+  CreateSandboxRequest,
   CreateSandboxResponse,
   CreateUploadUrlRequest,
   FileUrlResponse,
   FileWriteResponse,
+  GetNamedSnapshotRequest,
   GetRequest,
   HostPortOperationRequest,
   HostPortResponse,
+  NamedSnapshot,
+  NamedSnapshotInfoResponse,
+  NamedSnapshotSavingResponse,
   Recover200Response,
   RecoverRequest,
   ResumeOperationRequest,
@@ -22,6 +27,7 @@ import type {
   SandboxActionResponse,
   SandboxInfoResponse,
   SandboxStateEnum,
+  SaveNamedSnapshotRequest,
   StopOperationRequest,
   UpdateRequest,
   WriteFileRequest,
@@ -29,7 +35,7 @@ import type {
 import { ResponseError } from "@boatdev/sdk";
 import { parse } from "shell-quote";
 import type { BoatSandboxSdk } from "./boat-sandbox.js";
-import { BoatSandboxProvider } from "./boat-sandbox.js";
+import { BOAT_COMPUTER_SNAPSHOT, BoatSandboxProvider } from "./boat-sandbox.js";
 import { desktopCommandResponder } from "./linux-desktop.test-support.js";
 
 /** How a sandbox in the `error` state answers `POST /recover`, per the Boat API reference. */
@@ -46,6 +52,8 @@ interface FakeSandbox {
   sandbox: Sandbox;
   env: Record<string, string>;
   files: Map<string, { content: Uint8Array; executable: boolean }>;
+  /** The disk as of Boat's last good snapshot. */
+  snapshot: Map<string, { content: Uint8Array; executable: boolean }>;
   recovery: BoatRecovery;
 }
 
@@ -76,6 +84,20 @@ export class FakeBoatApi implements BoatSandboxSdk {
   private readonly downloads = new Map<string, { sandboxId: string; path: string }>();
   private startsExhausted = false;
   private rejectAll?: { status: number; code: string; message: string };
+  /** Every create request, in order. */
+  readonly creates: CreateSandboxRequest[] = [];
+  /** Named snapshots; the current computer snapshot is ready unless a test removes it. */
+  readonly namedSnapshots = new Map<string, NamedSnapshot>([
+    [
+      BOAT_COMPUTER_SNAPSHOT,
+      {
+        name: BOAT_COMPUTER_SNAPSHOT,
+        status: "ready",
+        sourceSandboxId: "bx_build",
+        createdAt: new Date(0),
+      },
+    ],
+  ]);
 
   /** Puts a sandbox in any documented state; in-flight states settle by the next read. */
   setState(id: string, state: SandboxStateEnum): void {
@@ -124,6 +146,11 @@ export class FakeBoatApi implements BoatSandboxSdk {
 
   async create(request: CreateRequest = {}): Promise<CreateSandboxResponse> {
     this.start();
+    const from = request.createSandboxRequest?.from;
+    if (from && this.namedSnapshots.get(from)?.status !== "ready") {
+      throw boatError(404, "snapshot_not_found", "Snapshot not found");
+    }
+    this.creates.push({ ...request.createSandboxRequest });
     const id = `bx_fake${++this.created}`;
     const sandbox: Sandbox = {
       id,
@@ -137,6 +164,7 @@ export class FakeBoatApi implements BoatSandboxSdk {
       sandbox,
       env: { ...request.createSandboxRequest?.env },
       files: new Map(),
+      snapshot: new Map(),
       recovery: "recovers",
     });
     return {
@@ -155,6 +183,36 @@ export class FakeBoatApi implements BoatSandboxSdk {
     if (settled) box.sandbox.state = settled;
     if (box.sandbox.state === "cancelled") this.sandboxes.delete(sandboxId);
     return response;
+  }
+
+  /** A save settles to `ready` by the next read. */
+  async getNamedSnapshot({ name }: GetNamedSnapshotRequest): Promise<NamedSnapshotInfoResponse> {
+    this.check();
+    const snapshot = this.namedSnapshots.get(name);
+    if (!snapshot) throw boatError(404, "snapshot_not_found", "Snapshot not found");
+    const response = { ok: true, type: "snapshot.named.info" as const, snapshot: { ...snapshot } };
+    if (snapshot.status === "saving") snapshot.status = "ready";
+    return response;
+  }
+
+  async saveNamedSnapshot({
+    namedSnapshotSaveRequest,
+  }: SaveNamedSnapshotRequest): Promise<NamedSnapshotSavingResponse> {
+    const { sandboxId, name } = namedSnapshotSaveRequest;
+    this.runnable(sandboxId);
+    const snapshot: NamedSnapshot = {
+      name,
+      status: "saving",
+      sourceSandboxId: sandboxId,
+      createdAt: new Date(),
+    };
+    this.namedSnapshots.set(name, snapshot);
+    return {
+      ok: true,
+      type: "snapshot.named.saving",
+      status: "saving",
+      snapshot: { ...snapshot },
+    };
   }
 
   async resume({ sandboxId }: ResumeOperationRequest): Promise<SandboxActionResponse> {
@@ -190,11 +248,24 @@ export class FakeBoatApi implements BoatSandboxSdk {
     }
   }
 
-  async stop({ sandboxId }: StopOperationRequest): Promise<SandboxActionResponse> {
+  /** Boat saved the sandbox's disk, as it does by itself while the sandbox runs. */
+  saveSnapshot(id: string): void {
+    this.snapshotDisk(this.require(id));
+  }
+
+  /** A stop saves the disk first; a forced one keeps only the last good snapshot. */
+  async stop({ sandboxId, stopRequest }: StopOperationRequest): Promise<SandboxActionResponse> {
     const box = this.require(sandboxId);
     box.sandbox.state = "archived";
-    box.sandbox.snapshotAvailable = true;
+    if (!stopRequest?.force) this.snapshotDisk(box);
+    else box.files = new Map(box.snapshot);
     return this.action(box);
+  }
+
+  private snapshotDisk(box: FakeSandbox): void {
+    box.snapshot = new Map(box.files);
+    box.sandbox.snapshotAvailable = true;
+    box.sandbox.snapshotCompletedAt = new Date();
   }
 
   async update({ sandboxId }: UpdateRequest): Promise<SandboxInfoResponse> {
@@ -420,17 +491,22 @@ export class FakeBoatApi implements BoatSandboxSdk {
         const [child, ...rest] = filePath.slice(root.length + 1).split("/");
         children.set(`${root}/${child}`, rest.length ? "dir" : "file");
       }
-      if (!children.size) return finished({ exitCode: 1, stderr: "No such directory\n" });
+      if (!children.size) return finished({ exitCode: 2 });
       return finished({
-        stdout: [...children]
-          .map(([entry, kind]) => listing(entry, kind, box.files.get(entry)))
-          .join(""),
+        stdout: Buffer.from(
+          [...children].map(([entry, kind]) => listing(entry, kind, box.files.get(entry))).join(""),
+        ).toString("base64"),
       });
     }
-    if (command.includes("find ") && command.includes("-type f")) {
-      return finished({
-        stdout: [...box.files].map(([filePath, file]) => listing(filePath, "file", file)).join(""),
+    // The whole-workspace listing goes to a file the adapter then downloads.
+    const listingFile = command.match(/^exec 3> (.*) \|\| exit 2$/m)?.[1];
+    if (listingFile !== undefined) {
+      const records = [...box.files].map(([filePath, file]) => listing(filePath, "file", file));
+      box.files.set(String(parse(listingFile)[0]), {
+        content: Buffer.from(records.join("")),
+        executable: false,
       });
+      return finished({});
     }
 
     const parsed = parse(command, (name) => box.env[name] ?? "");
@@ -491,8 +567,9 @@ function listing(
   kind: "file" | "dir",
   file?: { content: Uint8Array; executable: boolean },
 ): string {
-  const encoded = Buffer.from(absolute).toString("base64");
-  return `${encoded}\t${kind}\t${file?.content.byteLength ?? 0}\t${file?.executable ? 1 : 0}\n`;
+  const size = file?.content.byteLength ?? 0;
+  const mode = kind === "dir" || file?.executable ? "755" : "644";
+  return `${kind === "dir" ? "d" : "f"}\t${size}\t${mode}\t${absolute}\0`;
 }
 
 function finished(result: Partial<CommandResponse>): CommandResponse {

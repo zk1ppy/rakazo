@@ -23,6 +23,7 @@ const { rpc, push, alert, afterChatNotifyChange, listSpaceArtifacts, params, col
     focus: new Set<() => (() => void) | undefined>(),
   }));
 
+vi.mock("./side-insets", () => ({ useSideInsets: () => ({}) }));
 vi.mock("./api", () => ({
   rpc,
   currentApiBase: () => "https://api.example",
@@ -82,7 +83,7 @@ vi.mock("./native", () => ({
 vi.mock("./appearance", () => ({ mobileTokens: () => color }));
 vi.mock("./i18n", () => {
   const t = (text: string) => text;
-  return { t, useI18n: () => ({ t }) };
+  return { t, useI18n: () => ({ t }), getActiveUiLocale: () => "en" };
 });
 vi.mock("./routine", async (importOriginal) => ({
   ...(await importOriginal<typeof RoutineHelpers>()),
@@ -234,7 +235,7 @@ describe("bot profile", () => {
       .map((node) => node.textContent ?? "")
       .filter((text) => /digest|report|webhook/.test(text));
     expect(rows).toEqual([
-      "Weekly reportEvery Monday at 9:00 AM · America/New_York · Paused",
+      "Weekly reportEvery Monday at 9:00 AM (America/New_York), Paused",
       "Morning digestWeekdays at 7:00 AM",
       "Inbox webhookWebhook",
     ]);

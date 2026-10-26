@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type {
@@ -6,6 +6,7 @@ import type {
   Command200Response,
   CommandResponse,
   FileUrlResponse,
+  NamedSnapshot,
   SandboxStateEnum,
 } from "@boatdev/sdk";
 import { BoatApi, Configuration } from "@boatdev/sdk";
@@ -25,16 +26,22 @@ import type {
   ScreenSession,
   TerminalRequest,
 } from "@rakazo/adapter-kit";
-import { SandboxRateLimitError } from "@rakazo/adapter-kit";
+import {
+  SandboxDamagedError,
+  SandboxRateLimitError,
+  SandboxUnavailableError,
+  SandboxUnresponsiveError,
+} from "@rakazo/adapter-kit";
 import { boundedSandboxCommandTimeoutMs } from "@rakazo/core";
 import { getLogger } from "@rakazo/logging";
 import { BoatApiError, boatResponseError, callerSignal, wrapBoatCall } from "./boat-errors.js";
 import { normalizeWorkspacePath, shellQuote, workspacePath } from "./computer-support.js";
 import {
   PORTABLE_TRANSFER_BATCH_BYTES,
+  SKIPPED_BROWSER_PROFILE_DIRECTORIES,
   shouldSkipPortableWorkspaceFile,
 } from "./computer-workspace.js";
-import { LinuxDesktop, PREPARE_LINUX_DESKTOP } from "./linux-desktop.js";
+import { LinuxDesktop, PREPARE_LINUX_DESKTOP, VERIFY_LINUX_DESKTOP } from "./linux-desktop.js";
 import { sandboxCommandArgv } from "./sandbox-command-environment.js";
 import { isSandboxGoneError } from "./sandbox-errors.js";
 import { shellExportScript } from "./sandbox-shell-environment.js";
@@ -45,7 +52,10 @@ const BOAT_WORKSPACE = "/home/user/rakazo-home";
 const BOAT_BROWSER_PROFILES = `${BOAT_WORKSPACE}/.browser-profiles`;
 /** Outside the workspace so checkpoints never carry it. Boat runs every command as `user`. */
 const BOAT_COMMAND_ENV = "/home/user/.rakazo-command-env";
+/** Workspace listings too large for command output; outside the workspace for the same reason. */
+const BOAT_LISTING_PREFIX = "/tmp/rakazo-workspace-listing-";
 const BOAT_READY_TIMEOUT_MS = 5 * 60_000;
+const BOAT_RECOVER_POLL_MAX_MS = 15_000;
 const BOAT_API_COMMAND_TIMEOUT_SECONDS = 600;
 const BOAT_TTL_SECONDS = 2 * 60 * 60;
 const BOAT_DELETE_TIMEOUT_MS = 60_000;
@@ -56,6 +66,14 @@ const BOAT_EXPORT_BATCH_BYTES = 64 * 1024 * 1024;
 const BOAT_INLINE_FILE_MAX_BYTES = 5 * 1024 * 1024;
 const BOAT_ARTIFACT_MAX_BYTES = 50 * 1024 * 1024;
 const BOAT_TRANSFER_TIMEOUT_MS = 5 * 60_000;
+/** Bounds a base snapshot build: a fresh machine, the desktop install, and the save. */
+const BOAT_SNAPSHOT_BUILD_TIMEOUT_MS = 30 * 60_000;
+/** Boat archives an abandoned build sandbox soon after a crashed build. */
+const BOAT_SNAPSHOT_BUILD_TTL_SECONDS = 30 * 60;
+/** How long a process waits before building again after a failed build. */
+const BOAT_SNAPSHOT_RETRY_MS = 15 * 60_000;
+/** How long a process waits to look again after a failed lookup or while another saves it. */
+const BOAT_SNAPSHOT_LOOKUP_RETRY_MS = 60_000;
 
 /** The Boat API surface the adapter uses. Failures are the SDK's raw `ResponseError`s. */
 export type BoatSandboxSdk = Pick<
@@ -67,9 +85,11 @@ export type BoatSandboxSdk = Pick<
   | "createDownloadUrl"
   | "createUploadUrl"
   | "get"
+  | "getNamedSnapshot"
   | "hostPort"
   | "recover"
   | "resume"
+  | "saveNamedSnapshot"
   | "stop"
   | "update"
   | "writeFile"
@@ -83,6 +103,12 @@ const BOAT_NOT_RUNNING_CODES = new Set([
   "sandbox_not_ready",
   "machine_not_running",
   "sandbox_resuming",
+]);
+const BOAT_RECOVER_WAIT_CODES = new Set([
+  "sandbox_is_reachable",
+  "too_soon",
+  "recover_unsupported",
+  "reset_failed",
 ]);
 
 interface BoatCommandResult {
@@ -145,6 +171,9 @@ export class BoatSandboxProvider implements SandboxProvider {
   private readonly pendingProvisions = new Map<string, Promise<ComputerRef>>();
   private readonly prepared = new Set<string>();
   private readonly preparations = new Map<string, Promise<void>>();
+  private baseSnapshot?: "ready" | "missing";
+  private baseSnapshotBuild?: Promise<void>;
+  private baseSnapshotRetryAt = 0;
 
   constructor(
     config: { apiKey: string; apiUrl?: string },
@@ -175,6 +204,7 @@ export class BoatSandboxProvider implements SandboxProvider {
       homePath: string;
       providerRef?: string;
       providerKind?: ComputerRef["kind"];
+      savedAt?: Date;
     },
     context: AdapterContext,
   ): Promise<ComputerRef> {
@@ -195,12 +225,15 @@ export class BoatSandboxProvider implements SandboxProvider {
       botId: string;
       providerRef?: string;
       providerKind?: ComputerRef["kind"];
+      savedAt?: Date;
     },
     context: AdapterContext,
   ): Promise<ComputerRef> {
     if (request.providerRef && request.providerKind === "boat") {
       try {
-        const started = await this.ensureRunnable(request.providerRef, context.signal);
+        const started = await this.ensureRunnable(request.providerRef, context.signal, {
+          savedAt: request.savedAt,
+        });
         return { ...this.ref(request.providerRef, request.botId, false), started };
       } catch (error) {
         if (!isSandboxGoneError(error)) throw error;
@@ -208,20 +241,169 @@ export class BoatSandboxProvider implements SandboxProvider {
       }
     }
 
-    const created = await this.client.create(
-      {
-        createSandboxRequest: {
-          ttlSeconds: BOAT_TTL_SECONDS,
-          noEnv: true,
-          env: {
-            RAKAZO_BOT_ID: request.botId,
-            RAKAZO_SANDBOX: "computer",
+    const create = (from?: string) =>
+      this.client.create(
+        {
+          createSandboxRequest: {
+            ttlSeconds: BOAT_TTL_SECONDS,
+            noEnv: true,
+            env: {
+              RAKAZO_BOT_ID: request.botId,
+              RAKAZO_SANDBOX: "computer",
+            },
+            ...(from ? { from } : {}),
           },
         },
-      },
-      { signal: context.signal },
-    );
+        { signal: context.signal },
+      );
+    const from = await this.computerSnapshot(context.signal);
+    let created: Awaited<ReturnType<typeof create>>;
+    try {
+      created = await create(from);
+    } catch (error) {
+      if (!from || !(error instanceof BoatApiError) || error.code !== "snapshot_not_found") {
+        throw error;
+      }
+      // Removed from the account since this process saw it; rebuild it and install as before.
+      this.baseSnapshot = undefined;
+      this.computerSnapshotMissing();
+      created = await create();
+    }
     return this.ref(created.sandbox.id, request.botId, true);
+  }
+
+  /**
+   * Builds the named snapshot new computers start from, unless it is already ready: a fresh
+   * sandbox with no account environment and no bot data, with the desktop tools installed
+   * and checked. The build sandbox is deleted afterwards.
+   */
+  async buildComputerSnapshot(
+    signal: AbortSignal = AbortSignal.timeout(BOAT_SNAPSHOT_BUILD_TIMEOUT_MS),
+  ): Promise<{ name: string; built: boolean }> {
+    const name = BOAT_COMPUTER_SNAPSHOT;
+    // A save already in progress, from another process or an earlier run, may finish it.
+    if ((await this.settledSnapshot(name, signal))?.status === "ready") {
+      return { name, built: false };
+    }
+    const { sandbox } = await this.client.create(
+      { createSandboxRequest: { ttlSeconds: BOAT_SNAPSHOT_BUILD_TTL_SECONDS, noEnv: true } },
+      { signal },
+    );
+    try {
+      await this.ensureRunnable(sandbox.id, signal);
+      for (const command of BOAT_COMPUTER_SETUP) {
+        const result = await this.runCommand(sandbox.id, command, undefined, 15 * 60_000, signal);
+        if (result.exitCode !== 0 || result.timedOut) {
+          throw new Error("could not prepare the Boat computer snapshot", {
+            cause: new Error(commandFailure(result)),
+          });
+        }
+      }
+      await this.client.saveNamedSnapshot(
+        { namedSnapshotSaveRequest: { sandboxId: sandbox.id, name } },
+        { signal },
+      );
+      const snapshot = await this.settledSnapshot(name, signal);
+      if (snapshot?.status !== "ready") {
+        throw new Error(`Boat could not save snapshot ${name}`, {
+          cause: snapshot?.error ? new Error(snapshot.error) : undefined,
+        });
+      }
+      return { name, built: true };
+    } finally {
+      await this.client.deleteSandbox(sandbox.id).catch(() => undefined);
+    }
+  }
+
+  /** The named snapshot once any save in progress has finished, or undefined when absent. */
+  private async settledSnapshot(
+    name: string,
+    signal: AbortSignal,
+  ): Promise<NamedSnapshot | undefined> {
+    while (true) {
+      const snapshot = await this.namedSnapshot(name, signal);
+      if (snapshot?.status !== "saving") return snapshot;
+      await delay(2_000, undefined, { signal });
+    }
+  }
+
+  /**
+   * The snapshot a new computer starts from, once it is ready. Until then computers install
+   * the desktop tools themselves while one build runs in the background.
+   */
+  private async computerSnapshot(signal: AbortSignal): Promise<string | undefined> {
+    if (this.baseSnapshot === "ready") return BOAT_COMPUTER_SNAPSHOT;
+    if (this.baseSnapshotBuild || Date.now() < this.baseSnapshotRetryAt) return undefined;
+    let snapshot: NamedSnapshot | undefined;
+    try {
+      snapshot = await this.namedSnapshot(BOAT_COMPUTER_SNAPSHOT, signal);
+    } catch (error) {
+      // A cancelled boot says nothing about the snapshot.
+      if (signal.aborted) throw error;
+      this.baseSnapshotRetryAt = Date.now() + BOAT_SNAPSHOT_LOOKUP_RETRY_MS;
+      return undefined;
+    }
+    if (snapshot?.status === "ready") {
+      this.baseSnapshot = "ready";
+      return BOAT_COMPUTER_SNAPSHOT;
+    }
+    if (snapshot?.status === "saving") {
+      // Another process is saving it.
+      this.baseSnapshotRetryAt = Date.now() + BOAT_SNAPSHOT_LOOKUP_RETRY_MS;
+      return undefined;
+    }
+    this.computerSnapshotMissing();
+    return undefined;
+  }
+
+  private computerSnapshotMissing(): void {
+    if (this.baseSnapshotBuild) return;
+    if (this.baseSnapshot !== "missing") {
+      this.baseSnapshot = "missing";
+      getLogger().warn("sandbox.base_image", {
+        provider: "boat",
+        outcome: "missing",
+        name: BOAT_COMPUTER_SNAPSHOT,
+      });
+    }
+    const started = performance.now();
+    this.baseSnapshotBuild = this.buildComputerSnapshot()
+      .then(
+        () => {
+          this.baseSnapshot = "ready";
+          getLogger().info("sandbox.base_image", {
+            provider: "boat",
+            outcome: "built",
+            name: BOAT_COMPUTER_SNAPSHOT,
+            durationMs: Math.round(performance.now() - started),
+          });
+        },
+        (error: unknown) => {
+          this.baseSnapshotRetryAt = Date.now() + BOAT_SNAPSHOT_RETRY_MS;
+          getLogger().warn("sandbox.base_image", {
+            provider: "boat",
+            outcome: "build_failed",
+            name: BOAT_COMPUTER_SNAPSHOT,
+            error,
+          });
+        },
+      )
+      .finally(() => {
+        this.baseSnapshotBuild = undefined;
+      });
+  }
+
+  /** The named snapshot, or undefined when the account has none by that name. */
+  private async namedSnapshot(
+    name: string,
+    signal: AbortSignal,
+  ): Promise<NamedSnapshot | undefined> {
+    try {
+      return (await this.client.getNamedSnapshot({ name }, { signal })).snapshot;
+    } catch (error) {
+      if (error instanceof BoatApiError && error.response.status === 404) return undefined;
+      throw error;
+    }
   }
 
   async prepare(computer: ComputerRef, context: AdapterContext): Promise<void> {
@@ -240,7 +422,7 @@ export class BoatSandboxProvider implements SandboxProvider {
         context.signal,
       );
       if (result.exitCode !== 0) {
-        throw new Error(result.stderr || result.stdout || "could not prepare Boat workspace");
+        throw new Error(`could not prepare Boat workspace (${commandFailure(result)})`);
       }
       const runtime = await this.runCommand(
         id,
@@ -250,7 +432,9 @@ export class BoatSandboxProvider implements SandboxProvider {
         context.signal,
       );
       if (runtime.exitCode !== 0 || runtime.timedOut)
-        throw new Error("could not prepare computer desktop tools");
+        throw new Error("could not prepare computer desktop tools", {
+          cause: new Error(commandFailure(runtime)),
+        });
       if (this.preparations.get(id) !== preparation) {
         throw new Error("Boat workspace preparation was invalidated during teardown");
       }
@@ -327,10 +511,27 @@ export class BoatSandboxProvider implements SandboxProvider {
     request: ScreenRequest,
     context: AdapterContext,
   ): Promise<ScreenSession> {
-    return this.desktops.connectScreen(computer, request, context);
+    return this.authenticatedScreen(await this.desktops.connectScreen(computer, request, context));
   }
   async connectTerminal(computer: ComputerRef, request: TerminalRequest, context: AdapterContext) {
-    return this.desktops.connectTerminal(computer, request, context);
+    return this.authenticatedScreen(
+      await this.desktops.connectTerminal(computer, request, context),
+    );
+  }
+  /** Boat's query token bootstraps a browser cookie through a redirect. Keep it server-side. */
+  private authenticatedScreen<T extends { url: string | null }>(
+    session: T,
+  ): T & { headers?: Record<string, string> } {
+    if (!session.url) return session;
+    const url = new URL(session.url);
+    const token = url.searchParams.get("_token");
+    if (!token || !/^[a-zA-Z0-9_-]+$/.test(token))
+      throw new Error("Boat desktop URL is not protected");
+    url.searchParams.delete("_token");
+    const socket = new URL(url.searchParams.get("path")!, url);
+    socket.searchParams.delete("_token");
+    url.searchParams.set("path", `${socket.pathname}${socket.search}`);
+    return { ...session, url: url.toString(), headers: { cookie: `_port_auth=${token}` } };
   }
   async setScreenControl(
     computer: ComputerRef,
@@ -368,10 +569,10 @@ export class BoatSandboxProvider implements SandboxProvider {
       60_000,
       context.signal,
     );
-    if (result.exitCode !== 0) {
-      throw new Error(result.stderr || result.stdout || "could not list Boat workspace");
+    if (result.exitCode !== 0 || result.timedOut) {
+      throw new Error(`could not list Boat workspace (${commandStatus(result)})`);
     }
-    return parseBoatFileEntries(result.stdout);
+    return parseBoatFileEntries(Buffer.from(result.stdout, "base64"));
   }
 
   async readFile(
@@ -403,7 +604,13 @@ export class BoatSandboxProvider implements SandboxProvider {
       const files = await Promise.all(
         batch.map(async (entry) => ({
           path: entry.path,
-          content: await this.readFile(computer, entry.path, context),
+          content: await this.readRemoteFile(
+            id,
+            workspacePath(BOAT_WORKSPACE, entry.path),
+            context.signal,
+            undefined,
+            entry.size,
+          ),
           executable: entry.executable,
         })),
       );
@@ -487,31 +694,70 @@ export class BoatSandboxProvider implements SandboxProvider {
    * Waits until the sandbox can run commands, resuming or recovering it on the way. Throws a
    * gone error when Boat cannot bring it back, so the caller replaces it from its checkpoint.
    * Returns whether this call started it.
+   *
+   * A sandbox in `error` follows Boat's documented order: recover it and wait for it to answer;
+   * if it still does not, force-stop it to its last good snapshot and resume that. It is gone
+   * instead when it has no snapshot, or when the caller's saved workspace is at least as new,
+   * since a replacement restores that save in full. The rollback happens only on `reconnect`,
+   * before anything runs on the sandbox; elsewhere it is reported unavailable until then.
    */
-  private async ensureRunnable(id: string, signal?: AbortSignal): Promise<boolean> {
-    const deadline = Date.now() + BOAT_READY_TIMEOUT_MS;
+  private async ensureRunnable(
+    id: string,
+    signal?: AbortSignal,
+    reconnect?: { savedAt?: Date },
+  ): Promise<boolean> {
+    let deadline = Date.now() + BOAT_READY_TIMEOUT_MS;
     let started = false;
     let recovering = false;
+    let forced = false;
+    let pause = 1_000;
     while (true) {
       if (signal?.aborted) {
         throw signal.reason ?? new Error("Boat preparation aborted");
       }
       const { sandbox } = await this.client.get({ sandboxId: id }, { signal });
-      if (RUNNABLE_STATES.has(sandbox.state)) return started;
+      if (RUNNABLE_STATES.has(sandbox.state)) {
+        if (recovering) logRecovery(forced ? "resumed" : "answered");
+        return started;
+      }
       // `cancelled` is terminal, and a stopped sandbox whose data Boat deleted cannot resume.
       if (sandbox.state === "cancelled" || sandbox.dataExpiredAt) throw boatSandboxGone(id);
       if (sandbox.state === "archived" && !started) {
         await this.resume(id, signal);
         started = true;
       } else if (sandbox.state === "error" && !recovering) {
-        await this.recover(id, signal);
+        logRecovery("wait", await this.recover(id, signal));
         recovering = started = true;
       }
       if (Date.now() >= deadline) {
-        if (sandbox.state === "error") throw boatSandboxGone(id);
-        throw new Error(`Boat ${id} did not become ready`);
+        if (sandbox.state !== "error") {
+          throw new SandboxUnavailableError({
+            cause: new Error(`Boat ${id} did not become ready`),
+          });
+        }
+        const snapshotAt = sandbox.snapshotCompletedAt;
+        if (forced || !snapshotAt) {
+          logRecovery("gone", forced ? "resume_failed" : "no_snapshot");
+          throw boatSandboxGone(id);
+        }
+        if (!reconnect) {
+          logRecovery("deferred");
+          throw new SandboxUnavailableError({ cause: new Error(`Boat ${id} is not answering`) });
+        }
+        if (reconnect.savedAt && reconnect.savedAt >= snapshotAt) {
+          logRecovery("gone", "checkpoint_newer");
+          throw boatSandboxGone(id);
+        }
+        // Read just now and still not answering, so the stop cannot cut off live work.
+        logRecovery("force_stop");
+        await this.client.stop({ sandboxId: id, stopRequest: { force: true } }, { signal });
+        forced = true;
+        started = false;
+        deadline = Date.now() + BOAT_READY_TIMEOUT_MS;
       }
-      await delay(1_000, undefined, { signal });
+      // A recovering machine usually answers within 1-2 minutes; back off while it reboots.
+      pause = sandbox.state === "error" ? Math.min(pause * 2, BOAT_RECOVER_POLL_MAX_MS) : 1_000;
+      await delay(pause, undefined, { signal });
     }
   }
 
@@ -549,19 +795,22 @@ export class BoatSandboxProvider implements SandboxProvider {
     }
   }
 
-  /** Boat's documented way out of the `error` state: power-cycle the machine, or resume. */
-  private async recover(id: string, signal?: AbortSignal): Promise<void> {
+  /**
+   * Boat's documented way out of the `error` state: power-cycle the machine, or resume. Returns
+   * Boat's reason when it refused and the caller can only wait for the sandbox to answer.
+   */
+  private async recover(id: string, signal?: AbortSignal): Promise<string | undefined> {
     try {
       await this.client.recover({ sandboxId: id }, { signal });
     } catch (error) {
       if (!(error instanceof BoatApiError) || error.response.status !== 409) throw error;
-      if (error.code === "no_machine") return this.resume(id, signal);
-      // Already answering again, or an earlier recover is still running.
-      if (error.code === "sandbox_is_reachable" || error.code === "too_soon") return;
-      // Boat cannot bring this machine back.
-      if (error.code === "recover_unsupported" || error.code === "reset_failed") {
-        throw boatSandboxGone(id, error);
+      if (error.code === "no_machine") {
+        await this.resume(id, signal);
+        return error.code;
       }
+      // Already answering again, or an earlier recover is still running. A machine Boat cannot
+      // power-cycle, or whose power-cycle failed, can still answer again by itself.
+      if (error.code && BOAT_RECOVER_WAIT_CODES.has(error.code)) return error.code;
       throw error;
     }
   }
@@ -599,9 +848,7 @@ export class BoatSandboxProvider implements SandboxProvider {
         signal,
       );
       if (result.exitCode !== 0) {
-        throw new Error(
-          result.stderr || result.stdout || "could not prepare Boat command environment",
-        );
+        throw new Error(`could not prepare Boat command environment (${commandFailure(result)})`);
       }
     }
     await this.whenRunnable(id, signal, () =>
@@ -656,7 +903,7 @@ export class BoatSandboxProvider implements SandboxProvider {
       context.signal,
     );
     if (result.exitCode !== 0) {
-      throw new Error(result.stderr || result.stdout || "could not set Boat file permissions");
+      throw new Error(`could not set Boat file permissions (${commandFailure(result)})`);
     }
   }
 
@@ -693,17 +940,21 @@ export class BoatSandboxProvider implements SandboxProvider {
     id: string,
     context: AdapterContext,
   ): Promise<ComputerFileEntry[]> {
+    // A whole workspace can list more than Boat keeps of a command's output, so the listing is
+    // written to a file and downloaded like any other.
+    const listingFile = `${BOAT_LISTING_PREFIX}${randomUUID()}`;
     const result = await this.runCommand(
       id,
-      listBoatWorkspaceFilesCommand(),
+      listBoatWorkspaceFilesCommand(listingFile),
       undefined,
       60_000,
       context.signal,
     );
-    if (result.exitCode !== 0) {
-      throw new Error(result.stderr || result.stdout || "could not enumerate Boat workspace");
+    if (result.exitCode !== 0 || result.timedOut) {
+      throw new Error(`could not enumerate Boat workspace (${commandStatus(result)})`);
     }
-    return parseBoatFileEntries(result.stdout).filter(
+    const listing = await this.readRemoteFile(id, listingFile, context.signal);
+    return parseBoatFileEntries(listing).filter(
       (entry) => entry.kind === "file" && !shouldSkipPortableWorkspaceFile(entry.path),
     );
   }
@@ -713,8 +964,9 @@ export class BoatSandboxProvider implements SandboxProvider {
     filePath: string,
     signal?: AbortSignal,
     maxBytes?: number,
+    listedSize?: number,
   ): Promise<Uint8Array> {
-    const response = await this.fileResponse(id, filePath, signal, maxBytes);
+    const response = await this.fileResponse(id, filePath, signal, maxBytes, listedSize);
     const reader = response.body?.getReader();
     const chunks: Uint8Array[] = [];
     let size = 0;
@@ -749,23 +1001,32 @@ export class BoatSandboxProvider implements SandboxProvider {
 
   /**
    * The JSON/base64 file endpoint rejects files over 5 MiB and the artifact route files over
-   * 50 MiB; a larger file streams from a short-lived URL the sandbox serves itself.
+   * 50 MiB, and Boat's proxy cuts the artifact route off after about 75 seconds. A file listed
+   * over 5 MiB, a larger one, or one the artifact route could not send in time streams from a
+   * short-lived URL the sandbox serves itself.
    */
   private async fileResponse(
     id: string,
     filePath: string,
     signal: AbortSignal | undefined,
     maxBytes: number | undefined,
+    listedSize = 0,
   ) {
-    try {
-      const { raw } = await this.whenRunnable(id, signal, () =>
-        this.client.artifactRaw({ sandboxId: id, path: filePath }, signal ? { signal } : undefined),
-      );
-      return raw;
-    } catch (error) {
-      if (!isArtifactTooLarge(error)) throw error;
-      if (maxBytes !== undefined && maxBytes < BOAT_ARTIFACT_MAX_BYTES) {
-        throw new Error(`computer file exceeds ${maxBytes} bytes`);
+    if (listedSize <= BOAT_INLINE_FILE_MAX_BYTES) {
+      try {
+        const { raw } = await this.whenRunnable(id, signal, () =>
+          this.client.artifactRaw(
+            { sandboxId: id, path: filePath },
+            signal ? { signal } : undefined,
+          ),
+        );
+        return raw;
+      } catch (error) {
+        if (isArtifactTooLarge(error)) {
+          if (maxBytes !== undefined && maxBytes < BOAT_ARTIFACT_MAX_BYTES) {
+            throw new Error(`computer file exceeds ${maxBytes} bytes`);
+          }
+        } else if (!(error instanceof SandboxUnresponsiveError)) throw error;
       }
     }
     signal?.throwIfAborted();
@@ -829,6 +1090,9 @@ export class BoatSandboxProvider implements SandboxProvider {
       const result = isFinishedCommand(response)
         ? commandResponse(response)
         : await this.pollCommand(id, response.processId, timeoutMs + 10_000, signal);
+      if (result.exitCode !== 0 && systemDamaged(result.stderr)) {
+        throw new SandboxDamagedError({ cause: new Error(commandFailure(result)) });
+      }
       if (result.exitCode !== 124 || result.timedOut) return result;
       const completed = await this.rawCommand(id, `test -f ${shellQuote(marker)}`, 10);
       if (completed.exitCode === 0) {
@@ -913,6 +1177,40 @@ export class BoatSandboxProvider implements SandboxProvider {
   }
 }
 
+/** Why a setup command failed, without its full output: a timeout, or the exit code and last line. */
+function commandFailure(result: BoatCommandResult): string {
+  if (result.timedOut) return "timed out";
+  const last = (result.stderr || result.stdout).trim().split("\n").at(-1)?.slice(0, 300);
+  return last ? `exit ${result.exitCode}: ${last}` : `exit ${result.exitCode}`;
+}
+
+/**
+ * Boat's runner starts each command with `systemd-run` and sources the machine's environment
+ * before our command line runs. These failures come from that, so the machine's system files are
+ * missing or broken; the command itself never started.
+ */
+const BOAT_SYSTEM_DAMAGED =
+  /^(?:Executable not found in \$PATH: "systemd-run"|ENOENT: no such file or directory, posix_spawn 'systemd-run'|environment: line \d+: \/usr\/bin\/[\w.-]+: cannot execute: required file not found)$/m;
+
+function systemDamaged(stderr: string): boolean {
+  return BOAT_SYSTEM_DAMAGED.test(stderr);
+}
+
+/** How a listing command ended. Its output is file names, never an error message. */
+function commandStatus(result: BoatCommandResult): string {
+  if (result.timedOut) return "timed out";
+  if (result.exitCode === BOAT_LISTING_UNREADABLE) return "an entry could not be read";
+  return `exit ${result.exitCode}`;
+}
+
+/** Each step of bringing back a sandbox that stopped answering; none is a failure by itself. */
+function logRecovery(
+  step: "wait" | "answered" | "deferred" | "force_stop" | "resumed" | "gone",
+  reason?: string,
+): void {
+  getLogger().warn("sandbox.recover", { provider: "boat", step, ...(reason ? { reason } : {}) });
+}
+
 /** Boat deletes a stopped sandbox's data after 14 days but keeps the record; it cannot resume. */
 /** Named so the shared `isSandboxGoneError` lets callers replace it from its last checkpoint. */
 function boatSandboxGone(sandboxId: string, cause?: unknown): Error {
@@ -972,6 +1270,7 @@ function boatClient(api: BoatSandboxSdk, apiKey: string): BoatSandboxSdk {
           operation,
           outcome: error instanceof SandboxRateLimitError ? "rate_limited" : "failed",
           durationMs: Math.round(performance.now() - started),
+          error,
         });
         throw error;
       }
@@ -985,9 +1284,11 @@ function boatClient(api: BoatSandboxSdk, apiKey: string): BoatSandboxSdk {
     createDownloadUrl: sandboxCall(api.createDownloadUrl.bind(api), true),
     createUploadUrl: sandboxCall(api.createUploadUrl.bind(api), true),
     get: sandboxCall(api.get.bind(api), true),
+    getNamedSnapshot: wrapBoatCall(api.getNamedSnapshot.bind(api), apiKey, true),
     hostPort: sandboxCall(api.hostPort.bind(api), true),
     recover: startCall("recover", sandboxCall(api.recover.bind(api))),
     resume: startCall("resume", sandboxCall(api.resume.bind(api))),
+    saveNamedSnapshot: wrapBoatCall(api.saveNamedSnapshot.bind(api), apiKey),
     stop: sandboxCall(api.stop.bind(api)),
     update: sandboxCall(api.update.bind(api), true),
     writeFile: sandboxCall(api.writeFile.bind(api), true),
@@ -1109,6 +1410,21 @@ function configureBoatWorkspaceCommand(): string {
   return `mkdir -p ${shellQuote(BOAT_BROWSER_PROFILES)} && ${commandEnvDirectoryCommand()}`;
 }
 
+/** What a computer snapshot captures, in order: the same setup `prepare` repeats, then a check. */
+const BOAT_COMPUTER_SETUP = [
+  configureBoatWorkspaceCommand(),
+  PREPARE_LINUX_DESKTOP,
+  VERIFY_LINUX_DESKTOP,
+] as const;
+
+/** A snapshot name that changes with the setup it captures, so older computers keep theirs. */
+export function boatComputerSnapshotName(setup: readonly string[]): string {
+  const hash = createHash("sha256").update(setup.join("\0")).digest("hex").slice(0, 12);
+  return `rakazo-computer-${hash}`;
+}
+
+export const BOAT_COMPUTER_SNAPSHOT = boatComputerSnapshotName(BOAT_COMPUTER_SETUP);
+
 /** Only `user` may list or read command environment files. */
 function commandEnvDirectoryCommand(): string {
   const directory = shellQuote(BOAT_COMMAND_ENV);
@@ -1125,49 +1441,85 @@ function sourceEnvironmentCommand(envFile: string, argv: string): string {
   return `exec 3< ${file} || exit 1; rm -f -- ${file}; . /dev/fd/3 || exit 1; exec 3<&-; ${argv}`;
 }
 
+/**
+ * One NUL-terminated record per entry, so any file name survives: type, size, mode, path. A
+ * single `find` walks the tree; a subprocess per entry made a large workspace outlast the
+ * listing timeout.
+ */
+const BOAT_LISTING_FORMAT = "%y\\t%s\\t%m\\t%p\\0";
+/** Exit status of a listing that met an entry it could not read. */
+const BOAT_LISTING_UNREADABLE = 3;
+
+/**
+ * Runs `find` with its records on fd 3 and its errors captured. It exits 1 for any error, but
+ * an entry that vanished mid-walk leaves the rest of the listing intact, as do the `skippable`
+ * errors a caller names. Anything else, such as an unreadable entry or a listing it could not
+ * finish writing, fails the listing.
+ */
+function boatListingWalk(findArguments: string, skippable: string[] = []): string {
+  const tolerated = ["No such file or directory", ...skippable]
+    .map((error) => `-e ${shellQuote(`${error}$`)}`)
+    .join(" ");
+  return [
+    `errors=$(find ${findArguments} -printf '${BOAT_LISTING_FORMAT}' 2>&1 >&3 3>&-)`,
+    "status=$?",
+    'if [ "$status" -eq 1 ]; then',
+    `  if ! printf '%s\\n' "$errors" | grep -qv ${tolerated}; then status=0;`,
+    `  elif printf '%s\\n' "$errors" | grep -q 'Permission denied$'; then status=${BOAT_LISTING_UNREADABLE}; fi`,
+    "fi",
+    'exit "$status"',
+  ].join("\n");
+}
+
+/** Lists a directory's files and folders, following links as the file browser shows them. */
 function listBoatFilesCommand(directory: string): string {
   return [
     "set -o pipefail",
     `directory=${shellQuote(directory)}`,
-    'test -d "$directory"',
-    'find "$directory" -mindepth 1 -maxdepth 1 -print0 | sort -z | while IFS= read -r -d "" entry; do',
-    '  if [ -d "$entry" ]; then kind=dir; elif [ -f "$entry" ]; then kind=file; else continue; fi',
-    '  encoded=$(printf %s "$entry" | base64 -w0)',
-    '  size=$(stat -c %s "$entry")',
-    '  if [ "$kind" = file ] && [ -x "$entry" ]; then executable=1; else executable=0; fi',
-    '  printf \'%s\\t%s\\t%s\\t%s\\n\' "$encoded" "$kind" "$size" "$executable"',
-    "done",
+    'test -d "$directory" || exit 2',
+    "{",
+    "exec 3>&1",
+    // A link that loops is left out, like a broken one.
+    boatListingWalk('-L "$directory" -mindepth 1 -maxdepth 1 \\( -type f -o -type d \\)', [
+      "Too many levels of symbolic links",
+    ]),
+    "} | base64 -w0",
   ].join("\n");
 }
 
-function listBoatWorkspaceFilesCommand(): string {
+/** Lists every workspace file into `listingFile`, without the browser caches exports skip. */
+function listBoatWorkspaceFilesCommand(listingFile: string): string {
+  const skipped = [...SKIPPED_BROWSER_PROFILE_DIRECTORIES]
+    .map((name) => `-name ${shellQuote(name)}`)
+    .join(" -o ");
   return [
-    "set -o pipefail",
-    `find ${shellQuote(BOAT_WORKSPACE)} -type f -print0 | sort -z | while IFS= read -r -d "" entry; do`,
-    '  encoded=$(printf %s "$entry" | base64 -w0)',
-    '  size=$(stat -c %s "$entry")',
-    '  if [ -x "$entry" ]; then executable=1; else executable=0; fi',
-    '  printf \'%s\\tfile\\t%s\\t%s\\n\' "$encoded" "$size" "$executable"',
-    "done",
+    // Listings an interrupted export left behind.
+    `find /tmp -maxdepth 1 -name '${path.basename(BOAT_LISTING_PREFIX)}*' -mmin +10 -delete 2>/dev/null`,
+    `exec 3> ${shellQuote(listingFile)} || exit 2`,
+    boatListingWalk(
+      `${shellQuote(BOAT_WORKSPACE)} -mindepth 1 \\( -type d -path ${shellQuote(`${BOAT_BROWSER_PROFILES}/*`)} \\( ${skipped} \\) -prune \\) -o -type f`,
+    ),
   ].join("\n");
 }
 
-function parseBoatFileEntries(output: string): ComputerFileEntry[] {
-  return output
-    .split("\n")
-    .filter(Boolean)
-    .flatMap((line): ComputerFileEntry[] => {
-      const [encoded, kind, size, executable] = line.split("\t");
-      if (!encoded || (kind !== "file" && kind !== "dir")) return [];
-      const absolute = Buffer.from(encoded, "base64").toString("utf8");
+function parseBoatFileEntries(listing: Uint8Array): ComputerFileEntry[] {
+  return Buffer.from(listing)
+    .toString("utf8")
+    .split("\0")
+    .flatMap((record): ComputerFileEntry[] => {
+      const match = /^([fd])\t(\d+)\t([0-7]+)\t(.+)$/s.exec(record);
+      if (!match) return [];
+      const [, type, size, mode, absolute = ""] = match;
       if (!absolute.startsWith(`${BOAT_WORKSPACE}/`)) return [];
-      const child = normalizeWorkspacePath(absolute.slice(BOAT_WORKSPACE.length + 1));
+      const kind = type === "d" ? "dir" : "file";
       return [
         {
-          path: child,
+          path: normalizeWorkspacePath(absolute.slice(BOAT_WORKSPACE.length + 1)),
           kind,
-          size: Number(size) || 0,
-          ...(kind === "file" && executable === "1" ? { executable: true } : {}),
+          size: Number(size),
+          ...(kind === "file" && (Number.parseInt(mode ?? "0", 8) & 0o111) !== 0
+            ? { executable: true }
+            : {}),
         },
       ];
     })

@@ -16,12 +16,14 @@ const defaultCatalogLoaders: Record<UiLocale, CatalogLoader> = {
   tr: () => import("../locales/tr/messages.po") as Promise<CatalogModule>,
   hi: () => import("../locales/hi/messages.po") as Promise<CatalogModule>,
   "pt-BR": () => import("../locales/pt-BR/messages.po") as Promise<CatalogModule>,
+  "zh-TW": () => import("../locales/zh-TW/messages.po") as Promise<CatalogModule>,
   "zh-CN": () => import("../locales/zh-CN/messages.po") as Promise<CatalogModule>,
   es: () => import("../locales/es/messages.po") as Promise<CatalogModule>,
   ru: () => import("../locales/ru/messages.po") as Promise<CatalogModule>,
   fr: () => import("../locales/fr/messages.po") as Promise<CatalogModule>,
   he: () => import("../locales/he/messages.po") as Promise<CatalogModule>,
   nl: () => import("../locales/nl/messages.po") as Promise<CatalogModule>,
+  ja: () => import("../locales/ja/messages.po") as Promise<CatalogModule>,
 };
 
 let catalogLoaders: Record<UiLocale, CatalogLoader> = defaultCatalogLoaders;

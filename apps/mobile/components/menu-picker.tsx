@@ -15,12 +15,14 @@ export function MenuPickerMenu({
   choices,
   value,
   onChange,
+  disabled = false,
   children,
 }: {
   label: string;
   choices: readonly MenuPickerChoice[];
   value: string;
   onChange: (key: string) => void;
+  disabled?: boolean;
   children: ReactElement<ViewProps>;
 }) {
   const colorScheme = useResolvedAppearance();
@@ -30,6 +32,8 @@ export function MenuPickerMenu({
     <View
       onLayout={(event) => setWidth(event.nativeEvent.layout.width)}
       style={menuStyles.fullWidth}
+      pointerEvents={disabled ? "none" : "auto"}
+      accessibilityState={{ disabled }}
     >
       <MenuView
         style={menuStyles.fullWidth}
@@ -38,11 +42,12 @@ export function MenuPickerMenu({
           id: `choice:${choice.key}`,
           title: choice.label,
           state: choice.key === value ? "on" : "off",
+          attributes: { disabled },
         }))}
         colorScheme={colorScheme}
         onPressAction={(event) => {
           const id = event.nativeEvent.event;
-          if (id.startsWith("choice:")) onChange(id.slice("choice:".length));
+          if (!disabled && id.startsWith("choice:")) onChange(id.slice("choice:".length));
         }}
         title={label}
       >
@@ -68,6 +73,7 @@ export function MenuPicker({
   onPress,
   divider = false,
   plain = false,
+  showLabel = true,
 }: {
   label: string;
   choices: readonly MenuPickerChoice[];
@@ -76,6 +82,7 @@ export function MenuPicker({
   onPress?: () => void;
   divider?: boolean;
   plain?: boolean;
+  showLabel?: boolean;
 }) {
   const styles = useThemedStyles(createStyles);
   const tokens = useMobileTokens();
@@ -89,12 +96,18 @@ export function MenuPicker({
   } as const;
   const content = (
     <>
-      <Text style={[styles.label, plain && { color: tokens.mutedForeground, fontSize: 14 }]}>
-        {label}
-      </Text>
+      {showLabel ? (
+        <Text style={[styles.label, plain && { color: tokens.foreground, fontSize: 14 }]}>
+          {label}
+        </Text>
+      ) : null}
       <Text
         numberOfLines={1}
-        style={[styles.value, plain && { color: tokens.foreground, fontSize: 14 }]}
+        style={[
+          styles.value,
+          plain && { color: tokens.foreground, fontSize: 14 },
+          !showLabel && { textAlign: "left" },
+        ]}
       >
         {current}
       </Text>

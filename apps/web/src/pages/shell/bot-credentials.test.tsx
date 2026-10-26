@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { encodeLoginSecret } from "@rakazo/contracts";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ComponentProps, ReactNode } from "react";
 import { act } from "react";
 import type { Root } from "react-dom/client";
@@ -13,7 +14,12 @@ const botSecrets = vi.hoisted(() => ({
   remove: vi.fn(),
 }));
 
-vi.mock("../../lib/rpc", () => ({ rpc: { botSecrets } }));
+vi.mock("../../lib/rpc", () => ({
+  rpc: { botSecrets },
+  rpcForSpace: () => ({ botSecrets }),
+  createSpaceRpc: () => ({ botSecrets }),
+  selectedSpaceId: () => null,
+}));
 vi.mock("@lingui/react/macro", () => {
   const t = (parts: TemplateStringsArray, ...values: unknown[]) =>
     parts.reduce((text, part, index) => `${text}${index > 0 ? values[index - 1] : ""}${part}`, "");
@@ -51,16 +57,21 @@ const rows = [
 
 let container: HTMLDivElement;
 let root: Root;
+let queryClient: QueryClient;
 
 async function flush() {
   await act(async () => {
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 }
 
 async function render() {
   await act(async () => {
-    root.render(<BotCredentialsSection botId="bot-1" />);
+    root.render(
+      <QueryClientProvider client={queryClient}>
+        <BotCredentialsSection botId="bot-1" />
+      </QueryClientProvider>,
+    );
   });
   await flush();
 }
@@ -98,10 +109,12 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 });
 
 afterEach(async () => {
   await act(async () => root.unmount());
+  queryClient.clear();
   container.remove();
   vi.unstubAllGlobals();
 });
@@ -109,7 +122,7 @@ afterEach(async () => {
 describe("BotCredentialsSection", () => {
   it("lists credential metadata and no values", async () => {
     await render();
-    expect(botSecrets.list).toHaveBeenCalledWith({ botId: "bot-1" });
+    expect(botSecrets.list.mock.calls[0]?.[0]).toEqual({ botId: "bot-1" });
     const text = container.textContent ?? "";
     expect(container.querySelectorAll('[data-testid="bot-credential-row"]')).toHaveLength(4);
     for (const expected of [
@@ -125,10 +138,20 @@ describe("BotCredentialsSection", () => {
     expect(container.querySelectorAll("input")).toHaveLength(0);
   });
 
-  it("shows an empty state", async () => {
+  it("keeps the explanation and add action when no credentials are saved", async () => {
     botSecrets.list.mockResolvedValue([]);
     await render();
-    expect(byTestId("bot-credentials-empty").textContent).toContain("No credentials saved");
+    const add = byTestId("credential-add");
+    expect(add.getAttribute("aria-label")).toBe("Add credential");
+    expect(add.textContent).toBe("");
+    expect(add.querySelector("svg")).not.toBeNull();
+    expect(container.querySelector("h3")?.textContent).toBe("Credentials");
+    const card = byTestId("bot-credentials-card");
+    expect(card.textContent).toBe("Encrypted and never shown again");
+    expect(card.contains(add)).toBe(false);
+    expect(container.querySelector('[data-testid="credential-add-form"]')).toBeNull();
+    await click("credential-add");
+    expect(card.querySelector('[data-testid="credential-add-form"]')).not.toBeNull();
   });
 
   it("adds a header credential and clears the value, then refetches", async () => {
@@ -215,6 +238,13 @@ describe("BotCredentialsSection", () => {
   it("replaces a value on the same destination", async () => {
     botSecrets.put.mockResolvedValue(rows[2]);
     await render();
+    const replace = byTestId<HTMLButtonElement>("credential-replace-router");
+    expect(replace.getAttribute("aria-label")).toBe("Replace value");
+    expect(replace.textContent).toBe("");
+    expect(replace.querySelector("svg")).not.toBeNull();
+    const remove = byTestId<HTMLButtonElement>("credential-remove-router");
+    expect(remove.getAttribute("aria-label")).toBe("Remove");
+    expect(remove.textContent).toBe("");
     await click("credential-replace-router");
     await type("credential-replace-value", FAKE_VALUE);
     await click("credential-replace-save");
@@ -371,7 +401,7 @@ describe("BotCredentialsSection command variables", () => {
     botSecrets.put.mockResolvedValue(commandRow);
     await render();
     const row = byTestId("bot-credential-row");
-    expect(row.textContent).toContain("Command variable · $NETBIRD_SETUP_KEY");
+    expect(row.textContent).toContain("Command variable$NETBIRD_SETUP_KEY");
     await click("credential-replace-netbird-setup-key");
     await type("credential-replace-value", FAKE_VALUE);
     await click("credential-replace-save");

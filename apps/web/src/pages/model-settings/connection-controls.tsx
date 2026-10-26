@@ -1,11 +1,13 @@
 import { Plural, Trans, useLingui } from "@lingui/react/macro";
-import { canUseCompatibleModelAsDefault } from "@rakazo/core";
+import { isOllamaCloudBaseUrl } from "@rakazo/contracts";
 import { Button, Disclosure, Input } from "@rakazo/ui-web";
 import { Check, Copy } from "lucide-react";
+import { useEffect, useState } from "react";
 import {
   ModelPreflightFeedback,
   modelPreflightTestingLabel,
 } from "../../components/ModelConnectionPreflightNotice";
+import { CompatibleKeyField } from "./compatible-key-field";
 
 import type { ModelSettingsState } from "./use-model-settings";
 
@@ -22,6 +24,7 @@ export function ConnectionControls({
   copyOAuthCode,
   credential,
   gatewayId,
+  isCloudflare,
   isCloudflareGateway,
   isOpenAiCompatible,
   oauth,
@@ -56,6 +59,7 @@ export function ConnectionControls({
   | "copyOAuthCode"
   | "credential"
   | "gatewayId"
+  | "isCloudflare"
   | "isCloudflareGateway"
   | "isOpenAiCompatible"
   | "oauth"
@@ -78,51 +82,45 @@ export function ConnectionControls({
   | "updateApiKey"
 >) {
   const { t } = useLingui();
+  // Signed in with a subscription, a key is an alternative, so it stays folded until asked for.
+  const [keyShownFor, setKeyShownFor] = useState<string | null>(null);
+  const keyFolded =
+    subscriptionSignIn &&
+    credential?.authKind === "oauth" &&
+    keyShownFor !== (selected?.provider ?? null);
+  // Opening the fold swaps the summary for the form, so focus moves to the key field.
+  useEffect(() => {
+    if (keyShownFor) document.getElementById("model-api-key")?.focus();
+  }, [keyShownFor]);
   return !isOpenAiCompatible ? (
     <>
       {subscriptionSignIn ? (
-        <div className="mt-5 first:mt-0">
+        <div className="mt-5 flex flex-wrap items-center gap-2 first:mt-0">
           {oauth ? (
-            <div className="rounded-xl border border-border px-4 py-3">
+            <div className="w-full rounded-xl border border-border px-4 py-3">
               {oauth.mode === "auth-url" ? (
                 <>
                   <p className="text-[13px] leading-[1.5] text-muted-foreground">
-                    {popupBlocked ? (
-                      <Trans>
-                        Open{" "}
-                        <a
-                          href={oauth.verificationUri}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-foreground underline"
-                        >
-                          {new URL(oauth.verificationUri).hostname}
-                        </a>{" "}
-                        to finish signing in.
-                      </Trans>
-                    ) : (
-                      <Trans>
-                        Finish signing in at{" "}
-                        <a
-                          href={oauth.verificationUri}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-foreground underline"
-                        >
-                          {new URL(oauth.verificationUri).hostname}
-                        </a>
-                        . The final page may not load; paste its URL or code here.
-                      </Trans>
-                    )}
+                    <Trans>
+                      Sign in at{" "}
+                      <a
+                        href={oauth.verificationUri}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-foreground underline"
+                      >
+                        {new URL(oauth.verificationUri).hostname}
+                      </a>
+                      , then paste the code here.
+                    </Trans>
                   </p>
                   <div className="mt-3 flex items-center gap-2">
                     <Input
                       value={pasteCode}
                       onChange={(e) => setPasteCode(e.target.value)}
-                      aria-label={t`Authorization code or callback URL`}
+                      aria-label={t`Authorization code`}
                       autoComplete="off"
                       spellCheck={false}
-                      placeholder="http://localhost:53692/callback?code=…"
                       className="text-foreground md:text-[13px]"
                     />
                     <Button
@@ -232,8 +230,7 @@ export function ConnectionControls({
             type="button"
             variant="outline"
             size="sm"
-            className="mt-3"
-            disabled={busy || preflightTesting}
+            disabled={busy || preflightTesting || credential?.authKind !== "oauth"}
             onClick={() => void testOAuthConnection()}
           >
             {modelPreflightTestingLabel(
@@ -242,14 +239,26 @@ export function ConnectionControls({
             )}
           </Button>
           {preflightTarget === "sign-in" ? (
-            <ModelPreflightFeedback success={preflightSuccess} failure={preflightFailure} />
+            <div className="w-full">
+              <ModelPreflightFeedback success={preflightSuccess} failure={preflightFailure} />
+            </div>
           ) : null}
         </div>
       ) : null}
 
-      {acceptsKey ? (
+      {acceptsKey && keyFolded ? (
+        // Only the summary shows here; opening it swaps in the key form below.
+        <Disclosure
+          className="mt-5 text-[13px] leading-[1.5] text-muted-foreground"
+          open={false}
+          onOpenChange={() => setKeyShownFor(selected?.provider ?? null)}
+          summary={<Trans>Or paste an API key</Trans>}
+        >
+          {null}
+        </Disclosure>
+      ) : acceptsKey ? (
         <div className="mt-5 first:mt-0">
-          {isCloudflareGateway ? (
+          {isCloudflare ? (
             <>
               <label
                 className="block text-[13.5px] text-muted-foreground"
@@ -265,31 +274,33 @@ export function ConnectionControls({
                   className="mt-2 h-10 text-foreground"
                 />
               </label>
-              <label
-                className="mt-4 block text-[13.5px] text-muted-foreground"
-                htmlFor="cloudflare-gateway-id"
-              >
-                <Trans>Gateway ID</Trans>
-                <Input
-                  id="cloudflare-gateway-id"
-                  value={gatewayId}
-                  onChange={(event) => setGatewayId(event.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
-                  className="mt-2 h-10 text-foreground"
-                />
-              </label>
+              {isCloudflareGateway ? (
+                <label
+                  className="mt-4 block text-[13.5px] text-muted-foreground"
+                  htmlFor="cloudflare-gateway-id"
+                >
+                  <Trans>Gateway ID</Trans>
+                  <Input
+                    id="cloudflare-gateway-id"
+                    value={gatewayId}
+                    onChange={(event) => setGatewayId(event.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="mt-2 h-10 text-foreground"
+                  />
+                </label>
+              ) : null}
             </>
           ) : null}
           {acceptsKey ? (
             <label
-              className={`block text-[13.5px] text-muted-foreground ${isCloudflareGateway ? "mt-4" : ""}`}
+              className={`block text-[13.5px] text-muted-foreground ${isCloudflare ? "mt-4" : ""}`}
               htmlFor="model-api-key"
             >
-              {credential ? (
+              {credential?.hasKey ? (
                 <Trans>Replace API key</Trans>
               ) : subscriptionSignIn ? (
-                <Trans>Or connect an API key</Trans>
+                <Trans>Or paste an API key</Trans>
               ) : (
                 <Trans>API key</Trans>
               )}
@@ -304,13 +315,12 @@ export function ConnectionControls({
               />
             </label>
           ) : null}
-          {acceptsKey && selected?.catalogProbe ? (
-            <>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {acceptsKey && selected?.catalogProbe ? (
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
-                className="mt-3 rounded-full"
                 disabled={busy || preflightTesting || apiKey.trim().length < 8}
                 onClick={() => void testApiKeyConnection()}
               >
@@ -319,27 +329,26 @@ export function ConnectionControls({
                   "api-key",
                 )}
               </Button>
-              {preflightTarget === "api-key" ? (
-                <ModelPreflightFeedback success={preflightSuccess} failure={preflightFailure} />
-              ) : null}
-            </>
+            ) : null}
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={busy || !cloudflareRoutingReady || apiKey.trim().length < 8}
+              onClick={() => void connectKey()}
+            >
+              {pending === "connect" ? (
+                <Trans>Saving…</Trans>
+              ) : credential?.hasKey ? (
+                <Trans>Replace API key</Trans>
+              ) : (
+                <Trans>Connect API key</Trans>
+              )}
+            </Button>
+          </div>
+          {preflightTarget === "api-key" ? (
+            <ModelPreflightFeedback success={preflightSuccess} failure={preflightFailure} />
           ) : null}
-          <Button
-            type="button"
-            variant="secondary"
-            className="mt-3 rounded-full"
-            size="sm"
-            disabled={busy || !cloudflareRoutingReady || apiKey.trim().length < 8}
-            onClick={() => void connectKey()}
-          >
-            {pending === "connect" ? (
-              <Trans>Saving…</Trans>
-            ) : credential ? (
-              <Trans>Replace API key</Trans>
-            ) : (
-              <Trans>Connect API key</Trans>
-            )}
-          </Button>
         </div>
       ) : null}
 
@@ -357,6 +366,7 @@ export function ConnectionControls({
 
 export function CompatibleKeyControls({
   apiKey,
+  baseUrl,
   busy,
   connectKey,
   credential,
@@ -366,6 +376,7 @@ export function CompatibleKeyControls({
   updateApiKey,
 }: Pick<
   ModelSettingsState,
+  | "baseUrl"
   | "apiKey"
   | "busy"
   | "connectKey"
@@ -378,86 +389,33 @@ export function CompatibleKeyControls({
   const { t } = useLingui();
   return isOpenAiCompatible ? (
     <div className="mt-5">
-      <Disclosure className="text-[13.5px] text-muted-foreground" summary={<Trans>API key</Trans>}>
+      <CompatibleKeyField baseUrl={baseUrl} className="block text-[13.5px] text-muted-foreground">
         <Input
           aria-label={t`API key`}
           value={apiKey}
           onChange={(event) => updateApiKey(event.target.value)}
-          placeholder={credential?.hasKey ? t`Paste a replacement key` : t`Optional`}
+          required={isOllamaCloudBaseUrl(baseUrl)}
+          placeholder={
+            isOllamaCloudBaseUrl(baseUrl)
+              ? t`Ollama API key`
+              : credential?.hasKey
+                ? t`Paste a replacement key`
+                : t`Optional`
+          }
           type="password"
           autoComplete="new-password"
           className="mt-2 h-10 text-foreground"
         />
-      </Disclosure>
+      </CompatibleKeyField>
       <Button
         type="button"
         variant="secondary"
-        className="mt-3 rounded-full"
+        className="mt-3"
         size="sm"
         disabled={busy || !openAiCompatibleReady}
         onClick={() => void connectKey()}
       >
         {pending === "connect" ? <Trans>Saving…</Trans> : <Trans>Save</Trans>}
-      </Button>
-    </div>
-  ) : null;
-}
-
-export function SaveModelButton({
-  busy,
-  cloudflareRoutingReady,
-  connectKey,
-  credential,
-  isActive,
-  isOpenAiCompatible,
-  modelId,
-  pending,
-  setModelDefault,
-  settingsDirty,
-  thinkingDirty,
-  usingServerCredentials,
-}: Pick<
-  ModelSettingsState,
-  | "busy"
-  | "cloudflareRoutingReady"
-  | "connectKey"
-  | "credential"
-  | "isActive"
-  | "isOpenAiCompatible"
-  | "modelId"
-  | "pending"
-  | "setModelDefault"
-  | "settingsDirty"
-  | "thinkingDirty"
-  | "usingServerCredentials"
->) {
-  return credential && (!isActive || thinkingDirty || usingServerCredentials || settingsDirty) ? (
-    <div className="mt-6">
-      <Button
-        type="button"
-        variant="secondary"
-        className="rounded-full"
-        size="sm"
-        disabled={
-          busy ||
-          !cloudflareRoutingReady ||
-          (isOpenAiCompatible &&
-            (!modelId.trim() ||
-              !canUseCompatibleModelAsDefault(credential.enabledModelIds, modelId.trim())))
-        }
-        onClick={() =>
-          void (settingsDirty ? connectKey({ settingsOnly: true }) : setModelDefault())
-        }
-      >
-        {pending === "default" ? (
-          <Trans>Switching…</Trans>
-        ) : pending === "settings" ? (
-          <Trans>Saving…</Trans>
-        ) : isActive && !usingServerCredentials ? (
-          <Trans>Save</Trans>
-        ) : (
-          <Trans>Use this model</Trans>
-        )}
       </Button>
     </div>
   ) : null;

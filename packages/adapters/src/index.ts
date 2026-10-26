@@ -1,6 +1,8 @@
 export * from "./agent-connections.js";
 export * from "./agent-environment.js";
+export * from "./agent-import-settings.js";
 export * from "./ai-consent.js";
+export * from "./artifact-store-factory.js";
 export * from "./artifacts.js";
 export * from "./auto-review.js";
 export * from "./auto-review-factory.js";
@@ -14,6 +16,7 @@ export {
   getBotSecretMetadata,
   listBotSecretMetadata,
   normalizeSecretDestination,
+  pageUrlOrigin,
   storeBotSecret,
 } from "./bot-secrets.js";
 export * from "./browser-emulator.js";
@@ -48,6 +51,7 @@ export * from "./createos-sandbox.js";
 export * from "./current-time.js";
 export * from "./cursor-cloud-agent.js";
 export * from "./daytona-sandbox.js";
+export * from "./decision-models.js";
 export * from "./deployment-model.js";
 export * from "./desktop-sandbox.js";
 export * from "./destination-emulator.js";
@@ -67,16 +71,20 @@ export * from "./github-webhook-emulator.js";
 export * from "./graphql-connectors.js";
 export * from "./group-handoff.js";
 export * from "./home.js";
+export * from "./home-object-store.js";
 export { HonchoMemoryProvider } from "./honcho-memory-provider.js";
 export * from "./host-aware-sandbox.js";
+export * from "./http-decisions.js";
 export * from "./infisical-secret-store.js";
 export * from "./installed-connectors.js";
+export * from "./installed-messaging-surface.js";
 export * from "./integration-provider-settings.js";
 export * from "./jev-auto-review.js";
 export * from "./job-abort.js";
 export * from "./job-reconciler.js";
 export * from "./keenable-web.js";
 export * from "./keyless-http-web.js";
+export * from "./kubernetes-sandbox.js";
 export * from "./mcp-connector.js";
 export * from "./mcp-emulator.js";
 export * from "./mcp-oauth.js";
@@ -122,11 +130,16 @@ export {
   parseBackfillExtractArgs,
 } from "./memory-extract-backfill.js";
 export * from "./memory-provider-factory.js";
+export * from "./messaging-composition.js";
 export * from "./messaging-context.js";
 export * from "./messaging-delivery.js";
+export * from "./messaging-installations.js";
 export * from "./messaging-platforms.js";
 export * from "./messaging-team-chat-emulator.js";
 export * from "./model-connect.js";
+export { hostedModelCreditObserver } from "./model-credit-observer.js";
+export * from "./model-credit-reconciler.js";
+export * from "./model-roles.js";
 export * from "./model-selection.js";
 export * from "./model-vision.js";
 export { closeNeo4jMemoryDrivers, Neo4jMemoryProvider } from "./neo4j-memory-provider.js";
@@ -135,6 +148,7 @@ export * from "./openai-compatible-url.js";
 export * from "./openai-compatible-voice.js";
 export * from "./openai-voice.js";
 export * from "./opencode-cloud-agent.js";
+export * from "./openrouter-usage.js";
 export * from "./page-browser-session.js";
 export * from "./parallel-web.js";
 export * from "./pi-catalog-availability.js";
@@ -149,14 +163,16 @@ export * from "./pi-runtime.js";
 export * from "./pi-session.js";
 export { shutdownPiTelemetry } from "./pi-telemetry.js";
 export * from "./pipedream-connector.js";
-export * from "./private-endpoint.js";
 export * from "./product-analytics.js";
+export * from "./push-token-store.js";
 export * from "./railway-sandbox.js";
 export * from "./realtime.js";
 export * from "./release-watch.js";
 export * from "./remote-mcp.js";
+export * from "./resend-email.js";
 export * from "./routine-watch.js";
 export * from "./run-secret.js";
+export * from "./run-wakeup.js";
 export * from "./sandbox-errors.js";
 export * from "./sandbox-factory.js";
 export * from "./sandbox-provider-env.js";
@@ -173,7 +189,9 @@ export * from "./secrets.js";
 export * from "./sendblue-emulator.js";
 export { SerenityMemoryProvider } from "./serenity-memory-provider.js";
 export * from "./skill-tools.js";
+export * from "./slack-install-provider.js";
 export * from "./smtp-email.js";
+export * from "./storage-migration.js";
 export * from "./stripe-billing.js";
 export { SupermemoryMemoryProvider } from "./supermemory-memory-provider.js";
 export * from "./task-catalog.js";

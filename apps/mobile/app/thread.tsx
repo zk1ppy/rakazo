@@ -1,27 +1,24 @@
 import type { MenuAction } from "@expo/ui/community/menu";
-import { ChatMarkdown, markdownCodeBlocks } from "@rakazo/chat-ui/native";
-import type {
-  AgentSkillCatalogEntry,
-  Connection,
-  ConnectionCatalogItem,
-  MessageBlock,
-  MessageReaction,
-  Routine,
-} from "@rakazo/contracts";
+import { ChatMarkdown, markdownCodeBlocks, withBlockMentions } from "@rakazo/chat-ui/native";
+import type { AgentSkillCatalogEntry, MessageBlock, MessageReaction } from "@rakazo/contracts";
 import {
+  ATTACHMENT_MAX_COUNT,
   attachmentMaxBytes,
   canReactToThreadMessage,
   isAttachmentAudioMimeType,
   MESSAGE_REACTIONS,
 } from "@rakazo/contracts";
-import type { SlashActionId, ThreadItem } from "@rakazo/core";
+import type { ChildBotBlock, ReadBoundary, SlashActionId, ThreadItem } from "@rakazo/core";
 import {
   abortableDelay,
   answerableAskMessageIds,
   appendNewerThreadPage,
   attachmentsForThread,
   buildComposerMentionOptions,
+  canMarkMessageUnread,
+  chatUserBubbleColors,
   cloudAgentHttpsUrl,
+  createChatQueues,
   dismissableAskMessageIds,
   expandPeerReplies,
   foldPeerReplies,
@@ -35,9 +32,13 @@ import {
   isRunWaitingOnUser,
   isRunWorking,
   isSecretAskBlock,
+  jumpTargetId,
   leaveThreadWindow,
+  liveActivityLine,
+  liveMessageComposing,
   openThreadWindow,
   plainTextFromMarkdown,
+  projectBotMentions,
   projectMessageReactions,
   reconcileThreadScrollState,
   replyAttachment,
@@ -46,9 +47,12 @@ import {
   retryDelayMs,
   displayName as safeDisplayName,
   selectedAskActionLabel,
+  settleReadBoundary,
   shouldShowBotSenderName,
   threadWindowMessages,
   timeSeparatorIds,
+  unreadDividerMessageId,
+  voiceChatHoldsMessage,
   withLiveStreamingProgress,
 } from "@rakazo/core";
 import { fontWeight, typeScale } from "@rakazo/ui-tokens";
@@ -58,9 +62,11 @@ import {
   useIsFocused,
   useLocalSearchParams,
   useNavigation,
+  useRoute,
   useRouter,
 } from "expo-router";
 import { useHeaderHeight } from "expo-router/react-navigation";
+import type { ComponentProps } from "react";
 import {
   memo,
   useCallback,
@@ -105,14 +111,19 @@ import Animated, {
   useAnimatedStyle,
   useReducedMotion,
   useSharedValue,
+  withTiming,
+  ZoomIn,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AppConnectCard } from "../components/AppConnectCard";
 import { AskActions } from "../components/AskActions";
+import { ActivityMark } from "../components/activity-mark";
 import { AudioAttachment } from "../components/audio-attachment";
 import { BotAvatar } from "../components/bot-avatar";
+import { BotMention, MessageMentions } from "../components/bot-mention";
 import { ChoiceCard } from "../components/ChoiceCard";
 import { ComputerCard } from "../components/ComputerCard";
+import { publishChatTitle } from "../components/chat-header-title";
 import { ComposerReplyPreview } from "../components/composer-reply-preview";
 import { FailedSendBubble } from "../components/failed-send-bubble";
 import { GlassSurface } from "../components/glass-surface";
@@ -137,12 +148,13 @@ import { trailingHeaderOptions } from "../components/sheet-header";
 import type { ThreadComposerHandle } from "../components/thread-composer";
 import { ThreadComposer } from "../components/thread-composer";
 import { ThreadErrorNotice } from "../components/thread-error-notice";
+import { threadHeaderRight } from "../components/thread-header-right";
 import { createThreadHeaderStyles } from "../components/thread-header-styles";
 import { ThreadScrollSurface } from "../components/thread-scroll-surface";
 import { TimeSeparator } from "../components/time-separator";
+import { UnreadDivider } from "../components/unread-divider";
 import { VoiceChatCard } from "../components/VoiceChatCard";
-import { WorkingIndicator } from "../components/WorkingIndicator";
-import { readableGutter } from "../lib/adaptive-layout";
+import { readableGutters } from "../lib/adaptive-layout";
 import type {
   MobileBot,
   MobileGroup,
@@ -178,9 +190,13 @@ import { confirmDeleteBot, restoreArchivedBot } from "../lib/bot-lifecycle";
 import { retainUnchangedBotRoster } from "../lib/bot-roster";
 import { findSwitchTarget, ringOnArrival, takeRingOnArrival } from "../lib/bot-switch";
 import { setCallProviderTranscribe, startCall, useCallSession } from "../lib/call-session";
+import { chatSettingsRoute } from "../lib/chat-settings-route";
+import { cronLabels } from "../lib/cron";
 import { loadDeviceVoiceEnabled } from "../lib/device-voice";
 import { available as dictationAvailable } from "../lib/dictation";
+import { canDoubleTapReact } from "../lib/double-tap";
 import { cancelFocusPrompt, focusPromptThreadActive } from "../lib/focus-prompt";
+import { helperHeaderOffset, helperOpenTarget } from "../lib/helper-header-offset";
 import { t, useI18n } from "../lib/i18n";
 import { isInlineImageMimeType } from "../lib/inline-image";
 import { integrationsCacheScope, isIntegrationsScopeCurrent } from "../lib/integrations-cache";
@@ -198,20 +214,27 @@ import {
   applyLocalChoiceDismissals,
   hasVisibleMessagePresentation,
   isCenteredAgentEvent,
+  messageHasInlineControls,
   messagePresentationSegments,
   quotableMessageSegments,
   truncateQuoteExcerpt,
 } from "../lib/message-presentation";
 import { openModelSettings } from "../lib/model-settings";
 import { useMobileTokens, useResolvedAppearance, useThemedStyles } from "../lib/native";
-import { HEADER_TITLE_MAX_FONT_SCALE, iosAtLeast } from "../lib/native-controls";
 import {
   threadRouteSpaceOnFocus,
   threadSpaceRequest,
   threadSpaceSwitchResult,
 } from "../lib/notification-open";
+import { peerChipPress } from "../lib/peer-chip";
 import type { PickedAttachment } from "../lib/pick-attachments";
-import { pickDocuments, pickFromLibrary, takePhoto } from "../lib/pick-attachments";
+import {
+  pickDocuments,
+  pickFromLibrary,
+  readDroppedFiles,
+  takePhoto,
+} from "../lib/pick-attachments";
+import { attachmentCountSkipReason } from "../lib/pick-attachments-filter";
 import { threadRefreshDelayMs } from "../lib/refresh";
 import {
   getCachedResponseStreamingEnabled,
@@ -226,6 +249,7 @@ import {
   savedChatTarget,
   writeSavedThread,
 } from "../lib/saved-chats";
+import { removeFromSearchInbox, useInboxBot } from "../lib/search-inbox";
 import { secretDestinationLabel } from "../lib/secret-destination";
 import { secretFieldTraits } from "../lib/secret-field-traits";
 import { selectableTextFromMarkdown } from "../lib/selectable-text";
@@ -235,16 +259,26 @@ import {
   loadVerifiedIntegrationsScope,
   subscribeSessionGeneration,
 } from "../lib/session";
-import { setInboxHidden, useSplitView } from "../lib/split-view";
-import { threadEdgeOptions } from "../lib/thread-edges";
+import { useSplitView } from "../lib/split-view";
+import { threadEdgeOptions, threadHeaderClearance, threadHeaderFloats } from "../lib/thread-edges";
 import type { SendAttempt } from "../lib/thread-feedback";
 import { subscribeDelivered, useThreadFeedback } from "../lib/thread-feedback";
 import { ThreadJumpAnchor } from "../lib/thread-jump";
+import { threadKeyboardOffset } from "../lib/thread-keyboard-offset";
+import { useThreadMentionCatalog } from "../lib/thread-mention-catalog";
 import { ThreadReadOnlyContext } from "../lib/thread-read-only";
 import type { ThreadScrollAction, ThreadScrollState } from "../lib/thread-scroll";
-import { latestArrivalMessageId, ThreadScrollBehavior } from "../lib/thread-scroll";
+import {
+  isOwnThreadMessage,
+  latestArrivalMessage,
+  latestThreadRowKey,
+  ThreadScrollBehavior,
+} from "../lib/thread-scroll";
 import { reconcileVisibleThreadSnapshot } from "../lib/thread-snapshot";
 import { prepareUnsentSends } from "../lib/unsent-sends";
+import { useFileDrop } from "../lib/use-file-drop";
+import type { UserBubble } from "../lib/user-bubble";
+import { withUserBubble } from "../lib/user-bubble";
 import { errorText } from "../lib/user-error";
 import { speakQueue, speakText } from "../lib/voice";
 import {
@@ -438,16 +472,23 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
   const [botActionsOpen, setBotActionsOpen] = useState(false);
   const { t, locale } = useI18n();
   const navigation = useNavigation();
+  // This screen's own route: its header title reads what this screen publishes, by key.
+  const route = useRoute();
+  const focused = useIsFocused();
   const foreground = useAppForeground();
   const router = useRouter();
   // Beside the chat list on a wide window, the chat has only the width the list leaves.
-  const { split, inboxHidden, contentWidth: windowWidth } = useSplitView();
+  const { inboxShown, contentWidth: windowWidth } = useSplitView();
   const nativeHeaderHeight = useHeaderHeight();
-  const headerHeight = iosAtLeast(26) ? nativeHeaderHeight : 0;
+  const headerHeight = threadHeaderFloats() ? nativeHeaderHeight : 0;
+  const headerClearance = threadHeaderClearance(headerHeight);
   const insets = useSafeAreaInsets();
   // An unfolded or tablet window keeps messages and the composer in a centred reading column.
-  const columnInset = readableGutter(windowWidth, Math.max(insets.left, insets.right));
-  const columnWidth = windowWidth - columnInset * 2;
+  const columnInsets = readableGutters(windowWidth, {
+    left: inboxShown ? 0 : insets.left,
+    right: insets.right,
+  });
+  const columnWidth = windowWidth - columnInsets.left - columnInsets.right;
   // Frame by frame, including a swipe that drags the keyboard down.
   const keyboardProgress = useSharedValue(KeyboardController.isVisible() ? 1 : 0);
   useKeyboardHandler(
@@ -497,6 +538,9 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
   const onCall = Boolean(botId) && call?.botId === botId;
   const voiceCallStarting = useRef(false);
   const scroll = useRef<FlatList<ThreadItem<MobileMessage>>>(null);
+  const helperViewport = useRef<View>(null);
+  const helperScrollOffset = useRef(0);
+  const helperResize = useRef<(() => void) | null>(null);
   const pinnedScroll = useRef<ScrollView>(null);
   const scrollBehavior = useRef(new ThreadScrollBehavior());
   const liveScrollBack = useRef(new KeyboardScrollBack({ inverted: true }));
@@ -531,9 +575,24 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
   const mentionBotsRefreshGeneration = useRef(0);
   const mentionBotsAppliedGeneration = useRef(0);
   const readVisibleTarget = useRef<string | null>(null);
+  // What the user had read up to when this chat opened; the "New" divider follows it all visit.
+  // Each open or return to a chat is a new visit.
+  const readVisit = useRef<{ target: string | undefined; visit: number; focused: boolean }>({
+    target: undefined,
+    visit: 0,
+    focused,
+  });
+  const [readBoundary, setReadBoundary] = useState<ReadBoundary | null>(null);
+  // A chat's markRead calls run one at a time so the request that opened it answers first.
+  const [readInOrder] = useState(createChatQueues);
   const autoSpoken = useRef<string | null>(null);
   const autoSpokenBotId = useRef<string | null>(null);
   const threadKey = groupId ?? botId;
+  if (readVisit.current.target !== threadKey || (focused && !readVisit.current.focused)) {
+    readVisit.current = { target: threadKey, visit: readVisit.current.visit + 1, focused };
+    readVisibleTarget.current = null;
+  }
+  readVisit.current.focused = focused;
   const [threadScrollState, setThreadScrollState] = useState<ThreadScrollState>(() =>
     scrollBehavior.current.state(),
   );
@@ -561,6 +620,8 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
       ? { botId }
       : undefined;
   const [snap, setSnap] = useState<MobileSnapshot | null>(null);
+  /** Bots writing reply text right now, comma-separated. */
+  const [composingBots, setComposingBots] = useState("");
   const snapRef = useRef<MobileSnapshot | null>(null);
   // The copy saved on this device stays on screen until a live snapshot replaces it.
   const [showingSaved, setShowingSaved] = useState(false);
@@ -578,6 +639,16 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
     snapRef.current = next;
     const visible = withLiveStreamingProgress(next, streamResponsesRef.current);
     setSnap((previous) => reconcileVisibleThreadSnapshot(previous, visible));
+    // Read before streamed text is hidden, so a writing bot shows it even with streaming off.
+    setComposingBots(
+      (next?.messages ?? [])
+        .filter(
+          (message) => message.id.startsWith("progress:") && liveMessageComposing(message.blocks),
+        )
+        .map((message) => message.botId ?? next?.botId ?? "")
+        .sort()
+        .join(","),
+    );
   }
 
   useEffect(() => {
@@ -609,15 +680,14 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
   const mentionBotsRef = useRef<MobileBot[]>([]);
   mentionBotsRef.current = mentionBots;
   const [mentionGroups, setMentionGroups] = useState<MobileGroup[]>([]);
-  const [mentionRoutines, setMentionRoutines] = useState<Array<Routine & { botName?: string }>>([]);
-  const [mentionConnectors, setMentionConnectors] = useState<
-    Array<{
-      id: string;
-      name: string;
-      authStatus: "connected" | "needs_auth";
-      connectionId?: string;
-    }>
-  >([]);
+  const {
+    routines: mentionRoutines,
+    connectors: mentionConnectors,
+    onMentionRequested,
+  } = useThreadMentionCatalog(
+    JSON.stringify([userId, sessionEpoch, botId, groupId, requestedThreadId]),
+    mentionBots,
+  );
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [replyTarget, setReplyTarget] = useState<MobileMessage | null>(null);
   const [replyQuote, setReplyQuote] = useState<string | null>(null);
@@ -670,23 +740,30 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
     () => foldPeerReplies(snap?.messages ?? [], { includePeerReceipts: true }),
     [snap?.messages],
   );
-  const reactionView = useMemo(
-    () =>
-      projectMessageReactions(
-        expandPeerReplies(peerTranscript, expandedPeerMarkers)
-          .map((message) => {
-            const dismissed = dismissedChoiceQuestions.get(message.id);
-            if (!dismissed) return message;
-            const blocks = applyLocalChoiceDismissals(message.blocks, dismissed);
-            return blocks === message.blocks ? message : { ...message, blocks: [...blocks] };
-          })
-          .filter((message) => hasVisibleMessagePresentation(message.blocks)),
-      ),
-    [dismissedChoiceQuestions, expandedPeerMarkers, peerTranscript],
-  );
+  const reactionView = useMemo(() => {
+    const mentionView = projectBotMentions(
+      expandPeerReplies(peerTranscript, expandedPeerMarkers)
+        .map((message) => {
+          const dismissed = dismissedChoiceQuestions.get(message.id);
+          if (!dismissed) return message;
+          const blocks = applyLocalChoiceDismissals(message.blocks, dismissed);
+          return blocks === message.blocks ? message : { ...message, blocks: [...blocks] };
+        })
+        .filter((message) => hasVisibleMessagePresentation(message.blocks)),
+    );
+    return {
+      ...projectMessageReactions(mentionView.visibleMessages),
+      mentions: mentionView.mentions,
+      foldedInto: mentionView.foldedInto,
+    };
+  }, [dismissedChoiceQuestions, expandedPeerMarkers, peerTranscript]);
   const visibleMessages = reactionView.visibleMessages;
-  const latestMessageId = latestArrivalMessageId(visibleMessages, peerTranscript.markerOf);
+  const latestMessage = latestArrivalMessage(visibleMessages, peerTranscript.markerOf);
+  const latestMessageId = latestMessage?.id ?? null;
   const activePendingAttachments = attachmentsForThread(pendingAttachments, threadKey);
+  // Read by a second drop that starts before the first one commits.
+  const pendingAttachmentsRef = useRef(pendingAttachments);
+  pendingAttachmentsRef.current = pendingAttachments;
   const composerRef = useRef<ThreadComposerHandle>(null);
   const composerMentionTargets = useMemo(
     () =>
@@ -711,16 +788,36 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
           botName: routine.botName,
         })),
         connectors: mentionConnectors,
+        cronLabels: cronLabels(locale),
       }),
-    [groupId, inGroup, mentionBots, mentionConnectors, mentionGroups, mentionRoutines],
+    [groupId, inGroup, locale, mentionBots, mentionConnectors, mentionGroups, mentionRoutines],
   );
   const currentBot = botId ? mentionBots.find((bot) => bot.id === botId) : undefined;
-  const displayName = safeDisplayName(currentBot?.name ?? name, inGroup ? t("Group") : t("Bot"));
+  // Until the chat's own roster arrives, the bot as the inbox last loaded it.
+  const inboxBot = useInboxBot(botId);
+  const titleBot = currentBot ?? inboxBot;
+  // Without a name yet (a notification can leave it out), the title shows a placeholder.
+  const titleName = currentBot?.name ?? name ?? inboxBot?.name;
+  const displayName = safeDisplayName(titleName, inGroup ? t("Group") : t("Bot"));
   const composerPrompt = displayName ? t("Message {name}", { name: displayName }) : t("Message…");
   const notificationThreadId = snap?.threadId ?? requestedThreadId ?? currentBot?.threadId;
   activeThreadId.current = notificationThreadId;
-  const currentBotStatus = snap ? snap.run?.status : currentBot?.status;
-  const hasLiveProgress = visibleMessages.some((message) => message.id.startsWith("progress:"));
+  const currentBotStatus = snap ? snap.run?.status : titleBot?.status;
+  // The group's members in its order, once the chat or its group list has loaded them; the
+  // title seats the inbox's copy until then.
+  const groupMembers = groupId
+    ? (snap?.members ?? mentionGroups.find((group) => group.id === groupId)?.members)
+    : undefined;
+  // Only reply text being written replaces the footer; earlier sentences above a tool call don't.
+  const hasLiveProgress = visibleMessages.some(
+    (message) => message.id.startsWith("progress:") && liveMessageComposing(message.blocks),
+  );
+  const activityLine = liveActivityLine(snap?.messages ?? []);
+  const userBubble = useMemo(
+    () =>
+      !inGroup && currentBot ? chatUserBubbleColors(currentBot.color, currentBot.id) : undefined,
+    [inGroup, currentBot?.color, currentBot?.id],
+  );
   const activeGroupBots = useMemo(() => {
     if (!inGroup) return [];
     const seen = new Set<string>();
@@ -834,214 +931,65 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
       .catch(() => setMentionGroups([]));
   }, [refreshMentionBots]);
 
-  useEffect(() => {
-    if (mentionBots.length === 0) {
-      setMentionRoutines([]);
-      setMentionConnectors([]);
-      return;
-    }
-    let cancelled = false;
-    const botNameById = new Map(mentionBots.map((bot) => [bot.id, bot.name]));
-    void Promise.all(
-      mentionBots.map((bot) =>
-        rpc<Routine[]>("routines/list", { botId: bot.id })
-          .then((rows) =>
-            rows.map((routine) => ({
-              ...routine,
-              botName: botNameById.get(bot.id) ?? bot.name,
-            })),
-          )
-          .catch(() => [] as Array<Routine & { botName?: string }>),
-      ),
-    ).then((lists) => {
-      if (!cancelled) setMentionRoutines(lists.flat());
-    });
-    void Promise.all([
-      rpc<Connection[]>("connections/list").catch(() => [] as Connection[]),
-      rpc<ConnectionCatalogItem[]>("connections/catalog", {}).catch(
-        () => [] as ConnectionCatalogItem[],
-      ),
-    ]).then(([connections, catalog]) => {
-      if (cancelled) return;
-      const connected = connections.filter((row) => row.status === "connected");
-      const options: Array<{
-        id: string;
-        name: string;
-        authStatus: "connected" | "needs_auth";
-        connectionId?: string;
-      }> = connected.map((row) => ({
-        id: row.id,
-        name: row.displayName,
-        authStatus: "connected" as const,
-        connectionId: row.id,
-      }));
-      for (const item of catalog) {
-        if (item.connected || item.noAuth) continue;
-        if (
-          connected.some(
-            (row) =>
-              row.provider.toLowerCase() === item.slug.toLowerCase() ||
-              row.displayName.toLowerCase() === item.name.toLowerCase(),
-          )
-        ) {
-          continue;
-        }
-        options.push({
-          id: `catalog:${item.connectorId}:${item.slug}`,
-          name: item.name,
-          authStatus: "needs_auth",
-        });
-      }
-      setMentionConnectors(options);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [mentionBots]);
-
   function isCurrentTarget(targetBotId: string | undefined, targetGroupId: string | undefined) {
     return activeBotId.current === targetBotId && activeGroupId.current === targetGroupId;
   }
+
+  // The route draws the title from the screen's first frame; the chat feeds it its own data.
+  const titleComposing = Boolean(botId) && composingBots.split(",").includes(botId ?? "");
+  useLayoutEffect(
+    () =>
+      publishChatTitle(route.key, {
+        bot: titleBot,
+        status: currentBotStatus,
+        composing: titleComposing,
+        name: titleName,
+        members: groupMembers,
+        // The title opens the chat's own settings: the group's in a group, the bot's otherwise.
+        settings: chatSettingsRoute({ groupId, botId, readOnly }),
+      }),
+    [
+      route.key,
+      botId,
+      groupId,
+      readOnly,
+      titleBot,
+      currentBotStatus,
+      titleComposing,
+      titleName,
+      groupMembers,
+    ],
+  );
 
   useLayoutEffect(() => {
     navigation.setOptions({
       title: displayName || t("Thread"),
       headerTitleAlign: "center",
       ...threadEdgeOptions(),
-      headerTitle: () => (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={!inGroup && botId ? t("Chat settings") : displayName || t("Thread")}
-          disabled={readOnly || inGroup || !botId}
-          onPress={() => {
-            if (readOnly || !botId || inGroup) return;
-            router.push({ pathname: "/bot-settings", params: { botId } });
-          }}
-        >
-          <GlassSurface style={styles.titleCapsule} fallbackStyle={styles.titleCapsuleFill}>
-            {!inGroup && currentBot ? (
-              <BotAvatar
-                color={currentBot.color}
-                identity={currentBot.id}
-                size={28}
-                status={currentBotStatus}
-                muted={currentBot.notifyOnFinish === false}
-              />
-            ) : null}
-            <Text
-              maxFontSizeMultiplier={HEADER_TITLE_MAX_FONT_SCALE}
-              numberOfLines={1}
-              style={styles.title}
-            >
-              {displayName || t("Thread")}
-            </Text>
-          </GlassSurface>
-        </Pressable>
-      ),
-      ...(Platform.OS === "ios" && !readOnly && (!inGroup || iosAtLeast(26))
-        ? {
-            unstable_headerRightItems: () => [
-              inGroup
-                ? {
-                    type: "button" as const,
-                    accessibilityLabel: t("Group settings"),
-                    icon: { type: "sfSymbol" as const, name: "gearshape" },
-                    onPress: () =>
-                      router.push({
-                        pathname: "/group-settings",
-                        params: { groupId: groupId ?? "" },
-                      }),
-                  }
-                : {
-                    type: "menu" as const,
-                    accessibilityLabel: t("Bot actions"),
-                    icon: { type: "sfSymbol" as const, name: "ellipsis" },
-                    disabled: !botId,
-                    menu: {
-                      items: botActions.map((action) => ({
-                        type: "action" as const,
-                        label: action.text,
-                        destructive: action.destructive,
-                        ...(action.text === t("Open computer")
-                          ? { icon: { type: "sfSymbol" as const, name: "desktopcomputer" } }
-                          : {}),
-                        onPress: action.onPress,
-                      })),
-                    },
-                  },
-            ],
-          }
-        : {}),
-      headerRight: () =>
-        inGroup ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={t("Group settings")}
-            hitSlop={8}
-            onPress={() =>
-              router.push({
-                pathname: "/group-settings",
-                params: { groupId: groupId ?? "" },
-              })
-            }
-          >
-            <NativeSymbol
-              ios="gearshape"
-              android="settings-outline"
-              size={21}
-              color={tokens.foreground}
-            />
-          </Pressable>
-        ) : (
-          <View style={styles.headerActions}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={t("Bot actions")}
-              hitSlop={8}
-              onPress={showBotActions}
-            >
-              <NativeSymbol
-                ios="ellipsis"
-                android="ellipsis-horizontal"
-                size={21}
-                color={tokens.foreground}
-              />
-            </Pressable>
-          </View>
-        ),
-      ...(split
-        ? {
-            headerBackVisible: false,
-            headerLeft: () => (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={inboxHidden ? t("Show chats") : t("Hide chats")}
-                hitSlop={8}
-                onPress={() => setInboxHidden(!inboxHidden)}
-              >
-                <NativeSymbol
-                  ios={inboxHidden ? "sidebar.left" : "arrow.up.left.and.arrow.down.right"}
-                  android={inboxHidden ? "contract-outline" : "expand-outline"}
-                  size={21}
-                  color={tokens.foreground}
-                />
-              </Pressable>
-            ),
-          }
-        : // Folding back takes the list away, so the chat gets its back button again.
-          { headerBackVisible: true, headerLeft: undefined }),
+      ...threadHeaderRight({
+        inGroup,
+        readOnly,
+        hasBot: Boolean(botId),
+        t,
+        color: tokens.foreground,
+        rowStyle: styles.headerActions,
+        onGroupSettings: () =>
+          router.push({ pathname: "/group-settings", params: { groupId: groupId ?? "" } }),
+        onBotActions: showBotActions,
+        menuActions: botActions,
+        computerLabel: t("Open computer"),
+      }),
       ...(readOnly
         ? trailingHeaderOptions(t("Restore"), () => void restoreConversation(), restoring)
         : {}),
     });
   }, [
-    split,
-    inboxHidden,
     readOnly,
     restoring,
     botId,
     currentBot,
     currentBotStatus,
+    composingBots,
     displayName,
     groupId,
     inGroup,
@@ -1135,6 +1083,7 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
       onPress: () =>
         void rpc("bots/archive", { botId })
           .then(() => {
+            removeFromSearchInbox(botId);
             notifyArchivedChatsChanged();
             leaveBot();
           })
@@ -1260,19 +1209,24 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
       return;
     if (target.groupId && activeGroupId.current !== target.groupId) return;
     if (target.botId && activeBotId.current !== target.botId) return;
-    const targetInPage = page.messages.some((message) => message.id === target.messageId);
+    // A relay's dropped marker (e.g. a search hit) lands on its "Messaged X" receipt.
+    const messageId = jumpTargetId(
+      foldPeerReplies(page.messages, { includePeerReceipts: true }),
+      target.messageId,
+    );
+    const targetInPage = page.messages.some((message) => message.id === messageId);
     const opened = targetInPage ? openThreadWindow(snap, page) : null;
     expandedHistoryThread.current = targetInPage ? page.threadId : null;
     pinnedAroundRef.current = opened
       ? {
           ...threadTarget,
-          messageId: target.messageId,
+          messageId,
           threadId: page.threadId,
           newerCursor: opened.newerCursor,
         }
       : null;
-    jumpAnchor.current.begin(targetInPage ? target.messageId : null);
-    jumpScrollTarget.current = targetInPage ? target.messageId : null;
+    jumpAnchor.current.begin(targetInPage ? messageId : null);
+    jumpScrollTarget.current = targetInPage ? messageId : null;
     newerLoadFailed.current = false;
     joinPinnedAfterLayout.current = null;
     pinnedScrollMetrics.current = { offset: 0, viewport: 0, content: 0 };
@@ -1282,7 +1236,7 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
     const next = opened?.snapshot ?? snap;
     // A reply folded under its peer marker is only drawn once the marker is expanded.
     const markerId = targetInPage
-      ? foldPeerReplies(next.messages, { includePeerReceipts: true }).markerOf.get(target.messageId)
+      ? foldPeerReplies(next.messages, { includePeerReceipts: true }).markerOf.get(messageId)
       : undefined;
     if (markerId) {
       setExpandedPeerMarkers((expanded) =>
@@ -1406,24 +1360,81 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
     }
   }
 
+  // After "Mark as unread" on a message, the chat stays unread for the rest of this visit. The
+  // hold names the visit, so returning to the chat (a new visit) reads it again.
+  const heldUnread = useRef<number | null>(null);
+  const [markedUnread, setMarkedUnread] = useState<{ visit: number; messageId: string } | null>(
+    null,
+  );
+  const markedUnreadMessageId =
+    markedUnread?.visit === readVisit.current.visit ? markedUnread.messageId : undefined;
+  const markUnreadFrom = (message: MobileMessage) => {
+    const visit = readVisit.current.visit;
+    const target = groupId ?? botId;
+    if (!target) return;
+    heldUnread.current = visit;
+    // Through the chat's read queue, so a read already sent lands first and this one wins.
+    void readInOrder(target, () =>
+      rpc("threads/markUnread", {
+        ...(groupId ? { groupId } : { botId: botId! }),
+        messageId: message.id,
+      }),
+    )
+      .then(() => {
+        if (readVisit.current.visit === visit) {
+          setMarkedUnread({ visit, messageId: message.id });
+        }
+      })
+      .catch((err) => {
+        if (heldUnread.current === visit) heldUnread.current = null;
+        Alert.alert(t("Could not update chat"), errorText(err, t("Try again.")));
+      });
+  };
+
   const markReadIfVisible = useCallback(() => {
-    if (readOnly || AppState.currentState !== "active" || !navigation.isFocused()) return;
+    if (
+      readOnly ||
+      heldUnread.current === readVisit.current.visit ||
+      AppState.currentState !== "active" ||
+      !navigation.isFocused()
+    )
+      return;
     const target = groupId ?? botId;
     if (!target || readVisibleTarget.current === target) return;
     readVisibleTarget.current = target;
+    const visit = readVisit.current.visit;
     if (activeThreadId.current) {
       void dismissThreadNotifications({ threadId: activeThreadId.current }).catch(() => undefined);
     }
-    if (groupId) {
-      void rpc("threads/markRead", { groupId }).catch(() => {
+    // A read that waited in the queue skips once the user has left the chat, or marked it
+    // unread meanwhile.
+    void readInOrder(target, () =>
+      readVisit.current.visit === visit &&
+      heldUnread.current !== visit &&
+      AppState.currentState === "active" &&
+      navigation.isFocused()
+        ? rpc<{ unreadAfterSeq?: number | null }>(
+            "threads/markRead",
+            groupId ? { groupId } : { botId: botId! },
+          )
+        : Promise.resolve(null),
+    )
+      .then((answer) => {
+        if (!answer) {
+          if (readVisibleTarget.current === target) readVisibleTarget.current = null;
+          return;
+        }
+        setReadBoundary((current) =>
+          settleReadBoundary(current, readVisit.current.visit, {
+            visit,
+            seq: answer.unreadAfterSeq ?? null,
+          }),
+        );
+      })
+      .catch(() => {
         if (readVisibleTarget.current === target) readVisibleTarget.current = null;
       });
-      return;
-    }
-    void rpc("threads/markRead", { botId: botId! }).catch(() => {
-      if (readVisibleTarget.current === target) readVisibleTarget.current = null;
-    });
-  }, [botId, groupId, navigation, readOnly]);
+  }, [botId, groupId, navigation, readInOrder, readOnly]);
 
   useEffect(() => {
     if (!notificationThreadId || AppState.currentState !== "active" || !navigation.isFocused())
@@ -1537,30 +1548,16 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
               if (abort.signal.aborted || sessionGeneration !== currentSessionGeneration()) return;
               cursor = Math.max(cursor, event.seq ?? -1);
               retryMs = 250;
-              if (
-                event.type === "thread.progress" ||
-                event.type === "agent.tool.called" ||
-                event.type === "agent.tool.completed" ||
-                event.type === "thread.message.created" ||
-                event.type === "thread.message.updated" ||
-                event.type === "thread.message.reaction" ||
-                event.type === "thread.subagent" ||
-                event.type === "thread.cloud_agent" ||
-                event.type === "thread.cleared" ||
-                event.type === "run.waiting_input" ||
-                event.type === "computer.takeover.requested" ||
-                event.type === "computer.takeover.released" ||
-                isRunTerminalEvent(event)
-              ) {
-                if (event.type === "thread.cleared") {
-                  expandedHistoryThread.current = null;
-                  pinnedAroundRef.current = null;
-                  jumpScrollTarget.current = null;
-                  jumpAnchor.current.release();
-                  historyEpoch.current += 1;
-                }
-                commitSnap(applyMobileThreadEvent(snapRef.current, event));
+              if (event.type === "thread.cleared") {
+                expandedHistoryThread.current = null;
+                pinnedAroundRef.current = null;
+                jumpScrollTarget.current = null;
+                jumpAnchor.current.release();
+                historyEpoch.current += 1;
               }
+              const previous = snapRef.current;
+              const reduced = applyMobileThreadEvent(previous, event);
+              if (reduced !== previous) commitSnap(reduced);
               liveCursor.current = cursor;
               if (event.type === "bot.updated") {
                 void refreshMentionBots();
@@ -1712,17 +1709,22 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
 
   function runSlashAction(action: SlashActionId) {
     if (action === "chat-settings") {
-      if (inGroup && groupId) {
-        router.push({ pathname: "/group-settings", params: { groupId } });
-      } else if (botId) {
-        router.push({ pathname: "/bot-settings", params: { botId } });
-      }
+      const settings = chatSettingsRoute({ groupId, botId });
+      if (settings) router.push(settings);
       return;
     }
     router.push({
       pathname: "/account",
       params: action === "settings-usage" ? { focus: "usage" } : undefined,
     });
+  }
+
+  function followOwnSend() {
+    // Writing in the chat means the user has caught up, so the "New" divider goes.
+    setReadBoundary({ visit: readVisit.current.visit, seq: null });
+    if (pinnedAroundRef.current || jumpScrollTarget.current) showLatest();
+    performScroll(scrollBehavior.current.onOwnSend());
+    publishThreadScrollState(scrollBehavior.current.state());
   }
 
   async function send() {
@@ -1793,9 +1795,7 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
     setReplyTarget(null);
     setReplyQuote(null);
     setAttachmentNotice(null);
-    if (pinnedAroundRef.current) showLatest();
-    performScroll(scrollBehavior.current.jumpToLatest());
-    publishThreadScrollState(scrollBehavior.current.state());
+    followOwnSend();
     await deliver(attempt);
   }
 
@@ -1876,6 +1876,7 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
       const targetBotId = botId;
       const targetGroupId = groupId;
       if (readOnly || (!targetBotId && !targetGroupId) || !message.runId) return;
+      setReadBoundary({ visit: readVisit.current.visit, seq: null });
       await rpc("threads/answer", {
         ...(targetGroupId ? { groupId: targetGroupId } : { botId: targetBotId! }),
         runId: message.runId,
@@ -2045,23 +2046,49 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
     if (!targetKey) return;
     const result = await picker(activePendingAttachments.length, attachmentMaxBytes(uploadConfig));
     if ((groupId ?? botId) !== targetKey) return;
-    if (result.attachments.length) {
+    // Two drops can overlap, so the room left is settled against the draft as it
+    // is now, not as it was when this read began.
+    const room = Math.max(
+      0,
+      ATTACHMENT_MAX_COUNT - attachmentsForThread(pendingAttachmentsRef.current, targetKey).length,
+    );
+    const accepted = result.attachments.slice(0, room);
+    if (accepted.length) {
       setPendingAttachments((current) => [
         ...current,
-        ...result.attachments.map((attachment) => ({
+        ...accepted.map((attachment) => ({
           ...attachment,
           threadKey: targetKey,
         })),
       ]);
     }
+    const skipped = [
+      ...result.skipped,
+      ...result.attachments.slice(room).map((attachment) => ({
+        name: attachment.name,
+        reason: attachmentCountSkipReason(),
+      })),
+    ];
     setAttachmentNotice(
-      result.skipped.length
+      skipped.length
         ? t("Skipped {items}", {
-            items: result.skipped.map((item) => formatAttachmentSkip(item)).join(", "),
+            items: skipped.map((item) => formatAttachmentSkip(item)).join(", "),
           })
         : null,
     );
   }
+
+  useFileDrop(
+    threadKey ?? null,
+    ({ files, skipped }) => {
+      void addAttachments((count, maxBytes) => readDroppedFiles(files, count, maxBytes, skipped));
+    },
+    {
+      enabled: !readOnly && Boolean(groupId ?? botId),
+      maxBytes: attachmentMaxBytes(uploadConfig),
+      maxFiles: ATTACHMENT_MAX_COUNT,
+    },
+  );
 
   const answerableAskIds = useMemo(() => answerableAskMessageIds(snap), [snap]);
   const dismissableAskIds = useMemo(() => dismissableAskMessageIds(snap, userId), [snap, userId]);
@@ -2075,9 +2102,21 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
   }
   function openErrorModel() {
     setRunErrorDetailsOpen(false);
-    router.push({ pathname: "/bot-settings", params: { botId: snap?.run?.botId ?? botId ?? "" } });
+    router.push({
+      pathname: "/bot-settings",
+      params: { botId: snap?.run?.botId ?? botId ?? "", focus: "model" },
+    });
   }
   const separatorIds = useMemo(() => timeSeparatorIds(visibleMessages), [visibleMessages]);
+  const unreadDividerId = useMemo(
+    () =>
+      unreadDividerMessageId(
+        visibleMessages,
+        readBoundary?.visit === readVisit.current.visit ? readBoundary.seq : null,
+        snap?.olderCursor ?? null,
+      ),
+    [visibleMessages, readBoundary, snap?.olderCursor, threadKey],
+  );
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(
@@ -2139,7 +2178,7 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
     if (jumpAnchor.current.holds() && !targetDrawn) {
       jumpAnchor.current.release();
       jumpScrollTarget.current = null;
-    } else if (jumpAnchor.current.blocksPaging(targetDrawn, headerHeight + 24)) {
+    } else if (jumpAnchor.current.blocksPaging(targetDrawn, headerClearance.anchor)) {
       return;
     }
     const { offset, viewport, content } = pinnedScrollMetrics.current;
@@ -2182,10 +2221,10 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
   }
 
   async function reactToMessage(message: MobileMessage, reaction: MessageReaction) {
-    if (readOnly) return;
+    if (readOnly) return false;
     const targetBotId = botId;
     const targetGroupId = groupId;
-    if (!targetBotId && !targetGroupId) return;
+    if (!targetBotId && !targetGroupId) return false;
     try {
       const result = await rpc<{ ok: true; runIds?: string[] }>("threads/react", {
         ...(targetGroupId ? { groupId: targetGroupId } : { botId: targetBotId! }),
@@ -2197,14 +2236,67 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
         // The reaction is saved; a failed refresh is caught up by live events.
         await refresh().catch(() => {});
       }
+      return true;
     } catch (err) {
-      if (!isCurrentTarget(targetBotId, targetGroupId)) return;
+      if (!isCurrentTarget(targetBotId, targetGroupId)) return false;
       Alert.alert(t("Could not update reaction"), errorText(err, t("Try again.")));
+      return false;
     }
   }
 
   // Event actions read the latest committed screen state without invalidating settled rows.
   const currentRowActions: MessageRowActions = {
+    helperToggle: (measure, toggle, opening) => {
+      if (Platform.OS !== "ios") {
+        toggle();
+        return;
+      }
+      measure((before) => {
+        const correct = () => {
+          requestAnimationFrame(() =>
+            measure((after, cardBottom) => {
+              helperViewport.current?.measureInWindow((_x, y, _width, height) => {
+                const target = opening
+                  ? helperOpenTarget({
+                      headerY: before,
+                      cardBottom: cardBottom + before - after,
+                      topLimit: headerClearance.anchor,
+                      visibleBottom: y + height - (readOnly ? insets.bottom : 0),
+                    })
+                  : before;
+                if (showPinnedPage) {
+                  pinnedScroll.current?.scrollTo({
+                    y: helperHeaderOffset(pinnedScrollMetrics.current.offset, after, target),
+                    animated: false,
+                  });
+                } else {
+                  const offset = helperHeaderOffset(helperScrollOffset.current, target, after);
+                  scroll.current?.scrollToOffset({ offset, animated: false });
+                  // The settled list ignores this scroll's event, so record where it now sits.
+                  helperScrollOffset.current = offset;
+                  const previous = scrollBehavior.current.state();
+                  const next = scrollBehavior.current.onUserScroll(offset);
+                  if (reconcileThreadScrollState(previous, next) !== previous) {
+                    publishThreadScrollState(next);
+                  }
+                }
+              });
+            }),
+          );
+        };
+        helperResize.current = correct;
+        toggle();
+        // A helper without a body may not change the list's content size.
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            if (helperResize.current === correct) {
+              helperResize.current = null;
+              correct();
+            }
+          }),
+        );
+      });
+    },
     reply: (message) => {
       setReplyTarget(message);
       setReplyQuote(null);
@@ -2212,7 +2304,8 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
     quote: setQuoteTarget,
     select: setSelectableText,
     speak,
-    react: (message, reaction) => void reactToMessage(message, reaction),
+    react: (message, reaction) => reactToMessage(message, reaction),
+    markUnread: markUnreadFrom,
     answer: answerMessage,
     openBot,
     openComputer,
@@ -2223,7 +2316,11 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
         params: { ...target, ...(groupId ? { groupId } : { botId }) },
       }),
     jump: (messageId) => {
-      void applyMessageJump({ botId, groupId, messageId }).catch(() => undefined);
+      void applyMessageJump({
+        botId,
+        groupId,
+        messageId: reactionView.foldedInto.get(messageId) ?? messageId,
+      }).catch(() => undefined);
     },
     dismissChoice: (messageId, question) => {
       setDismissedChoiceQuestions((current) => {
@@ -2236,6 +2333,13 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
         return next;
       });
     },
+    openPeerChat: (peer) => {
+      if (!botId) return;
+      router.push({
+        pathname: "/peer-chat",
+        params: { botId, botName: displayName, ...peer },
+      });
+    },
     togglePeerReplies: (markerId) => {
       setExpandedPeerMarkers((expanded) => {
         const next = new Set(expanded);
@@ -2244,14 +2348,19 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
       });
     },
     layout: (messageId, y, index) => {
-      const offset = jumpAnchor.current.onMessageLayout(messageId, y, index, headerHeight + 24);
+      const offset = jumpAnchor.current.onMessageLayout(
+        messageId,
+        y,
+        index,
+        headerClearance.anchor,
+      );
       if (offset == null) return;
       scrollPinnedTo(offset);
       setHighlightedMessageId(messageId);
       if (highlightTimer.current) clearTimeout(highlightTimer.current);
       highlightTimer.current = setTimeout(() => setHighlightedMessageId(null), 1200);
       requestAnimationFrame(() => {
-        const again = jumpAnchor.current.align(headerHeight + 24);
+        const again = jumpAnchor.current.align(headerClearance.anchor);
         if (again != null) scrollPinnedTo(again);
       });
     },
@@ -2262,11 +2371,14 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
   });
   const rowActions = useMemo<MessageRowActions>(
     () => ({
+      helperToggle: (measure, toggle, opening) =>
+        rowActionsRef.current.helperToggle(measure, toggle, opening),
       reply: (message) => rowActionsRef.current.reply(message),
       quote: (message) => rowActionsRef.current.quote(message),
       select: (text) => rowActionsRef.current.select(text),
       speak: (message) => rowActionsRef.current.speak(message),
       react: (message, reaction) => rowActionsRef.current.react(message, reaction),
+      markUnread: (message) => rowActionsRef.current.markUnread(message),
       answer: (message, answer, username, dismiss) =>
         rowActionsRef.current.answer(message, answer, username, dismiss),
       openBot: (id, name) => rowActionsRef.current.openBot(id, name),
@@ -2276,6 +2388,7 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
       jump: (id) => rowActionsRef.current.jump(id),
       dismissChoice: (id, question) => rowActionsRef.current.dismissChoice(id, question),
       togglePeerReplies: (id) => rowActionsRef.current.togglePeerReplies(id),
+      openPeerChat: (peer) => rowActionsRef.current.openPeerChat(peer),
       layout: (id, y, index) => rowActionsRef.current.layout(id, y, index),
     }),
     [],
@@ -2325,9 +2438,18 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
           canDismiss={dismissableAskIds.has(message.id)}
           highlighted={highlightedMessageId === message.id}
           separator={separatorIds.has(message.id)}
+          headerAdjacent={threadHeaderFloats() && message.id === visibleMessages[0]?.id}
+          unreadDivider={message.id === unreadDividerId}
+          markedUnread={message.id === markedUnreadMessageId}
           replyAuthor={replyAuthor}
           replyFallbackText={parent ? previewMessageText(parent) : undefined}
+          waitingForUser={[...(snap?.activeRuns ?? []), ...(snap?.run ? [snap.run] : [])].some(
+            (run) =>
+              run.id === message.runId &&
+              (run.status === "waiting_input" || run.status === "waiting_takeover"),
+          )}
           messageReactions={messageReactions}
+          mentions={reactionView.mentions.get(message.id)}
           peerReplies={
             peerTranscript.folded.has(message.id)
               ? expandedPeerMarkers.has(message.id)
@@ -2338,6 +2460,7 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
           activityBotId={activityBotId}
           activityColor={activityBot?.color}
           activityStatus={activityStatus}
+          userBubble={userBubble}
           inGroup={inGroup}
           columnWidth={columnWidth}
           enableJump={options?.enableJump ?? false}
@@ -2353,7 +2476,7 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
       snap?.run,
       mentionBots,
       displayName,
-      reactionView.reactions,
+      reactionView,
       peerTranscript,
       expandedPeerMarkers,
       inGroup,
@@ -2361,6 +2484,7 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
       groupId,
       currentBot,
       currentBotStatus,
+      userBubble,
       rowActions,
       readOnly,
       onCall,
@@ -2368,6 +2492,9 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
       dismissableAskIds,
       highlightedMessageId,
       separatorIds,
+      visibleMessages[0]?.id,
+      unreadDividerId,
+      markedUnreadMessageId,
       columnWidth,
       t,
       locale,
@@ -2376,23 +2503,35 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
   const renderItem = useCallback(
     ({ item }: ListRenderItemInfo<ThreadItem<MobileMessage>>) =>
       item.kind === "voiceChat" ? (
-        <View style={messageListStyles.row}>
+        <View
+          style={[
+            messageListStyles.row,
+            threadHeaderFloats() && item.messages[0]?.id === visibleMessages[0]?.id
+              ? { marginTop: 0 }
+              : undefined,
+          ]}
+        >
           {item.messages[0] && separatorIds.has(item.messages[0].id) ? (
             <TimeSeparator createdAt={item.messages[0].createdAt} />
+          ) : null}
+          {voiceChatHoldsMessage(item, unreadDividerId) ? (
+            <UnreadDivider
+              afterSeparator={Boolean(item.messages[0] && separatorIds.has(item.messages[0].id))}
+            />
           ) : null}
           <VoiceChatCard group={item} />
         </View>
       ) : (
         renderMessageRow(item.message)
       ),
-    [renderMessageRow, separatorIds],
+    [renderMessageRow, separatorIds, unreadDividerId, visibleMessages[0]?.id],
   );
   const listContentStyle = useMemo(
     () => ({
-      paddingBottom: headerHeight + 8,
+      paddingBottom: headerClearance.padding,
       paddingTop: readOnly ? insets.bottom + 16 : 16,
     }),
-    [headerHeight, readOnly, insets.bottom],
+    [headerClearance.padding, readOnly, insets.bottom],
   );
 
   const workingFooter =
@@ -2400,21 +2539,20 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
       <View
         accessibilityLabel={t("{name} is working", { name: currentBot.name })}
         accessibilityRole="text"
-        style={{
-          flexDirection: "row",
-          alignItems: "center",
-          gap: 8,
-          minHeight: 40,
-          marginTop: 12,
-        }}
+        style={{ minHeight: 40, marginTop: 12, justifyContent: "center" }}
       >
-        <BotAvatar
-          color={currentBot.color}
-          identity={currentBot.id}
-          size={28}
-          status={currentBotStatus}
+        <ActivityMark
+          bots={[
+            {
+              id: currentBot.id,
+              color: currentBot.color,
+              status: currentBotStatus,
+              composing: composingBots.split(",").includes(currentBot.id),
+            },
+          ]}
+          atBottom={!threadScrollState.detached}
+          label={activityLine ?? t("Working…")}
         />
-        <WorkingIndicator />
       </View>
     ) : inGroup && workingGroupBots.length > 0 ? (
       <View
@@ -2424,27 +2562,18 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
             : t("{count} agents working", { count: workingGroupBots.length })
         }
         accessibilityRole="text"
-        style={{
-          flexDirection: "row",
-          alignItems: "center",
-          minHeight: 40,
-          marginTop: 12,
-        }}
+        style={{ minHeight: 40, marginTop: 12, justifyContent: "center" }}
       >
-        <View style={{ flexDirection: "row", paddingRight: 8 }}>
-          {workingGroupBots.map((bot, index) => (
-            <View
-              key={bot.botId}
-              style={{
-                marginLeft: index === 0 ? 0 : -8,
-                zIndex: workingGroupBots.length - index,
-              }}
-            >
-              <BotAvatar color={bot.color} identity={bot.botId} size={28} status={bot.status} />
-            </View>
-          ))}
-        </View>
-        <WorkingIndicator />
+        <ActivityMark
+          bots={workingGroupBots.map((bot) => ({
+            id: bot.botId,
+            color: bot.color,
+            status: bot.status,
+            composing: composingBots.split(",").includes(bot.botId),
+          }))}
+          atBottom={!threadScrollState.detached}
+          label={activityLine ?? t("Working…")}
+        />
       </View>
     ) : null;
 
@@ -2455,12 +2584,18 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
         onPress={() => void loadOlderMessages()}
         style={{
           alignSelf: "center",
+          alignItems: "center",
+          flexDirection: "row",
+          gap: 8,
           paddingHorizontal: 12,
           paddingVertical: 10,
         }}
       >
+        {loadingOlder ? (
+          <ActivityIndicator color={tokens.mutedForeground} accessibilityLabel={t("Loading…")} />
+        ) : null}
         <Text style={{ color: tokens.mutedForeground, fontSize: 13 }}>
-          {loadingOlder ? t("Loading…") : t("Load earlier messages")}
+          {t("Load earlier messages")}
         </Text>
       </Pressable>
     ) : null;
@@ -2470,8 +2605,12 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
       key={attempt.clientNonce}
       attempt={attempt}
       needsModel={needsModel}
-      onRetry={() => void deliver(attempt, true)}
+      onRetry={() => {
+        followOwnSend();
+        void deliver(attempt, true);
+      }}
       onDelete={() => feedback.discard(attempt)}
+      userBubble={userBubble}
     />
   ));
 
@@ -2505,15 +2644,25 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
         // Padding always settles to zero. "height" stays shrunk when the keyboard hides without
         // move frames, such as when a pushed screen closes with its own keyboard up.
         behavior="padding"
-        keyboardVerticalOffset={keyboardLayout.offset}
+        keyboardVerticalOffset={threadKeyboardOffset({
+          os: Platform.OS,
+          floatingHeader: threadHeaderFloats(),
+          nativeHeaderHeight,
+          measuredOffset: keyboardLayout.offset,
+        })}
         style={{
           flex: 1,
           backgroundColor: tokens.background,
-          paddingHorizontal: 20 + columnInset,
+          paddingLeft: 20 + columnInsets.left,
+          paddingRight: 20 + columnInsets.right,
         }}
       >
         {/* The floor keeps a tall suggestion list from sliding under the transparent header. */}
-        <View style={{ flex: 1, minHeight: headerHeight, position: "relative" }}>
+        <View
+          ref={helperViewport}
+          collapsable={false}
+          style={{ flex: 1, minHeight: headerClearance.minHeight, position: "relative" }}
+        >
           {showPinnedPage ? (
             <ThreadScrollSurface
               key={`pinned:${jumpScrollTarget.current ?? pinnedTarget?.messageId ?? threadKey}`}
@@ -2525,7 +2674,7 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
                 // A pinned page always shows the floating jump button (44pt, 12pt from the
                 // bottom), so its last message must be able to scroll clear of it.
                 contentContainerStyle={{
-                  paddingTop: headerHeight + 8,
+                  paddingTop: headerClearance.padding,
                   paddingBottom: 12 + 44 + 16,
                 }}
                 keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
@@ -2537,7 +2686,13 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
                 }}
                 onContentSizeChange={(_, height) => {
                   pinnedScrollMetrics.current.content = height;
-                  const jumpOffset = jumpAnchor.current.align(headerHeight + 24);
+                  const correctHelper = helperResize.current;
+                  if (correctHelper) {
+                    helperResize.current = null;
+                    correctHelper();
+                    return;
+                  }
+                  const jumpOffset = jumpAnchor.current.align(headerClearance.anchor);
                   if (jumpOffset != null) scrollPinnedTo(jumpOffset);
                   const armedAt = joinPinnedAfterLayout.current;
                   if (armedAt != null && height !== armedAt) {
@@ -2622,6 +2777,7 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
                   liveScrollBack.current.onDragStart(event.nativeEvent);
                 }}
                 onScroll={(event) => {
+                  helperScrollOffset.current = event.nativeEvent.contentOffset.y;
                   if (liveScrollBack.current.onScroll(event.nativeEvent) && Platform.OS === "ios") {
                     KeyboardController.dismiss();
                   }
@@ -2629,7 +2785,7 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
                 }}
                 // Keep tracking after release: a fling can cross the threshold mid-momentum.
                 onScrollEndDrag={(event) => {
-                  updateUserScroll(event);
+                  if (scrollBehavior.current.isTrackingUserScroll()) updateUserScroll(event);
                   scrollBehavior.current.onUserDragEnd();
                   liveScrollBack.current.onDragEnd();
                   scheduleScrollIdle();
@@ -2650,6 +2806,13 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
                   publishThreadScrollState(scrollBehavior.current.state());
                 }}
                 onContentSizeChange={(_, height) => {
+                  const correctHelper = helperResize.current;
+                  if (correctHelper) {
+                    helperResize.current = null;
+                    publishThreadScrollState(scrollBehavior.current.onContentSizeChanged(height));
+                    correctHelper();
+                    return;
+                  }
                   publishThreadScrollState(scrollBehavior.current.onContentSizeChanged(height));
                   if (loadingOlderContent.current) {
                     loadingOlderContent.current = false;
@@ -2664,7 +2827,16 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
                             pinnedAroundRef.current.groupId === groupId))) ||
                       expandedHistoryThread.current === snap?.threadId,
                   );
-                  performScroll(scrollBehavior.current.onContentChanged(blocked, latestMessageId));
+                  performScroll(
+                    scrollBehavior.current.onContentChanged(
+                      blocked,
+                      latestThreadRowKey(
+                        latestMessageId,
+                        feedback.unsentSends.map((attempt) => attempt.clientNonce),
+                        isOwnThreadMessage(latestMessage, userId),
+                      ),
+                    ),
+                  );
                   publishThreadScrollState(scrollBehavior.current.state());
                 }}
                 ListFooterComponent={loadEarlierControl}
@@ -2829,6 +3001,7 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
             ref={composerRef}
             agentSkills={agentSkills}
             composerMentionTargets={composerMentionTargets}
+            onMentionRequested={onMentionRequested}
             composerPrompt={composerPrompt}
             replyTargetId={replyTarget?.id}
             replyQuote={replyQuote}
@@ -2921,10 +3094,9 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
             }}
           />
         ) : null}
+        {/* The header buttons float over the chat; only the clock gets a soft backdrop. */}
         {headerHeight > 0 ? (
-          <View pointerEvents="none" style={[styles.headerFade, { height: headerHeight }]}>
-            <View style={styles.headerFadeEdge} />
-          </View>
+          <View pointerEvents="none" style={[styles.statusBarFade, { height: insets.top }]} />
         ) : null}
       </KeyboardAvoidingView>
     </View>
@@ -3024,7 +3196,7 @@ function previewMessageText(message: MobileMessage): string {
     .flatMap((block) => {
       if (block.kind === "channel_message" && block.text) {
         return [
-          `${messagingProviderLabel(block.provider, block.transport)} · ${block.fromLabel}: ${block.text}`,
+          `${block.fromLabel} (${messagingProviderLabel(block.provider, block.transport)}): ${block.text}`,
         ];
       }
       if (block.kind === "text" && block.text) {
@@ -3079,11 +3251,17 @@ function threadItemKey(item: ThreadItem<MobileMessage>) {
 }
 
 type MessageRowActions = {
+  helperToggle: (
+    measure: (done: (y: number, cardBottom: number) => void) => void,
+    toggle: () => void,
+    opening: boolean,
+  ) => void;
   reply: (message: MobileMessage) => void;
   quote: (message: MobileMessage) => void;
   select: (text: string) => void;
   speak: (message: MobileMessage) => void;
-  react: (message: MobileMessage, reaction: MessageReaction) => void;
+  react: (message: MobileMessage, reaction: MessageReaction) => Promise<boolean>;
+  markUnread: (message: MobileMessage) => void;
   answer: (
     message: MobileMessage,
     answer: string,
@@ -3097,6 +3275,7 @@ type MessageRowActions = {
   jump: (messageId: string) => void;
   dismissChoice: (messageId: string, question: string) => void;
   togglePeerReplies: (markerId: string) => void;
+  openPeerChat: (peer: { peerBotId: string; peerBotName: string }) => void;
   layout: (messageId: string, y: number, index: number) => void;
 };
 
@@ -3116,14 +3295,20 @@ type MessageRowProps = {
   canDismiss: boolean;
   highlighted: boolean;
   separator: boolean;
+  headerAdjacent: boolean;
+  unreadDivider: boolean;
+  markedUnread: boolean;
   replyAuthor: string;
   replyFallbackText?: string;
+  waitingForUser: boolean;
   messageReactions?: ReadonlyMap<MessageReaction, number>;
+  mentions?: readonly ChildBotBlock[];
   /** Set on a received marker whose peer run has folded replies. */
   peerReplies?: "collapsed" | "expanded";
   activityBotId?: string;
   activityColor?: string;
   activityStatus?: MobileBot["status"];
+  userBubble?: UserBubble;
   inGroup: boolean;
   columnWidth: number;
   enableJump: boolean;
@@ -3155,13 +3340,19 @@ const MessageRow = memo(function MessageRow({
   canDismiss,
   highlighted,
   separator,
+  headerAdjacent,
+  unreadDivider,
+  markedUnread,
   replyAuthor,
   replyFallbackText,
   messageReactions,
+  mentions,
+  waitingForUser,
   peerReplies,
   activityBotId,
   activityColor,
   activityStatus,
+  userBubble,
   inGroup,
   columnWidth,
   enableJump,
@@ -3186,10 +3377,20 @@ const MessageRow = memo(function MessageRow({
         : undefined,
     [actions, message.id, enableJump, index],
   );
-  const { actionProps, menu, onMenuAction } = useMemo<{
+  const [optimisticLike, setOptimisticLike] = useState(false);
+  const likeInFlight = useRef(false);
+  const reducedMotion = useReducedMotion();
+  const hasLike = messageReactions?.has("👍") ?? false;
+  useEffect(() => {
+    if (hasLike) setOptimisticLike(false);
+  }, [hasLike]);
+  const displayedReactions = new Map(messageReactions);
+  if (optimisticLike && !hasLike) displayedReactions.set("👍", 1);
+  const { actionProps, menu, onMenuAction, likeMessage } = useMemo<{
     actionProps: MessageActionProps;
     menu: ReturnType<typeof buildMessageContextMenu>;
     onMenuAction: (id: string) => void;
+    likeMessage?: () => void;
   }>(() => {
     const messageText = selectableMobileMessageText(message);
     const includeQuote =
@@ -3200,6 +3401,8 @@ const MessageRow = memo(function MessageRow({
     // The call already reads replies aloud; a second voice would talk over it.
     const includeSpeak = message.role === "bot" && !onCall && Boolean(blockText(message));
     const includeSelect = messageText.trim().length > 0;
+    // Any sent message can be marked unread; the next open starts New at the first reply from it.
+    const includeUnread = !readOnly && !markedUnread && canMarkMessageUnread(message);
     const reply = () => actions.reply(message);
     const quote = () => actions.quote(message);
     const speakMessage = () => actions.speak(message);
@@ -3212,6 +3415,7 @@ const MessageRow = memo(function MessageRow({
       if (text) void Clipboard.setStringAsync(text).catch(() => undefined);
     };
     const react = (reaction: MessageReaction) => actions.react(message, reaction);
+    const markUnread = () => actions.markUnread(message);
     // VoiceOver reads the bubble as one element and can't reach a code block's copy button.
     const codeBlocks = message.role === "user" ? [] : markdownCodeBlocks(blockText(message));
     const copyCode = () => {
@@ -3219,6 +3423,9 @@ const MessageRow = memo(function MessageRow({
     };
     const menuActions = [
       ...(!readOnly ? [{ name: "reply", text: t("Reply"), onPress: reply }] : []),
+      ...(includeUnread
+        ? [{ name: "unread", text: t("Mark as unread"), onPress: markUnread }]
+        : []),
       ...(includeQuote ? [{ name: "quote", text: t("Quote"), onPress: quote }] : []),
       ...(includeReact
         ? [
@@ -3253,6 +3460,7 @@ const MessageRow = memo(function MessageRow({
         quote: t("Quote"),
         speak: t("Speak message"),
         select: t("Select text"),
+        unread: t("Mark as unread"),
       },
       reactions: MESSAGE_REACTIONS,
       include: {
@@ -3261,6 +3469,7 @@ const MessageRow = memo(function MessageRow({
         react: includeReact,
         speak: includeSpeak,
         select: includeSelect,
+        unread: includeUnread,
       },
     });
     const openSheet = (event: GestureResponderEvent) =>
@@ -3278,6 +3487,16 @@ const MessageRow = memo(function MessageRow({
                     text: t("Reply"),
                     icon: "arrow-undo-outline" as const,
                     onPress: reply,
+                  },
+                ]
+              : []),
+            ...(includeUnread
+              ? [
+                  {
+                    name: "unread",
+                    text: t("Mark as unread"),
+                    icon: "mail-unread-outline" as const,
+                    onPress: markUnread,
                   },
                 ]
               : []),
@@ -3319,6 +3538,20 @@ const MessageRow = memo(function MessageRow({
       });
     return {
       menu,
+      likeMessage: canDoubleTapReact(includeReact, message.blocks, waitingForUser)
+        ? () => {
+            if (hasLike || optimisticLike || likeInFlight.current) return;
+            likeInFlight.current = true;
+            setOptimisticLike(true);
+            void react("👍")
+              .then((success) => {
+                if (!success) setOptimisticLike(false);
+              })
+              .finally(() => {
+                likeInFlight.current = false;
+              });
+          }
+        : undefined,
       onMenuAction: (id) => {
         const reaction = messageMenuReaction(id);
         if (reaction && (MESSAGE_REACTIONS as readonly string[]).includes(reaction)) {
@@ -3330,6 +3563,7 @@ const MessageRow = memo(function MessageRow({
         if (id === "quote") quote();
         if (id === "speak") speakMessage();
         if (id === "select") select();
+        if (id === "unread") markUnread();
       },
       actionProps: {
         onLongPress: Platform.OS === "ios" ? undefined : openSheet,
@@ -3342,18 +3576,31 @@ const MessageRow = memo(function MessageRow({
         },
       },
     };
-  }, [message, actions, readOnly, onCall, colorScheme, t, locale]);
+  }, [
+    message,
+    actions,
+    markedUnread,
+    readOnly,
+    onCall,
+    colorScheme,
+    t,
+    locale,
+    waitingForUser,
+    hasLike,
+    optimisticLike,
+  ]);
   return (
     <View
       key={message.id}
       onLayout={onLayout}
       style={{
         backgroundColor: highlighted ? tokens.muted : undefined,
-        marginTop: 12,
+        marginTop: headerAdjacent ? 0 : 12,
         width: "100%",
       }}
     >
       {separator ? <TimeSeparator createdAt={message.createdAt} /> : null}
+      {unreadDivider ? <UnreadDivider afterSeparator={separator} /> : null}
       <View
         style={{
           width: "100%",
@@ -3370,6 +3617,9 @@ const MessageRow = memo(function MessageRow({
               identity={activityBotId}
               size={inGroup ? 20 : 28}
               status={activityStatus}
+              motion="running"
+              composing={liveMessageComposing(message.blocks)}
+              pokeable
             />
           </View>
         ) : null}
@@ -3417,9 +3667,11 @@ const MessageRow = memo(function MessageRow({
             colorScheme={colorScheme}
             onAction={onMenuAction}
             onLongPress={actionProps.onLongPress}
+            onDoubleTap={messageHasInlineControls(message.blocks) ? undefined : likeMessage}
           >
             <ThreadReadOnlyContext.Provider value={readOnly}>
               <MessageBubble
+                mentions={mentions}
                 botId={bubbleBotId}
                 groupId={groupId}
                 message={message}
@@ -3437,11 +3689,15 @@ const MessageRow = memo(function MessageRow({
                 onPreviewImage={actions.previewImage}
                 peerReplies={peerReplies}
                 onTogglePeerReplies={actions.togglePeerReplies}
+                onOpenPeerChat={actions.openPeerChat}
                 actionProps={actionProps}
+                doubleTapSurface={Boolean(likeMessage)}
+                onHelperToggle={actions.helperToggle}
+                userBubble={userBubble}
               />
             </ThreadReadOnlyContext.Provider>
           </MessageContextMenu>
-          {messageReactions ? (
+          {displayedReactions.size > 0 ? (
             <View
               style={{
                 flexDirection: "row",
@@ -3451,8 +3707,13 @@ const MessageRow = memo(function MessageRow({
                 justifyContent: message.role === "user" ? "flex-end" : "flex-start",
               }}
             >
-              {[...messageReactions].map(([emoji, count]) => (
-                <Text
+              {[...displayedReactions].map(([emoji, count]) => (
+                <Animated.Text
+                  entering={
+                    emoji === "👍" && optimisticLike && !reducedMotion
+                      ? ZoomIn.duration(150).withInitialValues({ transform: [{ scale: 0.9 }] })
+                      : undefined
+                  }
                   key={emoji}
                   style={{
                     color: tokens.foreground,
@@ -3465,7 +3726,7 @@ const MessageRow = memo(function MessageRow({
                 >
                   {emoji}
                   {count > 1 ? ` ${count}` : ""}
-                </Text>
+                </Animated.Text>
               ))}
             </View>
           ) : null}
@@ -3475,7 +3736,91 @@ const MessageRow = memo(function MessageRow({
   );
 });
 
+// A running helper's live card and the saved message that replaces it have different ids, so
+// its row mounts again when the helper finishes. Remember open cards by agent id across that.
+const openHelpers = new Set<string>();
+
 const MessageBubble = memo(function MessageBubble({
+  mentions,
+  ...props
+}: ComponentProps<typeof MessageBubbleContent> & { mentions?: readonly ChildBotBlock[] }) {
+  if (!mentions?.length) return <MessageBubbleBody {...props} />;
+  return (
+    <MessageMentions
+      mentions={mentions}
+      colorOf={(id) =>
+        props.bots.find((bot) => bot.id === id)?.color ??
+        props.members?.find((member) => member.botId === id)?.color
+      }
+      tokens={mobileTokens()}
+      onOpenBot={props.onOpenBot}
+    >
+      <MessageBubbleBody
+        {...props}
+        message={{
+          ...props.message,
+          blocks: withBlockMentions(
+            props.message.blocks,
+            mentions.map((bot) => ({ id: bot.botId, name: bot.name })),
+          ),
+        }}
+      />
+    </MessageMentions>
+  );
+});
+
+function MessageBubbleBody(props: ComponentProps<typeof MessageBubbleContent>) {
+  const { message } = props;
+  if (!message.blocks.some(isSpecialMessageBlock)) return <MessageBubbleContent {...props} />;
+
+  const pieces: MessageBlock[][] = [];
+  for (const block of message.blocks) {
+    const previous = pieces.at(-1);
+    if (isSpecialMessageBlock(block) || !previous || isSpecialMessageBlock(previous[0]!)) {
+      pieces.push([block]);
+    } else {
+      previous.push(block);
+    }
+  }
+  const content = pieces.map((blocks, index) => {
+    const first = blocks[0]!;
+    return isSpecialMessageBlock(first) ? (
+      <SpecialMessageCard
+        key={first.kind === "subagent" ? first.agentId : `${first.kind}-${index}`}
+        special={first}
+        actionProps={props.actionProps}
+        bots={props.bots}
+        members={props.members}
+        onOpenBot={props.onOpenBot}
+        onHelperToggle={props.onHelperToggle}
+        userBubble={props.userBubble}
+      />
+    ) : (
+      <MessageBubbleContent
+        {...props}
+        key={`content-${index}`}
+        message={{ ...message, blocks }}
+        onAnswer={(_, ...answer) => props.onAnswer(message, ...answer)}
+      />
+    );
+  });
+  return content.length === 1 ? (
+    content[0]
+  ) : (
+    <View style={{ gap: 8, width: "100%" }}>{content}</View>
+  );
+}
+
+type SpecialMessageBlock = Extract<
+  MessageBlock,
+  { kind: "subagent" | "child_bot" | "cloud_agent" }
+>;
+
+function isSpecialMessageBlock(block: MessageBlock): block is SpecialMessageBlock {
+  return block.kind === "subagent" || block.kind === "child_bot" || block.kind === "cloud_agent";
+}
+
+const MessageBubbleContent = memo(function MessageBubbleContent({
   botId,
   botName,
   showBotSenderName,
@@ -3486,15 +3831,18 @@ const MessageBubble = memo(function MessageBubble({
   canAnswer,
   canDismiss,
   onAnswer,
-  onOpenBot,
   onOpenComputer,
   onChoiceDismissed,
   onPreviewMarkdown,
   onPreviewImage,
   peerReplies,
   onTogglePeerReplies,
+  onOpenPeerChat,
   actionProps,
+  doubleTapSurface = false,
+  userBubble,
 }: {
+  onHelperToggle?: MessageRowActions["helperToggle"];
   botId: string;
   botName?: string;
   showBotSenderName: boolean;
@@ -3517,10 +3865,13 @@ const MessageBubble = memo(function MessageBubble({
   onPreviewImage: (target: ImageArtifactPreviewTarget) => void;
   peerReplies?: "collapsed" | "expanded";
   onTogglePeerReplies: (markerId: string) => void;
+  onOpenPeerChat: (peer: { peerBotId: string; peerBotName: string }) => void;
   actionProps: MessageActionProps;
+  doubleTapSurface?: boolean;
+  userBubble?: UserBubble;
 }) {
   const colorScheme = useResolvedAppearance();
-  const tokens = mobileTokens();
+  const tokens = withUserBubble(mobileTokens(), userBubble);
   const { t } = useI18n();
   const [peerExpanded, setPeerExpanded] = useState(false);
   const artifactTarget: MobileArtifactTarget = groupId ? { groupId } : { botId };
@@ -3617,15 +3968,27 @@ const MessageBubble = memo(function MessageBubble({
       bots.find((bot) => bot.id === peerBotId)?.color ??
       members?.find((member) => member.botId === peerBotId)?.color ??
       tokens.mutedForeground;
-    // Full view-only peer chat is web-first; on mobile a received chip expands the peer run's
-    // folded replies, which the thread draws as ordinary rows right after it.
+    // A received chip with folded replies expands them in place; otherwise, in a bot's own chat,
+    // the chip opens the view-only bot-to-bot exchange, as on web.
     const replies = sent ? undefined : peerReplies;
+    const press = peerChipPress({
+      sent,
+      replies,
+      threadBotId: groupId ? undefined : botId,
+      peerBotId,
+    });
     return (
       <Pressable
         {...actionProps}
         accessible
-        onPress={replies ? () => onTogglePeerReplies(message.id) : undefined}
-        accessibilityRole={replies ? "button" : undefined}
+        onPress={
+          press === "toggle"
+            ? () => onTogglePeerReplies(message.id)
+            : press === "open"
+              ? () => onOpenPeerChat({ peerBotId, peerBotName: peer ?? t("Bot") })
+              : undefined
+        }
+        accessibilityRole={press ? "button" : undefined}
         accessibilityState={replies ? { expanded: replies === "expanded" } : undefined}
         accessibilityLabel={
           replies === "expanded"
@@ -3650,7 +4013,7 @@ const MessageBubble = memo(function MessageBubble({
         >
           {label}
         </Text>
-        {replies ? (
+        {press ? (
           <NativeSymbol
             ios={replies === "expanded" ? "chevron.down" : "chevron.right"}
             android={replies === "expanded" ? "chevron-down" : "chevron-forward"}
@@ -3671,172 +4034,11 @@ const MessageBubble = memo(function MessageBubble({
         {...actionProps}
         style={{ width: "100%", paddingVertical: 4, alignItems: "center" }}
       >
-        <Text style={{ color: tokens.mutedForeground, fontSize: 13.5, textAlign: "center" }}>
-          {messagingProviderLabel(channelMessage.provider, channelMessage.transport)} ·{" "}
-          {channelMessage.fromLabel}: {channelMessage.text}
+        <Text style={{ color: tokens.mutedForeground, fontSize: 12, textAlign: "center" }}>
+          {messagingProviderLabel(channelMessage.provider, channelMessage.transport)}
         </Text>
-      </Pressable>
-    );
-  }
-  const special = message.blocks.find(
-    (block) =>
-      block.kind === "subagent" || block.kind === "child_bot" || block.kind === "cloud_agent",
-  );
-  if (special?.kind === "subagent") {
-    const running = special.status === "running";
-    const failed = special.status === "failed";
-    return (
-      <Pressable
-        {...actionProps}
-        style={{
-          width: "90%",
-          borderRadius: 18,
-          backgroundColor: tokens.card,
-          paddingHorizontal: 16,
-          paddingVertical: 14,
-        }}
-      >
-        <View
-          style={{
-            flexDirection: "row",
-            justifyContent: "space-between",
-            gap: 8,
-          }}
-        >
-          <Text style={{ flexShrink: 1, color: tokens.foreground, ...typeScale.cardTitle }}>
-            {safeDisplayName(special.name, t("subagent"))}
-          </Text>
-          <Text
-            style={{
-              color: failed ? tokens.destructive : running ? tokens.warning : tokens.success,
-              ...typeScale.caption,
-            }}
-          >
-            {running
-              ? t("Running")
-              : special.status === "failed"
-                ? t("Failed")
-                : special.status === "completed"
-                  ? t("Completed")
-                  : special.status}
-          </Text>
-        </View>
-        {special.task ? (
-          <Text style={{ color: tokens.mutedForeground, marginTop: 8, ...typeScale.secondary }}>
-            {special.task}
-          </Text>
-        ) : null}
-        {special.result || special.progress ? (
-          <View style={{ marginTop: 8 }}>
-            <ChatMarkdown palette={tokens} colorScheme={colorScheme} streaming={running}>
-              {special.result || special.progress || ""}
-            </ChatMarkdown>
-          </View>
-        ) : null}
-      </Pressable>
-    );
-  }
-  if (special?.kind === "cloud_agent") {
-    const title = special.title || t("Cloud agent");
-    const statusLabel =
-      special.status === "running"
-        ? t("running")
-        : special.status === "finished"
-          ? t("finished")
-          : special.status === "cancelled"
-            ? t("cancelled")
-            : special.status === "expired"
-              ? t("expired")
-              : t("failed");
-    const running = special.status === "running";
-    const failed = special.status !== "running" && special.status !== "finished";
-    const prHref = cloudAgentHttpsUrl(special.prUrl);
-    const href = prHref ?? cloudAgentHttpsUrl(special.url);
-    return (
-      <Pressable
-        onPress={() => {
-          if (href) Linking.openURL(href).catch(() => undefined);
-        }}
-        testID="cloud-agent-card"
-        accessibilityRole={href ? "link" : "text"}
-        accessibilityLabel={`${title}: ${statusLabel}`}
-        disabled={!href}
-        style={{
-          width: "90%",
-          borderRadius: 18,
-          backgroundColor: tokens.card,
-          paddingHorizontal: 16,
-          paddingVertical: 14,
-        }}
-      >
-        <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 8 }}>
-          <Text style={{ flexShrink: 1, color: tokens.cardForeground, ...typeScale.cardTitle }}>
-            {title}
-          </Text>
-          <Text
-            style={{
-              color: failed ? tokens.destructive : running ? tokens.warning : tokens.success,
-              ...typeScale.caption,
-            }}
-          >
-            {statusLabel}
-          </Text>
-        </View>
-        {prHref ? (
-          <Text style={{ color: tokens.mutedForeground, marginTop: 8, ...typeScale.secondary }}>
-            {t("Pull request")}
-          </Text>
-        ) : special.branch ? (
-          <Text style={{ color: tokens.mutedForeground, marginTop: 8, ...typeScale.secondary }}>
-            {special.branch}
-          </Text>
-        ) : null}
-      </Pressable>
-    );
-  }
-  if (special?.kind === "child_bot") {
-    const removed = special.status === "deleted" || special.status === "archived";
-    return (
-      <Pressable
-        {...actionProps}
-        onPress={
-          removed ? undefined : () => onOpenBot(special.botId ?? "", special.name ?? t("Bot"))
-        }
-        style={{
-          width: "90%",
-          borderRadius: 18,
-          backgroundColor: tokens.card,
-          paddingHorizontal: 16,
-          paddingVertical: 14,
-          opacity: removed ? 0.6 : 1,
-        }}
-      >
-        <View
-          style={{
-            flexDirection: "row",
-            justifyContent: "space-between",
-            gap: 8,
-          }}
-        >
-          <Text style={{ flexShrink: 1, color: tokens.foreground, ...typeScale.cardTitle }}>
-            {special.name || t("Bot")}
-          </Text>
-          <Text
-            style={{ color: removed ? tokens.destructive : tokens.success, ...typeScale.caption }}
-          >
-            {special.status === "archived"
-              ? t("archived")
-              : special.status === "deleted"
-                ? t("deleted")
-                : t("bot")}
-          </Text>
-        </View>
-        <Text style={{ color: tokens.mutedForeground, marginTop: 8, ...typeScale.secondary }}>
-          {removed
-            ? special.status === "archived"
-              ? t("Archived. Chat, memory, and files kept.")
-              : t("Removed with chat, computer, and memory.")
-            : special.title || t("Opened its thread.")}
+        <Text style={{ color: tokens.mutedForeground, fontSize: 13.5, textAlign: "center" }}>
+          {channelMessage.fromLabel}: {channelMessage.text}
         </Text>
       </Pressable>
     );
@@ -3939,6 +4141,8 @@ const MessageBubble = memo(function MessageBubble({
               ) : canAnswer && onAnswer ? (
                 <AskActions
                   actions={askBlock.actions}
+                  site={askBlock.site}
+                  approval={isApprovalAskBlock(askBlock)}
                   instructions={askBlock.instructionUpdate?.after}
                   accessibilityActions={actionProps.accessibilityActions}
                   onAccessibilityAction={actionProps.onAccessibilityAction}
@@ -3986,7 +4190,7 @@ const MessageBubble = memo(function MessageBubble({
     .flatMap((block) => {
       if (block.kind === "channel_message" && block.text) {
         return [
-          `${messagingProviderLabel(block.provider, block.transport)} · ${block.fromLabel}: ${block.text}`,
+          `${block.fromLabel} (${messagingProviderLabel(block.provider, block.transport)}): ${block.text}`,
         ];
       }
       return block.kind === "text" && block.text ? [block.text] : [];
@@ -4169,6 +4373,8 @@ const MessageBubble = memo(function MessageBubble({
           speaker={showBotSenderName && index === firstContent ? speaker : undefined}
           speakerColor={showBotSenderName && index === firstContent ? speakerColor : undefined}
           actionProps={actionProps}
+          doubleTapSurface={doubleTapSurface}
+          userBubble={userBubble}
         />
       ))}
       {choiceBlocks.map((block, index) => (
@@ -4207,24 +4413,259 @@ const MessageBubble = memo(function MessageBubble({
   );
 });
 
+type SpecialMessageCardProps = Pick<
+  ComponentProps<typeof MessageBubbleContent>,
+  "actionProps" | "bots" | "members" | "onOpenBot" | "onHelperToggle" | "userBubble"
+> & { special: SpecialMessageBlock };
+
+function HelperMessageCard({
+  special,
+  actionProps,
+  onHelperToggle,
+  userBubble,
+}: Pick<SpecialMessageCardProps, "actionProps" | "onHelperToggle" | "userBubble"> & {
+  special: Extract<MessageBlock, { kind: "subagent" }>;
+}) {
+  const colorScheme = useResolvedAppearance();
+  const tokens = withUserBubble(mobileTokens(), userBubble);
+  const { t } = useI18n();
+  const helperHeader = useRef<View>(null);
+  const helperCard = useRef<View>(null);
+  const helperReducedMotion = useReducedMotion();
+  const [subagentOpen, setSubagentOpen] = useState(() => openHelpers.has(special.agentId));
+  const helperRotation = useSharedValue(subagentOpen ? 180 : 0);
+  useEffect(() => {
+    helperRotation.value = helperReducedMotion
+      ? subagentOpen
+        ? 180
+        : 0
+      : withTiming(subagentOpen ? 180 : 0, { duration: 150 });
+  }, [subagentOpen, helperReducedMotion, helperRotation]);
+  const helperChevronStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${helperRotation.value}deg` }],
+  }));
+  const running = special.status === "running";
+  const failed = special.status === "failed";
+  return (
+    <Pressable
+      {...actionProps}
+      ref={helperCard}
+      collapsable={false}
+      style={{
+        width: "90%",
+        borderRadius: 18,
+        backgroundColor: tokens.card,
+      }}
+    >
+      <Pressable
+        {...actionProps}
+        onPress={() => {
+          const toggle = () => {
+            if (subagentOpen) openHelpers.delete(special.agentId);
+            else openHelpers.add(special.agentId);
+            setSubagentOpen(!subagentOpen);
+          };
+          if (onHelperToggle) {
+            onHelperToggle(
+              (done) =>
+                helperHeader.current?.measureInWindow((_x, y) => {
+                  helperCard.current?.measureInWindow((_cardX, cardY, _width, height) =>
+                    done(y, cardY + height),
+                  );
+                }),
+              toggle,
+              !subagentOpen,
+            );
+          } else toggle();
+        }}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: subagentOpen }}
+        style={{ paddingHorizontal: 16, paddingTop: 14, paddingBottom: 14, minHeight: 44 }}
+      >
+        <View ref={helperHeader} collapsable={false}>
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 8,
+            }}
+          >
+            <Text
+              style={{
+                flexShrink: 1,
+                flexGrow: 1,
+                color: tokens.foreground,
+                ...typeScale.cardTitle,
+              }}
+            >
+              {safeDisplayName(special.name, t("subagent"))}
+            </Text>
+            <Text
+              style={{
+                color: failed ? tokens.destructive : running ? tokens.warning : tokens.success,
+                ...typeScale.caption,
+              }}
+            >
+              {running
+                ? t("Running")
+                : special.status === "failed"
+                  ? t("Failed")
+                  : special.status === "completed"
+                    ? t("Completed")
+                    : special.status}
+            </Text>
+            <Animated.View style={helperChevronStyle}>
+              <NativeSymbol
+                ios="chevron.down"
+                android="chevron-down"
+                size={12}
+                color={tokens.mutedForeground}
+              />
+            </Animated.View>
+          </View>
+          {special.task ? (
+            <Text
+              numberOfLines={subagentOpen ? undefined : 1}
+              style={{ color: tokens.mutedForeground, marginTop: 8, ...typeScale.secondary }}
+            >
+              {special.task}
+            </Text>
+          ) : null}
+        </View>
+      </Pressable>
+      {subagentOpen && (special.result || special.progress) ? (
+        <View style={{ paddingHorizontal: 16, paddingBottom: 14, marginTop: -6 }}>
+          <ChatMarkdown palette={tokens} colorScheme={colorScheme} streaming={running}>
+            {special.result || special.progress || ""}
+          </ChatMarkdown>
+        </View>
+      ) : null}
+    </Pressable>
+  );
+}
+
+function SpecialMessageCard(props: SpecialMessageCardProps) {
+  const { special, actionProps, bots, members, onOpenBot, userBubble } = props;
+  const tokens = withUserBubble(mobileTokens(), userBubble);
+  const { t } = useI18n();
+  if (special.kind === "subagent") return <HelperMessageCard {...props} special={special} />;
+  if (special.kind === "cloud_agent") {
+    const title = special.title || t("Cloud agent");
+    const statusLabel =
+      special.status === "running"
+        ? t("running")
+        : special.status === "finished"
+          ? t("finished")
+          : special.status === "cancelled"
+            ? t("cancelled")
+            : special.status === "expired"
+              ? t("expired")
+              : t("failed");
+    const running = special.status === "running";
+    const failed = special.status !== "running" && special.status !== "finished";
+    const prHref = cloudAgentHttpsUrl(special.prUrl);
+    const href = prHref ?? cloudAgentHttpsUrl(special.url);
+    return (
+      <Pressable
+        {...actionProps}
+        onPress={() => {
+          if (href) Linking.openURL(href).catch(() => undefined);
+        }}
+        testID="cloud-agent-card"
+        accessibilityRole={href ? "link" : "text"}
+        accessibilityLabel={`${title}: ${statusLabel}`}
+        disabled={!href}
+        style={{
+          width: "90%",
+          borderRadius: 18,
+          backgroundColor: tokens.card,
+          paddingHorizontal: 16,
+          paddingVertical: 14,
+        }}
+      >
+        <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 8 }}>
+          <Text style={{ flexShrink: 1, color: tokens.cardForeground, ...typeScale.cardTitle }}>
+            {title}
+          </Text>
+          <Text
+            style={{
+              color: failed ? tokens.destructive : running ? tokens.warning : tokens.success,
+              ...typeScale.caption,
+            }}
+          >
+            {statusLabel}
+          </Text>
+        </View>
+        {prHref ? (
+          <Text style={{ color: tokens.mutedForeground, marginTop: 8, ...typeScale.secondary }}>
+            {t("Pull request")}
+          </Text>
+        ) : special.branch ? (
+          <Text style={{ color: tokens.mutedForeground, marginTop: 8, ...typeScale.secondary }}>
+            {special.branch}
+          </Text>
+        ) : null}
+      </Pressable>
+    );
+  }
+  if (special.kind === "child_bot") {
+    return (
+      <Text
+        {...actionProps}
+        style={{
+          alignSelf: "flex-start",
+          paddingHorizontal: 4,
+          color: tokens.mutedForeground,
+          ...typeScale.body,
+        }}
+      >
+        <BotMention
+          block={special}
+          color={
+            bots.find((bot) => bot.id === special.botId)?.color ??
+            members?.find((member) => member.botId === special.botId)?.color
+          }
+          tokens={tokens}
+          onOpenBot={onOpenBot}
+        />
+        {special.status === "archived"
+          ? ` ${t("archived")}`
+          : special.status === "deleted"
+            ? ` ${t("deleted")}`
+            : null}
+      </Text>
+    );
+  }
+  return null;
+}
+
 function MessageTextCard({
   message,
   speaker,
   speakerColor,
   actionProps,
+  doubleTapSurface = false,
+  userBubble,
 }: {
   message: MobileMessage;
   speaker?: string;
   speakerColor?: string;
   actionProps: MessageActionProps;
+  doubleTapSurface?: boolean;
+  userBubble?: UserBubble;
 }) {
   const colorScheme = useResolvedAppearance();
-  const tokens = mobileTokens();
+  const tokens = withUserBubble(mobileTokens(), userBubble);
   const contentText = blockText(message);
   if (!contentText) return null;
+  // The menu wrapper owns surface gestures; links and code controls remain responders.
+  const Surface = doubleTapSurface ? View : Pressable;
   return (
-    <Pressable
+    <Surface
       {...actionProps}
+      accessible
+      onLongPress={doubleTapSurface ? undefined : actionProps.onLongPress}
       style={{
         flexShrink: 1,
         minWidth: 0,
@@ -4253,7 +4694,7 @@ function MessageTextCard({
         colorScheme={colorScheme}
         streaming={message.id.startsWith("progress:")}
       />
-    </Pressable>
+    </Surface>
   );
 }
 

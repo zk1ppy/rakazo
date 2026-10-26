@@ -1,5 +1,7 @@
 # Rakazo
 
+[English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
+
 [![GitHub stars](https://img.shields.io/github/stars/elie222/rakazo?labelColor=black&style=for-the-badge&color=2563EB)](https://github.com/elie222/rakazo/stargazers)
 [![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?labelColor=black&style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/RWwKa2Sn7h)
 [![Download on the App Store](https://img.shields.io/badge/App%20Store-Download%20for%20iPhone-black?labelColor=black&style=for-the-badge&logo=apple&logoColor=white)](https://apps.apple.com/app/rakazo/id6801531099)
@@ -13,27 +15,9 @@ can run on your own machine. It is available on the web, as an Electron desktop 
 and computer provider, or run the complete stack locally.
 
 It is an open source, self-hosted alternative to Grok Bot, Meta Muse, OpenAI Dots, Instinct,
-OpenClaw, Hermes Agent, and Hark Pro.
+OpenClaw, Hermes Agent, and Claude Duet.
 
 Rakazo is in beta. Learn more at [rakazo.com](https://rakazo.com).
-
-## How Rakazo compares
-
-Once Rakazo is running, it is just chat, like Grok Bot: you set up a bot and manage it from that
-chat. Muse, Dots, Instinct, and Hark Pro are hosted assistants. OpenClaw
-and Hermes Agent are also open source agents you can run yourself. Their docs describe installers,
-config files, and a gateway. Hermes Desktop can reach a first chat without the CLI; a messaging
-gateway is a separate process.
-
-- [Grok Bot](https://rakazo.com/grok-bot-alternative/)
-- [Muse](https://rakazo.com/muse-alternative/)
-- [Dots](https://rakazo.com/dots-alternative/)
-- [Instinct](https://rakazo.com/instinct-alternative/), the personal assistant you text or call
-- [OpenClaw](https://rakazo.com/openclaw-alternative/)
-- [Hermes Agent](https://rakazo.com/hermes-alternative/), Nous Research's open source agent
-- [Hark Pro](https://rakazo.com/hark-alternative/), the personal agent at hark.com
-- [All comparisons](https://rakazo.com/alternatives/)
-- [Self-hosting guide](https://rakazo.com/self-hosted-ai-agent/)
 
 ## Features
 
@@ -50,6 +34,14 @@ gateway is a separate process.
 
 https://github.com/user-attachments/assets/dccdeddb-2134-4a56-8eed-b2e591736b1c
 
+## Thanks
+
+- [PromptLayer](https://promptlayer.com/?utm_source=github&utm_medium=referral&utm_campaign=rakazo_readme)
+- [Inbox Zero](https://getinboxzero.com/?utm_source=github&utm_medium=referral&utm_campaign=rakazo_readme)
+- [CodeRabbit](https://www.coderabbit.ai/?utm_source=github&utm_medium=referral&utm_campaign=rakazo_readme)
+- [Greptile](https://www.greptile.com/?utm_source=github&utm_medium=referral&utm_campaign=rakazo_readme)
+- [Snyk](https://snyk.io/?utm_source=github&utm_medium=referral&utm_campaign=rakazo_readme)
+
 ## Stack
 
 - TypeScript
@@ -62,14 +54,6 @@ https://github.com/user-attachments/assets/dccdeddb-2134-4a56-8eed-b2e591736b1c
 - Pi
 - Docker, E2B, Daytona, CreateOS, and Boat
 - Composio, Pipedream Connect, MCP, and OpenAPI integrations
-
-## Deploy on Railway
-
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/rakazo-template)
-
-Deploy a private Rakazo instance with PostgreSQL, persistent storage and Railway computers.
-Enter your email and Railway API token, then connect a model after signing in.
-See [setup, security defaults and backups](./infra/railway/README.md).
 
 ## Quick start (published images)
 
@@ -113,6 +97,8 @@ Put HTTPS in front of port 5173; [docs/self-host.md](./docs/self-host.md#public-
 covers the Caddy setup and host hardening. In the desktop app choose **Existing instance** and enter
 the `https://` address.
 
+Or [deploy on Railway](https://railway.com/new/template/rakazo-template); see the [Railway setup guide](./infra/railway/README.md).
+
 ## Local development (source checkout)
 
 You need Node.js 22.22.2 or newer in the 22.x line, Node.js 24.x, or Node.js 26+;
@@ -147,29 +133,35 @@ hosted product should review [Treg's integration terms](https://treg.to/integrat
 a written agreement for hosted resale.
 
 ```bash
-docker compose --env-file .env \
-  -f infra/compose/docker-compose.yml \
-  -f infra/compose/docker-compose.postgres-host.yml \
-  up postgres -d
 pnpm install
-pnpm db:generate
-pnpm db:migrate
 pnpm sandbox:build
 pnpm dev
 ```
 
-Postgres stays network-internal in the default Compose file (same as published images). The
-`postgres-host` overlay publishes loopback `127.0.0.1:5433` for host-side `pnpm` and DB tools.
-If that port is occupied, change `POSTGRES_HOST_PORT` and the ports in `DATABASE_URL` and
-`DATABASE_MIGRATION_URL` in `.env`.
-Without the overlay, open a shell with
-`docker compose --env-file .env -f infra/compose/docker-compose.yml exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`.
+`pnpm dev` uses the Postgres in `DATABASE_URL` when it accepts a connection. Otherwise it starts a
+local `rakazo-dev-postgres` container with Docker, and every checkout reuses that one. It applies
+migrations and generates the Prisma client before starting. A branch that adds migrations main
+doesn't have gets its own database on the same server, copied from the shared one when possible,
+so unmerged schema changes stay out of it. When the default ports are taken, for example by
+another git worktree, it moves to the next free block and prints the URL. Set `WEB_PORT` and
+`API_PORT` to choose ports yourself.
+
+To run Postgres from the Compose file instead, start it with the `postgres-host` overlay, which
+publishes loopback `127.0.0.1:5433`, and point `DATABASE_URL` and `DATABASE_MIGRATION_URL` at it:
+
+```bash
+docker compose --env-file .env \
+  -f infra/compose/docker-compose.yml \
+  -f infra/compose/docker-compose.postgres-host.yml \
+  up postgres -d
+```
+
 Use a URI-safe `POSTGRES_PASSWORD` (`openssl rand -hex 16`). An existing `pgdata` volume keeps the
 user, password, and database from first init, so keep those values in `.env`, or change them in
 place with `ALTER ROLE` / rename. Recreate the volume only after a backup (or when the data is
 disposable); `docker compose down -v` deletes all Postgres state.
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173), create an account, connect a model, and create
+Open the printed URL ([http://127.0.0.1:5173](http://127.0.0.1:5173) by default), create an account, connect a model, and create
 your first bot.
 
 For deployment, provider selection, backups, and upgrades, see the
@@ -245,13 +237,13 @@ Mobile build and release instructions live in [docs/mobile-release.md](./docs/mo
 ## UI language
 
 The web (and Electron-hosted) UI supports English, Deutsch, 한국어, Türkçe, हिन्दी,
-Português (Brasil), 简体中文, Español, Русский, Français, עברית, and Nederlands under
-**Settings → Language**. The Expo app ships English, 简体中文, Русский, Deutsch, and
-Nederlands catalogs, and **Account → Language** lists all five. A device language or
+Português (Brasil), 简体中文, 繁體中文, Español, Русский, Français, עברית, Nederlands, and 日本語 under
+**Settings → Language**. The Expo app ships English, 简体中文, 繁體中文, Русский, Deutsch,
+Nederlands, and 日本語 catalogs, and **Account → Language** lists all seven. A device language or
 `EXPO_PUBLIC_DEFAULT_UI_LOCALE` still selects the starting catalog before a saved choice.
 The marketing
-homepage (`apps/www`) is available in en/de/ko/zh via footer language links (`/`, `/de/`,
-`/ko/`, `/zh/`); other marketing pages stay English. The Russian marketing homepage and
+homepage (`apps/www`) is available in en/de/ko/zh/ja via footer language links (`/`, `/de/`,
+`/ko/`, `/zh/`, `/ja/`); other marketing pages stay English. The Russian marketing homepage and
 native Electron setup/menu remain separate follow-up work.
 
 ## Development
@@ -316,6 +308,16 @@ pnpm --filter @rakazo/worker memory:backfill-extract -- --retry-empty --since 20
 - [Mobile releases](./docs/mobile-release.md)
 - [Performance testing](./docs/performance.md)
 - [Manage the bots it creates](./docs/fleet-management.md)
+
+## How Rakazo compares
+
+- [Grok Bot](https://rakazo.com/grok-bot-alternative/)
+- [Muse](https://rakazo.com/muse-alternative/)
+- [Dots](https://rakazo.com/dots-alternative/)
+- [Instinct](https://rakazo.com/instinct-alternative/)
+- [OpenClaw](https://rakazo.com/openclaw-alternative/)
+- [Hermes Agent](https://rakazo.com/hermes-alternative/)
+- [All comparisons](https://rakazo.com/alternatives/)
 
 ## Contributing
 

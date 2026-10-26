@@ -14,7 +14,7 @@ describe("Neo4j memory provider settings", () => {
   it("registers Neo4j without a default URI", () => {
     const registry = readFileSync(fileURLToPath(new URL("./registry.ts", import.meta.url)), "utf8");
     expect(registry).toContain('id: "neo4j"');
-    expect(registry).toContain("Graph memory stored in Neo4j.");
+    expect(registry).toContain('name: "Neo4j"');
     expect(registry).not.toContain("useState(NEO4J_URI_PLACEHOLDER)");
 
     const form = readFileSync(

@@ -1,3 +1,4 @@
+import type { SettingsScope } from "@rakazo/contracts";
 import { ensureAiDataConsent, readBoundedResponseBytes, toUtterances } from "@rakazo/core";
 import { File, Paths } from "expo-file-system";
 import type * as ExpoSpeech from "expo-speech";
@@ -13,6 +14,8 @@ import { errorText, voiceAccountErrorText } from "./user-error";
 /** Who is speaking, for the dock: it is mounted outside any one thread's bot list. */
 export type PlaybackSpeaker = { name?: string; color?: string };
 type SpeechOptions = {
+  /** Which copy of the voice settings to use; omitted means whichever applies in the space. */
+  scope?: SettingsScope;
   voiceId?: string;
   botId?: string;
   messageId?: string;
@@ -83,6 +86,16 @@ export function stopVoicePlayback(): void {
 /** Cuts the reply off mid-sentence, for a caller who talked over it. */
 export function stopSpeaking(): void {
   stopVoicePlayback();
+}
+
+let playsInBackground = false;
+
+/**
+ * A call keeps its replies playing while the screen is off; the microphone
+ * foreground service is what keeps the app alive then.
+ */
+export function setVoiceBackgroundPlayback(enabled: boolean): void {
+  playsInBackground = enabled;
 }
 
 // --- Sequential playback across several messages: speaking a message plays
@@ -178,7 +191,7 @@ async function speakPrepared(text: string, opts: SpeechOptions, epoch: number): 
     if (!isCurrentSpeech(epoch)) return false;
     const prepared = await rpc<{ ready: boolean; utterances: string[] }>(
       "voice/prepare",
-      { text, voiceId: opts.voiceId, botId: opts.botId },
+      { text, voiceId: opts.voiceId, botId: opts.botId, scope: opts.scope },
       { requestContext },
     );
     if (!isCurrentSpeech(epoch)) return false;
@@ -352,9 +365,17 @@ export async function speakUtterance(
   const requestContext = opts.requestContext ?? (await captureApiRequestContext());
   await ensureAiDataConsent({
     uses: ["voice"],
-    status: () => rpc("aiConsent/status", { uses: ["voice"] }, { requestContext }),
+    status: () =>
+      rpc(
+        "aiConsent/status",
+        { uses: ["voice"], ...(opts.scope ? { settingsScope: opts.scope } : {}) },
+        { requestContext },
+      ),
     prompt: promptAiConsent,
-    allow: (input) => rpc("aiConsent/allow", input, { requestContext }),
+    allow: (input) =>
+      rpc("aiConsent/allow", opts.scope ? { ...input, settingsScope: opts.scope } : input, {
+        requestContext,
+      }),
     coalesceKey: aiConsentCoalesceKey(requestContext),
   });
   return renderUtterance(text, opts, requestContext);
@@ -375,7 +396,12 @@ async function renderUtterance(
           origin: "rakazo://",
           ...requestContext.headers,
         },
-        body: JSON.stringify({ text, voiceId: opts.voiceId, botId: opts.botId }),
+        body: JSON.stringify({
+          text,
+          voiceId: opts.voiceId,
+          botId: opts.botId,
+          scope: opts.scope,
+        }),
         signal: deadline.signal,
       }),
       deadline.signal,
@@ -513,7 +539,7 @@ async function playWithNativeAudio(bytes: Uint8Array, session?: HostedSession): 
   await setAudioModeAsync({
     playsInSilentMode: true,
     interruptionMode: "mixWithOthers",
-    shouldPlayInBackground: false,
+    shouldPlayInBackground: playsInBackground,
   });
   const file = new File(Paths.cache, `rakazo-voice-${Date.now()}.mp3`);
   file.create({ overwrite: true });

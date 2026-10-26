@@ -9,6 +9,7 @@ import {
   discardAnsweredSteering,
 } from "./events.js";
 import { createThreadMessageInTransaction } from "./messages.js";
+import { clearEndedRunState } from "./run-secrets.js";
 
 export interface ExpireStuckRunInput {
   runId: string;
@@ -57,6 +58,7 @@ export async function expireStuckRun(
     },
   });
   if (cancelled.count !== 1) return null;
+  await clearEndedRunState(tx, [input.runId]);
 
   await tx.attempt.updateMany({
     where: {

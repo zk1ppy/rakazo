@@ -1,4 +1,5 @@
 import type { AdapterContext, ComputerRef } from "@rakazo/adapter-kit";
+import * as Logging from "@rakazo/logging";
 import { describe, expect, it, vi } from "vitest";
 import {
   browserActFromTool,
@@ -38,6 +39,27 @@ describe("browser tools", () => {
     expect(() => parseBrowserActions([])).toThrow(/at least one/i);
     expect(() => parseBrowserActions([{ kind: "click" }])).toThrow(/ref/i);
     expect(() => parseBrowserActions([{ kind: "fill", ref: "e1" }])).toThrow(/text/i);
+  });
+
+  it("types over the field's text instead of adding to it", async () => {
+    const browser = new FakeBrowserProvider({
+      pages: {
+        "https://example.test/name": {
+          title: "Name",
+          html: `<!doctype html><html><head><title>Name</title></head><body>
+            <input aria-label="Name" value="Ada" />
+          </body></html>`,
+        },
+      },
+    });
+    await browserNavigateFromTool(browser, computer, context, { url: "https://example.test/name" });
+    type Snap = { elements: Array<{ ref: string; name: string; value?: string }> };
+    const name = (result: unknown) => (result as Snap).elements.find((el) => el.name === "Name")!;
+    const before = await browserSnapshotFromTool(browser, computer, context, {});
+    const typed = await browserActFromTool(browser, computer, context, {
+      actions: [{ kind: "type", ref: name(before).ref, text: " Lovelace" }],
+    });
+    expect(name(typed).value).toBe(" Lovelace");
   });
 
   it("rejects URL credentials before invoking the browser", async () => {
@@ -196,7 +218,7 @@ describe("browser tools", () => {
     ).toEqual([{ kind: "fill_secret", ref: "e1", secret: "site_login", field: "password" }]);
     expect(() =>
       parseBrowserActions([{ kind: "fill_secret", ref: "e1", secret: "site_login", field: "pin" }]),
-    ).toThrow(/username or password/);
+    ).toThrow('needs field: "username" or "password"');
     expect(() =>
       parseBrowserActions([{ kind: "fill_secret", ref: "e1", field: "password" }]),
     ).toThrow(/secret/);
@@ -249,6 +271,27 @@ describe("browser tools", () => {
       expect(JSON.stringify(acted)).not.toContain(values.password);
     });
 
+    it("types the password only into a password field and the username never into one", async () => {
+      const browser = loginPage("https://login.example.test/signin");
+      for (const [target, field, error] of [
+        ["email", "password", /password field/],
+        ["password", "username", /text, email, or telephone/],
+      ] as const) {
+        const ref = (await refs(browser, "https://login.example.test/signin"))[target];
+        const acted = await browserActFromTool(
+          browser,
+          computer,
+          context,
+          { actions: [{ kind: "fill_secret", ref, secret: "site_login", field }] },
+          { resolveSecretFill },
+        );
+        expect(acted, field).toMatchObject({ ok: false, completed: 0, uncertain: false });
+        expect(acted, field).not.toHaveProperty("fallback");
+        expect(JSON.stringify(acted), field).toMatch(error);
+        expect(JSON.stringify(acted), field).not.toContain(values[field]);
+      }
+    });
+
     it("never reports a login-filled field's value, even when too short to redact", async () => {
       const browser = loginPage("https://login.example.test/signin");
       const { email } = await refs(browser, "https://login.example.test/signin");
@@ -266,7 +309,7 @@ describe("browser tools", () => {
       expect(JSON.stringify(snap)).not.toContain("ada");
     });
 
-    it("keeps a login-filled field hidden after ordinary typing appends to it", async () => {
+    it("shows a login-filled field once typing has replaced the login", async () => {
       const browser = loginPage("https://login.example.test/signin");
       const { email } = await refs(browser, "https://login.example.test/signin");
       // Each result carries a fresh snapshot, whose refs replace the previous ones.
@@ -286,10 +329,11 @@ describe("browser tools", () => {
       });
       expect(typed).toMatchObject({ ok: true });
       expect(JSON.stringify(typed)).not.toContain("ada");
-      const replaced = await browserActFromTool(browser, computer, context, {
-        actions: [{ kind: "fill", ref: emailRef(typed), text: "visible-now" }],
-      });
-      expect(JSON.stringify(replaced)).toContain("visible-now");
+      expect(
+        (typed as { elements: Array<{ name: string; value?: string }> }).elements.find((el) =>
+          el.name.includes("Email"),
+        )?.value,
+      ).toBe("!");
     });
 
     it("refuses to type a saved login into editable page content", async () => {
@@ -318,7 +362,7 @@ describe("browser tools", () => {
         { resolveSecretFill },
       );
       expect(acted).toMatchObject({ ok: false, completed: 0 });
-      expect(JSON.stringify(acted)).toMatch(/text, email, password, or telephone/);
+      expect(JSON.stringify(acted)).toMatch(/text, email, or telephone/);
     });
 
     it("refuses to type a saved login into a textarea or a non-login input type", async () => {
@@ -363,7 +407,7 @@ describe("browser tools", () => {
           { resolveSecretFill },
         );
         expect(acted, name).toMatchObject({ ok: false, completed: 0 });
-        expect(JSON.stringify(acted), name).toMatch(/text, email, password, or telephone/);
+        expect(JSON.stringify(acted), name).toMatch(/text, email, or telephone/);
       }
       const phone = await browserActFromTool(
         browser,
@@ -423,8 +467,11 @@ describe("browser tools", () => {
         { actions: [{ kind: "fill_secret", ref: email, secret: "site_login", field: "username" }] },
         { resolveSecretFill },
       );
-      expect(acted).toMatchObject({ ok: false, completed: 0 });
-      expect(JSON.stringify(acted)).toMatch(/not on the site/);
+      expect(acted).toMatchObject({ ok: false, completed: 0, uncertain: false });
+      expect(JSON.stringify(acted)).toMatch(/not on the site.*browser_navigate/);
+      // A refusal is settled: nothing points the bot at desktop tools or takeover.
+      expect(acted).not.toHaveProperty("fallback");
+      expect(acted).not.toHaveProperty("note");
     });
 
     it("acts on nothing when a saved login cannot be resolved", async () => {
@@ -439,6 +486,7 @@ describe("browser tools", () => {
       expect(acted).toEqual({
         ok: false,
         completed: 0,
+        uncertain: false,
         error: "Saved logins are unavailable here.",
       });
       const snap = await browserSnapshotFromTool(browser, computer, context, {});
@@ -514,9 +562,100 @@ describe("browser tools", () => {
     });
   });
 
-  it.each(["ftp://example.test", "https://example:fake-password@example.test"])(
-    "omits the desktop fallback for a rejected page-only URL: %s",
-    async (url) => {
+  it("settles an upload path outside the bot's folder before anything runs", async () => {
+    const browser = new FakeBrowserProvider();
+    const act = vi.spyOn(browser, "act");
+    const result = await browserActFromTool(
+      browser,
+      computer,
+      context,
+      { actions: [{ kind: "upload", ref: "e1", paths: ["../other-bot/notes.txt"] }] },
+      {
+        resolveUploadPath: () => {
+          throw new Error("Path escapes the bot workspace");
+        },
+      },
+    );
+    expect(result).toEqual({
+      ok: false,
+      completed: 0,
+      uncertain: false,
+      error: "Path escapes the bot workspace",
+    });
+    expect(act).not.toHaveBeenCalled();
+  });
+
+  it("says only that a saved login failed to load, never what the error quoted", async () => {
+    const warn = vi.fn();
+    const logger = vi.spyOn(Logging, "getLogger").mockReturnValue({ warn } as never);
+    try {
+      const browser = new FakeBrowserProvider();
+      const act = vi.spyOn(browser, "act");
+      const result = await browserActFromTool(
+        browser,
+        computer,
+        context,
+        { actions: [{ kind: "fill_secret", ref: "e1", secret: "site_login", field: "password" }] },
+        {
+          resolveSecretFill: async () => JSON.parse("fake-stored-login-canary"),
+        },
+      );
+      expect(result).toEqual({
+        ok: false,
+        completed: 0,
+        uncertain: false,
+        error: "This saved login could not be loaded.",
+      });
+      expect(JSON.stringify(result)).not.toContain("canary");
+      expect(act).not.toHaveBeenCalled();
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("canary");
+      expect(warn).toHaveBeenCalledWith(expect.any(String), { errorName: "SyntaxError" });
+    } finally {
+      logger.mockRestore();
+    }
+  });
+
+  it("lets a cancelled run's saved-login lookup end the call, not pass for a load failure", async () => {
+    const controller = new AbortController();
+    const browser = new FakeBrowserProvider();
+    const pending = browserActFromTool(
+      browser,
+      computer,
+      { ...context, signal: controller.signal },
+      { actions: [{ kind: "fill_secret", ref: "e1", secret: "site_login", field: "password" }] },
+      {
+        resolveSecretFill: async () => {
+          controller.abort(new Error("run cancelled"));
+          throw new Error("lookup aborted");
+        },
+      },
+    );
+    await expect(pending).rejects.toThrow("run cancelled");
+  });
+
+  it("keeps a failure while acting uncertain, with the desktop fallback", async () => {
+    const browser = new FakeBrowserProvider();
+    vi.spyOn(browser, "act").mockRejectedValue(new Error("socket closed"));
+    const result = await browserActFromTool(browser, computer, context, {
+      actions: [{ kind: "click", ref: "e1" }],
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      uncertain: true,
+      fallback: "computer_act",
+      error: "socket closed",
+      note: expect.stringContaining("computer_act"),
+    });
+  });
+
+  it.each([
+    ["ftp://example.test", true],
+    ["https://example:fake-password@example.test", true],
+    ["not a url", true],
+    ["ftp://example.test", false],
+  ])(
+    "settles a rejected URL before the browser is asked: %s (desktop tools: %s)",
+    async (url, desktopTools) => {
       const browser = new FakeBrowserProvider();
       const navigate = vi.spyOn(browser, "navigate");
       const result = await browserNavigateFromTool(
@@ -524,12 +663,84 @@ describe("browser tools", () => {
         computer,
         context,
         { url },
-        { desktopTools: false },
+        { desktopTools },
       );
-      expect(result).toMatchObject({ error: expect.stringContaining("HTTP(S)") });
-      expect(result).not.toHaveProperty("fallback");
-      expect(JSON.stringify(result)).not.toContain("computer_act");
+      // Nothing ran, so there is nothing to look at again and no reason for desktop tools.
+      expect(result).toEqual({
+        ok: false,
+        uncertain: false,
+        error: "An HTTP(S) URL without embedded credentials is required",
+      });
       expect(navigate).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [
+      "a fill_secret without its field",
+      [{ kind: "fill_secret", ref: "e1", secret: "site_login" }],
+      'browser_act fill_secret needs field: "username" or "password"',
+    ],
+    [
+      "a fill_secret without its login",
+      [{ kind: "fill_secret", ref: "e1", field: "password" }],
+      "browser_act fill_secret needs secret: the name of a login saved with request_secret",
+    ],
+    [
+      "an unsupported kind",
+      [{ kind: "press", ref: "e1" }],
+      "browser_act action 0 needs kind: click, fill, type, upload, fill_secret",
+    ],
+    ["no actions", [], "browser_act requires at least one action"],
+    [
+      "too many actions",
+      Array.from({ length: 25 }, () => ({ kind: "click", ref: "e1" })),
+      "browser_act accepts at most 24 actions",
+    ],
+    ["an action without its ref", [{ kind: "click" }], "browser_act action 0 requires ref"],
+    ["a fill without its text", [{ kind: "fill", ref: "e1" }], "browser_act fill requires text"],
+    [
+      "a fill naming a saved login",
+      [{ kind: "fill", ref: "e1", secret: "site_login", field: "password" }],
+      'browser_act fill requires text; for a saved login use kind "fill_secret"',
+    ],
+    [
+      "a fill naming only a login's field",
+      [{ kind: "fill", ref: "e1", field: "username" }],
+      'browser_act fill requires text; for a saved login use kind "fill_secret"',
+    ],
+    [
+      "an upload without paths",
+      [{ kind: "upload", ref: "e1", paths: [] }],
+      "browser_act upload requires paths: one or more file paths",
+    ],
+    [
+      "a bad step after good ones",
+      [
+        { kind: "click", ref: "e1" },
+        { kind: "fill_secret", ref: "e2", secret: "site_login", field: "password" },
+        { kind: "fill_secret", ref: "e3", secret: "site_login" },
+      ],
+      'browser_act fill_secret needs field: "username" or "password"',
+    ],
+  ])(
+    "settles %s before anything runs, without pointing at desktop tools",
+    async (_, actions, error) => {
+      const browser = new FakeBrowserProvider();
+      const act = vi.spyOn(browser, "act");
+      const resolveSecretFill = vi.fn();
+      for (const desktopTools of [true, false]) {
+        const result = await browserActFromTool(
+          browser,
+          computer,
+          context,
+          { actions },
+          { desktopTools, resolveSecretFill },
+        );
+        expect(result).toEqual({ ok: false, completed: 0, uncertain: false, error });
+      }
+      expect(act).not.toHaveBeenCalled();
+      expect(resolveSecretFill).not.toHaveBeenCalled();
     },
   );
 
@@ -556,16 +767,6 @@ describe("browser tools", () => {
     ];
     vi.spyOn(browser, "snapshot").mockRejectedValueOnce(new Error("socket closed"));
     results.push(await browserSnapshotFromTool(browser, computer, context, {}, pageOnly));
-    // A URL refused before the browser is asked gets the same treatment.
-    results.push(
-      await browserNavigateFromTool(
-        browser,
-        computer,
-        context,
-        { url: "ftp://example.test" },
-        pageOnly,
-      ),
-    );
     for (const result of results) {
       expect(result).toMatchObject({
         error: expect.any(String),

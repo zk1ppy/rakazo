@@ -2,13 +2,16 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   access,
+  lstat,
   mkdir,
   open,
   readdir,
+  readFile as readTextFile,
   realpath,
   rename,
   rm,
   stat,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -18,7 +21,7 @@ import { fileHandlePath } from "./file-handle-path.js";
 export class LocalAgentHomeStore implements AgentHomeStore {
   private readonly botWrites = new Map<string, Promise<void>>();
 
-  constructor(private readonly root: string) {}
+  constructor(protected readonly root: string) {}
 
   describe() {
     return {
@@ -52,31 +55,39 @@ export class LocalAgentHomeStore implements AgentHomeStore {
 
   async commit(botId: string, src: string, _context: AdapterContext): Promise<string> {
     return this.withBotWrite(botId, async () => {
-      await this.recoverInterruptedCommit(botId);
-      const dest = this.botDir(botId);
-      const parent = path.dirname(dest);
-      const staging = path.join(parent, `.${botId}.staging-${randomUUID()}`);
-      const previous = `${dest}.previous`;
-      await mkdir(parent, { recursive: true });
-      await mkdir(staging, { recursive: true });
-      try {
-        await copyDir(src, staging);
-        await rm(previous, { recursive: true, force: true });
-        if (await pathExists(dest)) await rename(dest, previous);
-        try {
-          await rename(staging, dest);
-        } catch (error) {
-          if (!(await pathExists(dest)) && (await pathExists(previous))) {
-            await rename(previous, dest).catch(() => undefined);
-          }
-          throw error;
-        }
-        await rm(previous, { recursive: true, force: true });
-        return this.writeRevision(botId);
-      } finally {
-        await rm(staging, { recursive: true, force: true });
-      }
+      await this.replaceHome(botId, (staging) => copyDir(src, staging));
+      return this.writeRevision(botId);
     });
+  }
+
+  /**
+   * Fills a staging directory beside the home, then swaps it in. An interruption leaves the
+   * previous copy, which the next access restores. Callers hold the bot's write lock.
+   */
+  protected async replaceHome(botId: string, fill: (staging: string) => Promise<void>) {
+    await this.recoverInterruptedCommit(botId);
+    const dest = this.botDir(botId);
+    const parent = path.dirname(dest);
+    const staging = path.join(parent, `.${botId}.staging-${randomUUID()}`);
+    const previous = `${dest}.previous`;
+    await mkdir(parent, { recursive: true });
+    await mkdir(staging, { recursive: true });
+    try {
+      await fill(staging);
+      await rm(previous, { recursive: true, force: true });
+      if (await pathExists(dest)) await rename(dest, previous);
+      try {
+        await rename(staging, dest);
+      } catch (error) {
+        if (!(await pathExists(dest)) && (await pathExists(previous))) {
+          await rename(previous, dest).catch(() => undefined);
+        }
+        throw error;
+      }
+      await rm(previous, { recursive: true, force: true });
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
   }
 
   async revise(botId: string): Promise<string> {
@@ -178,21 +189,60 @@ export class LocalAgentHomeStore implements AgentHomeStore {
     return listed.filter((entry): entry is NonNullable<typeof entry> => entry !== null);
   }
 
-  private async writeRevision(botId: string) {
-    const revision = `rev-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  /**
+   * Deletes folders directly under `parent` (a Team Computer's bot folders or browser profiles)
+   * and returns whether any were there. Only for a home no running computer mounts: a symlinked
+   * parent is refused and a final symlink is unlinked.
+   */
+  async removeFolders(botId: string, parent: string, names: readonly string[]): Promise<boolean> {
+    return this.withBotWrite(botId, async () => {
+      await this.recoverInterruptedCommit(botId);
+      let removed = false;
+      for (const name of names) {
+        if (await removeContainedDirectory(this.botDir(botId), parent, name)) removed = true;
+      }
+      return removed;
+    });
+  }
+
+  /** Deletes this host's copy of a home, an interrupted save's previous copy and its revision. */
+  async remove(botId: string): Promise<void> {
+    await this.withBotWrite(botId, async () => {
+      const dir = this.botDir(botId);
+      // The previous copy first, or a read in between would restore it as the home.
+      await rm(`${dir}.previous`, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true });
+      await rm(this.revisionFile(botId), { force: true });
+    });
+  }
+
+  /** Records the revision the local copy holds. */
+  protected async writeRevision(botId: string, revision = newRevision()) {
     const directory = path.join(this.root, "home-revisions");
     await mkdir(directory, { recursive: true });
-    await writeFile(path.join(directory, `${botId}.txt`), revision, "utf8");
+    await writeFile(this.revisionFile(botId), revision, "utf8");
     return revision;
   }
 
-  private async recoverInterruptedCommit(botId: string) {
+  /** The revision last recorded for the local copy, if any. */
+  protected async localRevision(botId: string): Promise<string | undefined> {
+    return readTextFile(this.revisionFile(botId), "utf8").catch((error: unknown) => {
+      if (isMissing(error)) return undefined;
+      throw error;
+    });
+  }
+
+  private revisionFile(botId: string) {
+    return path.join(this.root, "home-revisions", `${path.basename(this.botDir(botId))}.txt`);
+  }
+
+  protected async recoverInterruptedCommit(botId: string) {
     const dest = this.botDir(botId);
     const previous = `${dest}.previous`;
     if (!(await pathExists(dest)) && (await pathExists(previous))) await rename(previous, dest);
   }
 
-  private async withBotWrite<T>(botId: string, work: () => Promise<T>): Promise<T> {
+  protected async withBotWrite<T>(botId: string, work: () => Promise<T>): Promise<T> {
     const previous = this.botWrites.get(botId) ?? Promise.resolve();
     let release: () => void = () => undefined;
     const current = new Promise<void>((resolve) => {
@@ -219,6 +269,35 @@ export class LocalAgentHomeStore implements AgentHomeStore {
 export function resolveAgentHomePath(home: AgentHomeStore, homeKey: string, dataDir = "./data") {
   if (home instanceof LocalAgentHomeStore) return home.pathFor(homeKey);
   return path.resolve(dataDir, "homes", homeKey);
+}
+
+/** Deletes the home of a deleted computer from this host. */
+export async function removeAgentHome(home: AgentHomeStore, homeKey: string, dataDir = "./data") {
+  if (home instanceof LocalAgentHomeStore) return home.remove(homeKey);
+  await rm(resolveAgentHomePath(home, homeKey, dataDir), { recursive: true, force: true });
+}
+
+/**
+ * Deletes folders under `parent` in a stored home and saves the result, so a computer that boots
+ * from it later, on any host, no longer has them.
+ */
+export async function removeAgentHomeFolders(
+  home: AgentHomeStore,
+  homeKey: string,
+  parent: string,
+  names: readonly string[],
+  dataDir = "./data",
+): Promise<void> {
+  if (home instanceof LocalAgentHomeStore) {
+    await home.removeFolders(homeKey, parent, names);
+    return;
+  }
+  for (const name of names)
+    await removeContainedDirectory(resolveAgentHomePath(home, homeKey, dataDir), parent, name);
+}
+
+export function newRevision() {
+  return `rev-${Date.now()}-${randomUUID().slice(0, 8)}`;
 }
 
 function safeJoin(root: string, rel: string) {
@@ -275,7 +354,7 @@ async function containedTarget(root: string, candidate: string) {
   return resolvedTarget;
 }
 
-function isContained(root: string, candidate: string) {
+export function isContained(root: string, candidate: string) {
   const relative = path.relative(root, candidate);
   return (
     relative === "" ||
@@ -289,6 +368,41 @@ function assertContained(root: string, candidate: string) {
 
 function isHiddenTopEntry(root: string, candidate: string) {
   return path.relative(root, candidate).split(path.sep)[0]!.startsWith(".");
+}
+
+/** Delete one folder in a home. A symlinked parent is refused; a final symlink is unlinked. */
+async function removeContainedDirectory(root: string, parent: string, name: string) {
+  const target = path.join(root, parent, name);
+  const info = await lstat(target).catch((error: unknown) => {
+    if (isMissing(error)) return null;
+    throw error;
+  });
+  if (!info) return false;
+  const parentInfo = await lstat(path.dirname(target)).catch((error: unknown) => {
+    if (isMissing(error)) return null;
+    throw error;
+  });
+  if (!parentInfo || parentInfo.isSymbolicLink() || !parentInfo.isDirectory()) {
+    throw new Error("folder escapes the team home");
+  }
+  if (info.isSymbolicLink()) {
+    await unlink(target);
+    return true;
+  }
+  const resolvedRoot = await realpath(root);
+  const resolvedTarget = await realpath(target);
+  const relative = path.relative(resolvedRoot, resolvedTarget);
+  if (
+    path.dirname(resolvedTarget) !== path.join(resolvedRoot, parent) ||
+    path.basename(resolvedTarget) !== name ||
+    relative === "" ||
+    relative.startsWith("..") ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error("folder escapes the team home");
+  }
+  await rm(resolvedTarget, { recursive: true, force: true });
+  return true;
 }
 
 function isMissing(error: unknown): error is NodeJS.ErrnoException {

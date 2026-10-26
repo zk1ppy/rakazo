@@ -16,6 +16,7 @@ import type { ComputerMode, PrismaClient, ThreadEvents } from "@rakazo/db";
 import {
   appendEventInTransaction,
   createThreadMessageInTransaction,
+  listApprovalRules,
   parseComputerMode,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
@@ -249,6 +250,20 @@ export function readItems(data: unknown, track: readonly string[]): Reading {
 
 /** A result as JSON: the parsed text of an MCP or text result, or the data itself. */
 function resultJson(data: unknown): unknown {
+  if (isMcpEnvelope(data)) {
+    const structured = (data as { structuredContent?: unknown }).structuredContent;
+    if (structured && typeof structured === "object" && !Array.isArray(structured)) {
+      return structured;
+    }
+    const texts = toolResultTextParts(data);
+    if (texts.length > 1) {
+      try {
+        return texts.map((text) => JSON.parse(text));
+      } catch {
+        // Some servers split one JSON document across text blocks instead.
+      }
+    }
+  }
   const text = typeof data === "string" || isMcpEnvelope(data) ? toolResultText(data) : null;
   if (text === null) return data;
   try {
@@ -488,6 +503,8 @@ async function readTool(
   } catch (error) {
     throw new RoutineWatchError(`Could not list the integration's tools: ${errorText(error)}`);
   }
+  // Discovery waits on every provider; the tool call gets its own full budget.
+  ctx.signal = AbortSignal.timeout(CHECK_TIMEOUT_MS);
   const call = { tool: toolName, args: watch.args ?? {}, executionId: ctx.operationId };
   const tool = tools.find((candidate) => candidate.name === toolName);
   const resolved = tool
@@ -503,9 +520,9 @@ async function readTool(
       ctx.connectedConnections?.map((row) => row.externalId),
     ),
     readOnly: resolved.tool.readOnly,
-    rules: (await deps.prisma.actionApprovalRule.findMany({
-      where: { spaceId: routine.spaceId, createdByUserId: routine.userId },
-      select: { effect: true, matchKind: true, matchValue: true },
+    rules: (await listApprovalRules(deps.prisma, {
+      userId: routine.userId,
+      spaceId: routine.spaceId,
     })) as ActionApprovalRule[],
   });
   if (refusal) throw new RoutineWatchError(refusal);
@@ -539,18 +556,23 @@ async function readTool(
  */
 export function toolResultText(data: unknown): string {
   if (typeof data === "string") return data;
+  const texts = toolResultTextParts(data);
+  if (texts.length) return texts.join("\n");
+  return stableStringify(data ?? null);
+}
+
+function toolResultTextParts(data: unknown): string[] {
   const content = (data as { content?: unknown } | null)?.content;
   if (Array.isArray(content)) {
-    const texts = content
+    return content
       .filter(
         (part): part is { type: "text"; text: string } =>
           (part as { type?: unknown })?.type === "text" &&
           typeof (part as { text?: unknown }).text === "string",
       )
       .map((part) => part.text);
-    if (texts.length) return texts.join("\n");
   }
-  return stableStringify(data ?? null);
+  return [];
 }
 
 function errorText(error: unknown): string {

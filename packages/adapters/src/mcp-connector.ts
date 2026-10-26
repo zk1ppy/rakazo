@@ -3,6 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+  ServerError,
+  TemporarilyUnavailableError,
+} from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type {
   AdapterContext,
   ConnectorCall,
@@ -21,6 +25,7 @@ import {
 } from "@rakazo/contracts";
 import type { McpServer, PrismaClient, ThreadEvents } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
+import { sanitizedError } from "@rakazo/logging/monitoring";
 import { catalogToolPrefix } from "./approval-effect.js";
 import {
   combineSignals,
@@ -55,8 +60,7 @@ import {
 } from "./mcp-package-installer.js";
 import type { McpServerHealthUpdate } from "./mcp-server-health.js";
 import { recordMcpServerHealth } from "./mcp-server-health.js";
-import { isAllowedStdioCommand, McpSession } from "./mcp-transport.js";
-import { actorMayUsePrivateEndpoint } from "./private-endpoint.js";
+import { McpSession, mcpStdioRefusal } from "./mcp-transport.js";
 import type { RemoteTransportDependencies } from "./remote-mcp.js";
 
 type SessionEntry = {
@@ -137,6 +141,9 @@ function expectedFailure(error: unknown, depth = 0): ExpectedFailure | undefined
     return "reconnect";
   if (error instanceof StreamableHTTPError && (error.code === 401 || error.code === 403))
     return "reconnect";
+  // The server's own OAuth endpoint failed or is overloaded; it usually recovers by itself.
+  if (error instanceof ServerError || error instanceof TemporarilyUnavailableError)
+    return "unreachable";
   const code = (error as { code?: unknown }).code;
   if (code === "ENOTFOUND") return "reconnect";
   if (typeof code === "string" && UNREACHABLE_CODES.has(code)) return "unreachable";
@@ -483,7 +490,13 @@ export class McpConnector implements ConnectorProvider {
               reason,
             });
           else
-            getLogger().error(`mcp discovery failed for server ${assignment.server.slug}:`, reason);
+            getLogger().error(
+              "mcp.discovery.failed",
+              sanitizedError(error, (text) => sanitizeConnectorError(new Error(text), secrets)),
+              {
+                "connector.id": assignment.server.id,
+              },
+            );
           await this.evict(key);
           this.unavailable.set(key, reason);
           // A cancelled run says nothing about the server, and an install that outlived the
@@ -987,12 +1000,11 @@ export class McpConnector implements ConnectorProvider {
       };
       let accessTokenExpiresAtMs: number | undefined;
       if (server.transport === "stdio") {
-        if (!this.options.stdioEnabled) throw new Error("MCP stdio is disabled");
         const command = String(server.command ?? "");
-        const allowedCommands = this.options.allowedCommands ?? [];
         // The allowlist names the configured launcher (`npx`), checked before any install.
-        if (!isAllowedStdioCommand(command, allowedCommands))
-          throw new Error("MCP stdio command is not in the configured allowlist");
+        // Only a deployment change or an edit to the server fixes a refusal, so wait for one.
+        const refusal = mcpStdioRefusal(command, this.options);
+        if (refusal) throw new McpConnectFailure(refusal, "reconnect");
         const npx = parseNpxLaunch(command, args);
         let installedBin: InstalledMcpBin | undefined;
         if (npx) {
@@ -1101,7 +1113,7 @@ export class McpConnector implements ConnectorProvider {
           args: npx ? npx.binArgs : args,
           installedBin,
           env: launchEnv,
-          allowedCommands,
+          allowedCommands: this.options.allowedCommands ?? [],
           signal: context.signal,
           timeoutMs: this.options.startupTimeoutMs ?? DEFAULT_MCP_STDIO_STARTUP_TIMEOUT_MS,
         });
@@ -1109,11 +1121,7 @@ export class McpConnector implements ConnectorProvider {
         if (!server.endpoint) throw new Error("MCP endpoint is required");
         const endpoint = new URL(server.endpoint);
         const localHttp = endpoint.protocol === "http:" && isLocalMcpHost(endpoint.hostname);
-        const allowPrivateEndpoint = await actorMayUsePrivateEndpoint(
-          this.prisma,
-          context.userId,
-          this.options.allowPrivateEndpoint === true,
-        );
+        const allowPrivateEndpoint = this.options.allowPrivateEndpoint === true;
         const authProvider =
           !localHttp && this.oauth
             ? await this.oauth.providerFor(server, context, loaded, onPersisted)

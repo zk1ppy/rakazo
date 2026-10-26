@@ -1,6 +1,8 @@
 import type {
   AdapterContext,
+  ArtifactStore,
   JobPublisher,
+  MessagingOutboundAttachment,
   MessagingOutboundStatus,
   MessagingSurface,
 } from "@rakazo/adapter-kit";
@@ -10,7 +12,9 @@ import { botMessageHopExhausted, nextBotMessageHop } from "@rakazo/core";
 import type { PrismaClient, ThreadEvents } from "@rakazo/db";
 import {
   appendEventInTransaction,
+  CrossSpaceCommunicationBlockedError,
   createThreadMessageInTransaction,
+  crossSpaceCommunicationAllowed,
   runAsSystem,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
@@ -32,6 +36,7 @@ export interface MessagingDeliveryDeps {
   messaging: MessagingSurface;
   events: Pick<ThreadEvents, "sendUserMessage" | "notify">;
   jobs: Pick<JobPublisher, "enqueue">;
+  artifacts: Pick<ArtifactStore, "get">;
 }
 
 type IdentityRow = {
@@ -44,7 +49,8 @@ type IdentityRow = {
 
 /**
  * Automatic mirror, not a send tool: every text-bearing bot message of a
- * messaging run is copied into the uniform outbox and sent, so delivery does
+ * messaging run is copied into the uniform outbox and sent (with its images
+ * and files on DM platforms that can send them), so delivery does
  * not depend on prompt compliance. DM runs go to the owner's conversation;
  * channel runs go to the group with an attribution prefix and are fanned
  * out internally to peer approved bots (agent-to-agent traffic never
@@ -108,20 +114,33 @@ async function mirrorRun(deps: MessagingDeliveryDeps, runId: string): Promise<vo
     where: { runId: run.id, role: "bot" },
     orderBy: { seq: "asc" },
   });
-  // One row per platform-sized part, so a retry re-sends only the parts that
-  // failed. Explicit createdAt keeps the parts in order for the drain.
+  const sendsFiles = deps.messaging
+    .platforms()
+    .some((platform) => platform.provider === identity.provider && platform.capabilities.files);
+  // One row per platform-sized part, then one per image or file, so a retry
+  // re-sends only the parts that failed and never repeats delivered text.
+  // Explicit createdAt keeps the parts in order for the drain.
   const createdAt = Date.now();
   const rows = messages
     .flatMap((message) => {
       const body = extractText(message.blocks);
-      if (!body) return [];
-      return splitOutboundBody(identity.provider, body).map((part, index) => ({
-        idempotencyKey: index === 0 ? `msg:${message.id}` : `msg:${message.id}:${index + 1}`,
-        kind: "dm",
-        identityId: identity.id,
-        body: part,
-        sourceMessageId: message.id,
-      }));
+      const parts = body ? splitOutboundBody(identity.provider, body) : [];
+      return [
+        ...parts.map((part, index) => ({
+          idempotencyKey: index === 0 ? `msg:${message.id}` : `msg:${message.id}:${index + 1}`,
+          kind: "dm",
+          identityId: identity.id,
+          body: part,
+          sourceMessageId: message.id,
+        })),
+        ...(sendsFiles ? extractArtifactIds(message.blocks) : []).map((artifactId) => ({
+          idempotencyKey: `msg:${message.id}:file:${artifactId}`,
+          kind: "dm",
+          identityId: identity.id,
+          body: "",
+          sourceMessageId: message.id,
+        })),
+      ];
     })
     .map((row, index) => ({ ...row, createdAt: new Date(createdAt + index) }));
   if (rows.length === 0) return;
@@ -212,7 +231,7 @@ async function fanOutToPeers(
     peers,
     messages,
   }: {
-    identity: { provider: string; address: string };
+    identity: { provider: string; address: string; botId: string };
     channel: { id: string; name: string | null };
     channelBlock: Extract<MessageBlock, { kind: "channel_message" }>;
     fromLabel: string;
@@ -227,6 +246,8 @@ async function fanOutToPeers(
         where: { id: peer.identityId! },
       });
       if (!peerIdentity) continue;
+      if (!(await crossSpaceCommunicationAllowed(deps.prisma, identity.botId, peerIdentity.botId)))
+        continue;
       const peerThread = await deps.prisma.thread.findFirst({
         where: { botId: peerIdentity.botId },
       });
@@ -250,17 +271,23 @@ async function fanOutToPeers(
         ? new RegExp(`@${escapeRegExp(peerBot.name)}\\b`, "i").test(text)
         : false;
       if (mentioned && !botMessageHopExhausted(hop)) {
-        const sent = await deps.events.sendUserMessage({
-          spaceId: peerIdentity.spaceId,
-          threadId: peerThread.id,
-          botId: peerIdentity.botId,
-          userId: peerIdentity.userId,
-          blocks: [block],
-          prompt: `[Group "${channel.name ?? "group"}" — ${fromLabel}]: ${text}`,
-          trigger: "messaging",
-          clientNonce,
-        });
-        if (sent.runId) {
+        const sent = await deps.events
+          .sendUserMessage({
+            spaceId: peerIdentity.spaceId,
+            threadId: peerThread.id,
+            botId: peerIdentity.botId,
+            userId: peerIdentity.userId,
+            blocks: [block],
+            prompt: `[Group "${channel.name ?? "group"}" — ${fromLabel}]: ${text}`,
+            trigger: "messaging",
+            clientNonce,
+            crossSpaceSenderBotId: identity.botId,
+          })
+          .catch((error: unknown) => {
+            if (error instanceof CrossSpaceCommunicationBlockedError) return null;
+            throw error;
+          });
+        if (sent?.runId) {
           await deps.jobs.enqueue(runContinueJob(sent.runId)).catch((error) => {
             getLogger().error("messaging peer wake enqueue error", error);
           });
@@ -272,22 +299,29 @@ async function fanOutToPeers(
         where: { threadId_clientNonce: { threadId: peerThread.id, clientNonce } },
       });
       if (existing) continue;
-      const event = await deps.prisma.$transaction(async (tx) => {
-        const created = await createThreadMessageInTransaction(tx, {
-          threadId: peerThread.id,
-          role: "user",
-          blocks: [block],
-          clientNonce,
+      const event = await deps.prisma
+        .$transaction(async (tx) => {
+          const created = await createThreadMessageInTransaction(tx, {
+            threadId: peerThread.id,
+            role: "user",
+            blocks: [block],
+            clientNonce,
+          });
+          if (!(await crossSpaceCommunicationAllowed(tx, identity.botId, peerIdentity.botId)))
+            throw new CrossSpaceCommunicationBlockedError();
+          return appendEventInTransaction(tx, {
+            spaceId: peerIdentity.spaceId,
+            threadId: peerThread.id,
+            botId: peerIdentity.botId,
+            type: "thread.message.created",
+            payload: { messageId: created.id, role: "user", blocks: [block] },
+          });
+        })
+        .catch((error: unknown) => {
+          if (error instanceof CrossSpaceCommunicationBlockedError) return null;
+          throw error;
         });
-        return appendEventInTransaction(tx, {
-          spaceId: peerIdentity.spaceId,
-          threadId: peerThread.id,
-          botId: peerIdentity.botId,
-          type: "thread.message.created",
-          payload: { messageId: created.id, role: "user", blocks: [block] },
-        });
-      });
-      await deps.events.notify(peerThread.id, event.seq).catch(() => undefined);
+      if (event) await deps.events.notify(peerThread.id, event.seq).catch(() => undefined);
     }
   }
 }
@@ -326,13 +360,18 @@ async function sendConnectInvite(
   try {
     return await deps.prisma.$transaction(
       async (tx) => {
+        const communicationAllowed = await crossSpaceCommunicationAllowed(
+          tx,
+          pair.requesterBotId,
+          pair.targetBotId,
+        );
         const locked = await tx.$queryRaw<Array<{ status: string }>>`
           SELECT status FROM agent_connections
           WHERE "requesterBotId" = ${pair.requesterBotId}
             AND "targetBotId" = ${pair.targetBotId}
           FOR UPDATE
         `;
-        if (locked[0]?.status !== "pending") {
+        if (locked[0]?.status !== "pending" || !communicationAllowed) {
           await tx.messagingOutbound.updateMany({
             where: { id: row.id },
             data: { status: "failed" },
@@ -394,6 +433,7 @@ async function drain(deps: MessagingDeliveryDeps, context: AdapterContext): Prom
       data: { status: "sent", nextAttemptAt: null },
     });
     if (claim.count === 0) continue;
+    let attachmentName: string | null = null;
     try {
       if (row.kind === "group" || row.kind === "intro") {
         if (!row.threadId) {
@@ -455,7 +495,34 @@ async function drain(deps: MessagingDeliveryDeps, context: AdapterContext): Prom
         }
         continue;
       }
-      const sent = await deps.messaging.sendToThread({ threadId, body: row.body }, context);
+      let attachment: MessagingOutboundAttachment | undefined;
+      const artifactId = fileArtifactId(row.idempotencyKey);
+      if (artifactId) {
+        // Scoped to the identity's Space: the drain runs across every Space.
+        const artifact = await deps.prisma.artifact.findFirst({
+          where: { id: artifactId, spaceId: identity.spaceId },
+          select: { name: true, mimeType: true, storageKey: true, userId: true },
+        });
+        if (!artifact) {
+          // Deleted since the reply was mirrored, or not in this Space.
+          await deps.prisma.messagingOutbound.update({
+            where: { id: row.id },
+            data: { status: "failed" },
+          });
+          continue;
+        }
+        attachmentName = artifact.name;
+        const data = await deps.artifacts.get(artifact.storageKey, {
+          ...context,
+          spaceId: identity.spaceId,
+          userId: artifact.userId,
+        });
+        attachment = { name: artifact.name, mimeType: artifact.mimeType, data };
+      }
+      const sent = await deps.messaging.sendToThread(
+        { threadId, body: row.body, ...(attachment ? { attachment } : {}) },
+        context,
+      );
       await deps.prisma.messagingOutbound.updateMany({
         where: { id: row.id },
         data: { providerHandle: sent.handle },
@@ -474,14 +541,41 @@ async function drain(deps: MessagingDeliveryDeps, context: AdapterContext): Prom
       const exhausted = failure?.permanent || attempts >= MESSAGING_OUTBOUND_MAX_ATTEMPTS;
       const delayMs = Math.max(messagingOutboundRetryDelayMs(attempts), failure?.retryAfterMs ?? 0);
       const retryAt = exhausted ? null : new Date(Date.now() + delayMs);
-      await deps.prisma.messagingOutbound.updateMany({
+      const outcome = {
         where: { id: row.id },
         data: {
           attempts,
           status: exhausted ? "failed" : "pending",
           nextAttemptAt: retryAt,
         },
-      });
+      };
+      if (exhausted && attachmentName) {
+        // The reply's text went out on its own rows; say the file did not
+        // follow instead of dropping it silently. Saved with the failure so
+        // one cannot land without the other, keyed so it is queued once, and
+        // given the file's place so later replies wait behind it.
+        const name = attachmentName;
+        await deps.prisma.$transaction(async (tx) => {
+          await tx.messagingOutbound.updateMany(outcome);
+          await tx.messagingOutbound.createMany({
+            data: [
+              {
+                idempotencyKey: `${row.idempotencyKey}:notice`,
+                kind: row.kind,
+                identityId: row.identityId,
+                threadId: row.threadId,
+                body: `Could not send "${name}".`,
+                sourceMessageId: row.sourceMessageId,
+                createdAt: row.createdAt,
+              },
+            ],
+            skipDuplicates: true,
+          });
+        });
+        await deps.jobs.enqueue(messagingDeliverJob());
+        continue;
+      }
+      await deps.prisma.messagingOutbound.updateMany(outcome);
       if (!exhausted && retryAt) {
         // Propagate an enqueue failure: the messaging.deliver job then fails
         // and the queue's own retry re-runs the drain. Swallowing it would
@@ -564,6 +658,21 @@ export async function applyMessagingOutboundStatus(
     where: { providerHandle: event.handle },
     data: { status },
   });
+}
+
+/** The artifact a reply's file row sends, from its `msg:<message>:file:<artifact>` key. */
+function fileArtifactId(idempotencyKey: string): string | null {
+  return /^msg:[^:]+:file:([^:]+)$/.exec(idempotencyKey)?.[1] ?? null;
+}
+
+/** Artifacts of the message's image and file blocks, in block order. */
+function extractArtifactIds(blocks: unknown): string[] {
+  if (!Array.isArray(blocks)) return [];
+  return blocks.flatMap((block: { kind?: unknown; artifactId?: unknown } | null) =>
+    (block?.kind === "image" || block?.kind === "file") && typeof block.artifactId === "string"
+      ? [block.artifactId]
+      : [],
+  );
 }
 
 function extractText(blocks: unknown): string {

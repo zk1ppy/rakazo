@@ -1,5 +1,13 @@
 import { expect, test } from "@playwright/test";
-import { captureScreenshot, completeOnboarding, openUserSettings, signup } from "./helpers";
+import {
+  captureScreenshot,
+  completeOnboarding,
+  manageModelConnection,
+  openModelConnection,
+  openUserSettings,
+  pickReopenedModel,
+  signup,
+} from "./helpers";
 
 test("onboarding preflight stays on the connection being tested", async ({ page }, testInfo) => {
   await page.route("**/rpc/me", async (route) => {
@@ -18,18 +26,19 @@ test("onboarding preflight stays on the connection being tested", async ({ page 
   });
 
   const provider = page.getByRole("combobox", { name: "Provider" });
-  await expect(provider).toContainText("OpenRouter");
+  await provider.click();
+  await page.getByRole("option", { name: "OpenRouter", exact: true }).click();
   await expect(page.getByRole("button", { name: "Test API key" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Test sign-in" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Test connection" })).toHaveCount(0);
 
   await provider.click();
-  await page.getByRole("option", { name: "OpenAI", exact: true }).click();
+  await page.getByRole("option", { name: "OpenAI API", exact: true }).click();
   await expect(page.getByRole("button", { name: "Test API key" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Test sign-in" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Test connection" })).toHaveCount(0);
 
   await provider.click();
-  await page.getByRole("option", { name: "Anthropic" }).click();
-  await expect(page.getByRole("button", { name: "Test sign-in" })).toBeVisible();
+  await page.getByRole("option", { name: "Claude subscription", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Test connection" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Test API key" })).toHaveCount(0);
   await captureScreenshot(page, testInfo, "onboarding-model-preflight");
 
@@ -77,12 +86,11 @@ test("settings preflight distinguishes a stored API key from sign-in", async ({
   const stamp = Date.now();
   await signup(page, `preflight-settings-${stamp}@rakazo.test`, "password12", `Settings ${stamp}`);
   await completeOnboarding(page);
-  const settings = await openUserSettings(page, "models");
+  await openUserSettings(page, "models");
 
-  await page.getByPlaceholder("Search providers").fill("OpenRouter");
-  await settings.getByRole("button").filter({ hasText: "OpenRouter" }).first().click();
+  let settings = await openModelConnection(page, "OpenRouter");
   await expect(settings.getByRole("button", { name: "Test API key" })).toBeVisible();
-  await expect(settings.getByRole("button", { name: "Test sign-in" })).toHaveCount(0);
+  await expect(settings.getByRole("button", { name: "Test connection" })).toHaveCount(0);
   await captureScreenshot(page, testInfo, "settings-model-preflight");
 
   let holdProbe = true;
@@ -117,18 +125,23 @@ test("settings preflight distinguishes a stored API key from sign-in", async ({
   await expect(catalogAlert).toContainText("was not listed");
   await expect(settings.getByText("Models list OK")).toHaveCount(0);
 
-  await page.getByPlaceholder("Search providers").fill("Anthropic");
-  await settings.getByRole("button").filter({ hasText: "Anthropic" }).first().click();
-  await expect(settings.getByRole("button", { name: "Test sign-in" })).toBeVisible();
+  await page
+    .getByTestId("model-connection")
+    .getByRole("button", { name: "Close", exact: true })
+    .click();
+  await expect(settings).toBeHidden();
+  settings = await openModelConnection(page, "Anthropic");
+  await expect(settings.getByRole("button", { name: "Test connection" })).toBeDisabled();
+  await captureScreenshot(page, testInfo, "settings-subscription-unconnected");
   await expect(settings.getByRole("button", { name: "Test API key" })).toHaveCount(0);
   await settings.getByLabel(/API key/).fill("sk-anthropic-test");
   await settings.getByRole("button", { name: "Connect API key" }).click();
+  await expect(settings).toBeHidden();
+  await pickReopenedModel(page);
+  settings = await manageModelConnection(page, "Anthropic");
   await expect(settings.getByRole("button", { name: "Disconnect", exact: true })).toBeVisible();
   await expect(settings.getByRole("button", { name: "Sign in again" })).toHaveCount(0);
-  await expect(settings.getByRole("button", { name: "Sign in with Claude Pro/Max" })).toBeVisible();
-  await settings.getByRole("button", { name: "Test sign-in" }).click();
-  const signInAlert = settings.getByRole("alert");
-  await expect(signInAlert).toContainText("An API key is stored");
-  await expect(settings.getByText("A subscription credential is stored securely.")).toHaveCount(0);
+  await expect(settings.getByRole("button", { name: "Sign in with Claude" })).toBeVisible();
+  await expect(settings.getByRole("button", { name: "Test connection" })).toBeDisabled();
   await captureScreenshot(page, testInfo, "settings-preflight-api-key");
 });

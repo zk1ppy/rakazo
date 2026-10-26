@@ -231,7 +231,10 @@ function deps(
 ): MemoryConsolidateDeps & { jobs: ReturnType<typeof jobs> } {
   return {
     runtime: runtime(run, scripted),
-    prisma: { usageRecord: { create: vi.fn() } } as unknown as Pick<PrismaClient, "usageRecord">,
+    prisma: { usageRecord: { create: vi.fn() } } as unknown as Pick<
+      PrismaClient,
+      "usageRecord" | "$transaction"
+    >,
     jobs: queue,
     resolveModel: vi.fn(async () => model),
     resolveSubjectName: async () => subjectName,

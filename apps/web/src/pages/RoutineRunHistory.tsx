@@ -1,7 +1,7 @@
 import { Trans, useLingui } from "@lingui/react/macro";
 import type { RoutineHistory } from "@rakazo/contracts";
 import { isRetryableError, normalizeRunError } from "@rakazo/core";
-import { Button, Collapsible, CollapsibleContent } from "@rakazo/ui-web";
+import { Button, Collapsible, CollapsibleContent, Spinner } from "@rakazo/ui-web";
 import { ChevronDown } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router-dom";
@@ -210,12 +210,12 @@ export function RoutineRunHistory({ routineId }: { routineId: string }) {
     <section data-testid="routine-run-history" className="mt-8 text-sm text-muted-foreground">
       <div className="flex items-center justify-between gap-2">
         <h3>
-          <button
-            type="button"
+          <Button
+            variant="text"
             aria-expanded={expanded}
             aria-controls={listId}
             onClick={toggleExpanded}
-            className="flex items-center gap-2 hover:text-foreground"
+            className="gap-2 font-normal"
           >
             <Trans>Run history</Trans>
             <ChevronDown
@@ -223,7 +223,7 @@ export function RoutineRunHistory({ routineId }: { routineId: string }) {
               aria-hidden
               className={`transition-transform duration-150 ease-out motion-reduce:transition-none ${expanded ? "rotate-180" : ""}`}
             />
-          </button>
+          </Button>
         </h3>
         {expanded ? (
           <Button size="xs" variant="ghost" onClick={() => setRevision((value) => value + 1)}>
@@ -236,8 +236,8 @@ export function RoutineRunHistory({ routineId }: { routineId: string }) {
           <Trans>Could not load run history</Trans>
         </p>
       ) : runs === null ? (
-        <p role="status" className="mt-2 text-[13.5px]">
-          <Trans>Loading…</Trans>
+        <p className="mt-2 text-[13.5px]">
+          <Spinner aria-label={t`Loading…`} />
         </p>
       ) : runs.length === 0 ? (
         <p className="mt-2 text-[13.5px]">

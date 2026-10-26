@@ -1,7 +1,7 @@
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import type { ModelOAuthSignInMode, ThinkingLevel } from "@rakazo/contracts";
-import { canonicalPiProviderId } from "@rakazo/contracts";
+import { canonicalPiProviderId, MODEL_KEY_REJECTED_ERROR } from "@rakazo/contracts";
 import { LOCAL_PROVIDER_ID, registerLocalProvider } from "./pi-local-provider.js";
 import { applyPiModelCompatibility } from "./pi-model-compat.js";
 import { loadProviderOAuth, SUBSCRIPTION_SIGN_IN_PROVIDERS } from "./pi-oauth.js";
@@ -10,10 +10,12 @@ import {
   probeOpenAiCompatibleModels,
   registerOpenAiCompatibleCatalog,
 } from "./pi-openai-compatible-provider.js";
+import { MODEL_CONNECT_TIMEOUT_MS } from "./pi-runtime-limits.js";
 
 export type PiCatalogAuth = "api-key" | "oauth" | "both";
 
 export type PiCatalogEntry = {
+  recommended?: boolean;
   provider: string;
   providerName: string;
   id: string;
@@ -34,12 +36,104 @@ export type PiCatalogEntry = {
   live?: true;
 };
 
+/** Product defaults for new connections; only exact catalog IDs are recommended. */
+const RECOMMENDED_MODEL_IDS: Readonly<Record<string, string>> = {
+  "openai-codex": "gpt-6-luna",
+  openai: "gpt-6-luna",
+  openrouter: "openai/gpt-6-luna",
+  anthropic: "claude-haiku-5-5",
+};
+
+export function isRecommendedCatalogModel(provider: string, id: string): boolean {
+  return RECOMMENDED_MODEL_IDS[canonicalPiProviderId(provider)] === id;
+}
+
 const catalogProbeBaseUrls = new Map<string, string>();
+const catalogBaseUrls = new Map<string, Set<string>>();
+
+const trimBaseUrl = (url: string) => url.trim().replace(/\/+$/, "");
+
+/** Whether `url` is one the model registry itself uses for this catalog provider. */
+export function isCatalogProviderBaseUrl(provider: string, url: string): boolean {
+  listPiCatalog();
+  return catalogBaseUrls.get(canonicalPiProviderId(provider))?.has(trimBaseUrl(url)) ?? false;
+}
 
 /** Pinned models-list URL for a catalog provider, taken from the model registry. */
 export function catalogProviderProbeBaseUrl(provider: string): string | null {
   listPiCatalog();
   return catalogProbeBaseUrls.get(canonicalPiProviderId(provider)) ?? null;
+}
+
+/** Read-only authenticated endpoints; public catalogs cannot establish key validity. */
+const KEY_CHECK_URLS = new Map([
+  ["openrouter", "https://openrouter.ai/api/v1/key"],
+  ["deepseek", "https://api.deepseek.com/models"],
+  ["google", "https://generativelanguage.googleapis.com/v1beta/models"],
+]);
+
+/** Google reports invalid keys as HTTP 400 with a structured ErrorInfo reason. */
+async function googleKeyWasRejected(response: Response): Promise<boolean> {
+  const reader = response.body?.getReader();
+  if (!reader) return false;
+  try {
+    const decoder = new TextDecoder();
+    let text = "";
+    let bytes = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > 4096) return false;
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+    const body = JSON.parse(text) as { error?: { details?: Array<{ reason?: string }> } };
+    return (
+      Array.isArray(body.error?.details) &&
+      body.error.details.some((detail) => detail?.reason === "API_KEY_INVALID")
+    );
+  } catch {
+    return false;
+  } finally {
+    void reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+export async function verifyCatalogProviderApiKey(
+  input: { provider: string; apiKey: string },
+  fetchImpl: typeof fetch = globalThis.fetch,
+  signal?: AbortSignal,
+): Promise<void> {
+  const provider = canonicalPiProviderId(input.provider);
+  const url = KEY_CHECK_URLS.get(provider);
+  if (!url) return;
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      headers:
+        provider === "google"
+          ? { "x-goog-api-key": input.apiKey.trim() }
+          : { Authorization: `Bearer ${input.apiKey.trim()}` },
+      redirect: "error",
+      signal: AbortSignal.any([
+        AbortSignal.timeout(MODEL_CONNECT_TIMEOUT_MS),
+        ...(signal ? [signal] : []),
+      ]),
+    });
+  } catch {
+    // Transport errors may contain the request's credential. Never forward them.
+    throw new Error("Could not verify the API key. Try again.");
+  }
+  const rejected =
+    provider === "google" && response.status === 400
+      ? await googleKeyWasRejected(response)
+      : response.status === 401 || response.status === 403;
+  void response.body?.cancel().catch(() => undefined);
+  if (rejected) {
+    throw new Error(MODEL_KEY_REJECTED_ERROR);
+  }
+  if (!response.ok) throw new Error("Could not verify the API key. Try again.");
 }
 
 /**
@@ -54,6 +148,7 @@ export async function probeCatalogProviderModels(
 ): Promise<string[]> {
   const baseUrl = catalogProviderProbeBaseUrl(input.provider);
   if (!baseUrl) throw new Error("This provider cannot be tested without saving.");
+  await verifyCatalogProviderApiKey(input, fetchImpl, signal);
   return probeOpenAiCompatibleModels({ baseUrl, apiKey: input.apiKey }, fetchImpl, signal, {
     allowPublic: true,
     catalogProbe: true,
@@ -104,6 +199,7 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
 
 function buildPiCatalog(): PiCatalogEntry[] {
   catalogProbeBaseUrls.clear();
+  catalogBaseUrls.clear();
   const models = registerOpenAiCompatibleCatalog(
     registerLocalProvider(applyPiModelCompatibility(builtinModels())),
   );
@@ -124,6 +220,12 @@ function buildPiCatalog(): PiCatalogEntry[] {
     const providerModels = provider.getModels();
     const probeBaseUrl = pinnedCatalogProbeBaseUrl(provider.id, providerModels);
     if (probeBaseUrl) catalogProbeBaseUrls.set(provider.id, probeBaseUrl);
+    catalogBaseUrls.set(
+      provider.id,
+      new Set(
+        providerModels.flatMap((model) => (model.baseUrl ? [trimBaseUrl(model.baseUrl)] : [])),
+      ),
+    );
     const modelIds = providerModels.map((model) => model.id);
     for (const model of providerModels) {
       const thinkingLevels = getSupportedThinkingLevels(model) as ThinkingLevel[];
@@ -131,6 +233,7 @@ function buildPiCatalog(): PiCatalogEntry[] {
         provider: provider.id,
         providerName,
         id: model.id,
+        recommended: isRecommendedCatalogModel(provider.id, model.id),
         label: catalogModelLabel(model.id, model.name, modelIds),
         billing,
         auth,
@@ -220,7 +323,7 @@ function catalogBilling(
   const signInMeta = SUBSCRIPTION_SIGN_IN_PROVIDERS[providerId];
   if (signInMeta) return signInMeta.billing;
   if (providerId === LOCAL_PROVIDER_ID) {
-    return "Runs on infrastructure configured by the deployment owner. No model charges from Rakazo.";
+    return "Runs on infrastructure configured by the server operator. No model charges from Rakazo.";
   }
   if (providerId === OPENAI_COMPATIBLE_PROVIDER_ID) {
     return "Runs on a URL you control. Rakazo does not pay for model usage.";

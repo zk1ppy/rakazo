@@ -1,8 +1,10 @@
 import { useSyncExternalStore } from "react";
 import { DE_MESSAGES } from "./locales/de";
+import { JA_MESSAGES } from "./locales/ja";
 import { NL_MESSAGES } from "./locales/nl";
 import { RU_MESSAGES } from "./locales/ru";
 import { ZH_MESSAGES } from "./locales/zh";
+import { ZH_TW_MESSAGES } from "./locales/zh-TW";
 import {
   htmlLangForLocale,
   resolveUiLocale,
@@ -12,9 +14,11 @@ import {
 
 const catalogs: Partial<Record<UiLocale, Record<string, string>>> = {
   "zh-CN": ZH_MESSAGES,
+  "zh-TW": ZH_TW_MESSAGES,
   ru: RU_MESSAGES,
   de: DE_MESSAGES,
   nl: NL_MESSAGES,
+  ja: JA_MESSAGES,
 };
 
 let activeLocale: UiLocale = "en";
@@ -69,7 +73,7 @@ export function activateUiLocale(locale: UiLocale): UiLocale {
 
 async function applyDirection(locale: UiLocale): Promise<void> {
   try {
-    // Direction follows the active UI locale only (en / zh-CN / ru / de / nl → LTR), never the
+    // Direction follows the active UI locale only (en / zh-CN / zh-TW / ru / de / nl / ja → LTR), never the
     // device language. Applying device RTL here would fight this and reload-loop.
     const { applyMobileUiDirection } = await import("./ui-direction");
     applyMobileUiDirection(htmlLangForLocale(locale));

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type {
   BackgroundJob,
+  BackgroundJobExecution,
   BackgroundJobHandlers,
   BackgroundJobName,
   BackgroundJobPayloads,
@@ -23,6 +24,10 @@ const payloadSchemas = {
   "call.expire": z.object({ threadId: z.string().min(1), callId: z.string().min(1) }),
   "history.compact": z.object({ threadId: z.string().min(1) }),
   "messaging.deliver": z.object({ runId: z.string().min(1).optional() }),
+  "messaging.credential-cleanup": z.object({
+    installationId: z.string().min(1),
+    ref: z.string().min(1),
+  }),
   "cloud_agent.poll": z.object({ agentId: z.string().min(1) }),
   "memory.extract": z.object({
     spaceId: z.string().min(1),
@@ -74,10 +79,15 @@ export async function dispatchBackgroundJob(
   handlers: BackgroundJobHandlers,
   name: string,
   payload: unknown,
+  execution?: BackgroundJobExecution,
 ): Promise<void> {
   const job = parseBackgroundJob(name, payload);
-  const handler = handlers[job.name] as (payload: typeof job.payload) => Promise<void>;
-  await handler(job.payload);
+  const handler = handlers[job.name] as (
+    payload: typeof job.payload,
+    execution?: BackgroundJobExecution,
+  ) => Promise<void>;
+  if (execution) await handler(job.payload, execution);
+  else await handler(job.payload);
 }
 
 export function runJobKey(runId: string): string {
