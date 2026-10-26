@@ -14,11 +14,12 @@ import { GlassIconButton } from "../components/glass-icon-button";
 import { GroupAvatar } from "../components/group-avatar";
 import { NativeActionButton } from "../components/native-action-button";
 import { SheetCloseButton } from "../components/sheet-close-button";
-import type { MobileBot } from "../lib/api";
+import type { MobileBot, MobileGroup } from "../lib/api";
 import { rpc } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { native, useMobileTokens } from "../lib/native";
 import { iosAtLeast } from "../lib/native-controls";
+import { addToSearchInbox, searchInboxSession } from "../lib/search-inbox";
 import { useSideInsets } from "../lib/side-insets";
 import { errorText } from "../lib/user-error";
 
@@ -64,11 +65,13 @@ export default function NewGroup() {
     creating.current = true;
     setPending(true);
     setError(null);
+    const askedIn = searchInboxSession();
     try {
-      const group = await rpc<{ id: string; name: string }>("groups/create", {
+      const group = await rpc<MobileGroup>("groups/create", {
         name: name.trim() || defaultGroupName(picked.map((bot) => bot.name)),
         botIds: selected,
       });
+      addToSearchInbox({ kind: "group", group }, askedIn);
       router.replace({
         pathname: "/group-thread",
         params: { groupId: group.id, name: group.name },
@@ -84,7 +87,7 @@ export default function NewGroup() {
     <>
       <Stack.Screen
         options={{
-          title: t("New group"),
+          title: t("New group chat"),
           headerTransparent: true,
           headerStyle: { backgroundColor: "transparent" },
           headerBackVisible: false,

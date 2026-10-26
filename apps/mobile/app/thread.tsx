@@ -62,6 +62,7 @@ import {
   useIsFocused,
   useLocalSearchParams,
   useNavigation,
+  useRoute,
   useRouter,
 } from "expo-router";
 import { useHeaderHeight } from "expo-router/react-navigation";
@@ -122,6 +123,7 @@ import { BotAvatar } from "../components/bot-avatar";
 import { BotMention, MessageMentions } from "../components/bot-mention";
 import { ChoiceCard } from "../components/ChoiceCard";
 import { ComputerCard } from "../components/ComputerCard";
+import { publishChatTitle } from "../components/chat-header-title";
 import { ComposerReplyPreview } from "../components/composer-reply-preview";
 import { FailedSendBubble } from "../components/failed-send-bubble";
 import { GlassSurface } from "../components/glass-surface";
@@ -146,6 +148,7 @@ import { trailingHeaderOptions } from "../components/sheet-header";
 import type { ThreadComposerHandle } from "../components/thread-composer";
 import { ThreadComposer } from "../components/thread-composer";
 import { ThreadErrorNotice } from "../components/thread-error-notice";
+import { threadHeaderRight } from "../components/thread-header-right";
 import { createThreadHeaderStyles } from "../components/thread-header-styles";
 import { ThreadScrollSurface } from "../components/thread-scroll-surface";
 import { TimeSeparator } from "../components/time-separator";
@@ -188,6 +191,7 @@ import { retainUnchangedBotRoster } from "../lib/bot-roster";
 import { findSwitchTarget, ringOnArrival, takeRingOnArrival } from "../lib/bot-switch";
 import { setCallProviderTranscribe, startCall, useCallSession } from "../lib/call-session";
 import { chatSettingsRoute } from "../lib/chat-settings-route";
+import { cronLabels } from "../lib/cron";
 import { loadDeviceVoiceEnabled } from "../lib/device-voice";
 import { available as dictationAvailable } from "../lib/dictation";
 import { canDoubleTapReact } from "../lib/double-tap";
@@ -217,7 +221,6 @@ import {
 } from "../lib/message-presentation";
 import { openModelSettings } from "../lib/model-settings";
 import { useMobileTokens, useResolvedAppearance, useThemedStyles } from "../lib/native";
-import { HEADER_TITLE_MAX_FONT_SCALE, iosAtLeast } from "../lib/native-controls";
 import {
   threadRouteSpaceOnFocus,
   threadSpaceRequest,
@@ -246,6 +249,7 @@ import {
   savedChatTarget,
   writeSavedThread,
 } from "../lib/saved-chats";
+import { removeFromSearchInbox, useInboxBot } from "../lib/search-inbox";
 import { secretDestinationLabel } from "../lib/secret-destination";
 import { secretFieldTraits } from "../lib/secret-field-traits";
 import { selectableTextFromMarkdown } from "../lib/selectable-text";
@@ -255,7 +259,7 @@ import {
   loadVerifiedIntegrationsScope,
   subscribeSessionGeneration,
 } from "../lib/session";
-import { setInboxHidden, useSplitView } from "../lib/split-view";
+import { useSplitView } from "../lib/split-view";
 import { threadEdgeOptions, threadHeaderClearance, threadHeaderFloats } from "../lib/thread-edges";
 import type { SendAttempt } from "../lib/thread-feedback";
 import { subscribeDelivered, useThreadFeedback } from "../lib/thread-feedback";
@@ -468,11 +472,13 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
   const [botActionsOpen, setBotActionsOpen] = useState(false);
   const { t, locale } = useI18n();
   const navigation = useNavigation();
+  // This screen's own route: its header title reads what this screen publishes, by key.
+  const route = useRoute();
   const focused = useIsFocused();
   const foreground = useAppForeground();
   const router = useRouter();
   // Beside the chat list on a wide window, the chat has only the width the list leaves.
-  const { split, inboxHidden, inboxShown, foldActive, contentWidth: windowWidth } = useSplitView();
+  const { inboxShown, contentWidth: windowWidth } = useSplitView();
   const nativeHeaderHeight = useHeaderHeight();
   const headerHeight = threadHeaderFloats() ? nativeHeaderHeight : 0;
   const headerClearance = threadHeaderClearance(headerHeight);
@@ -782,15 +788,26 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
           botName: routine.botName,
         })),
         connectors: mentionConnectors,
+        cronLabels: cronLabels(locale),
       }),
-    [groupId, inGroup, mentionBots, mentionConnectors, mentionGroups, mentionRoutines],
+    [groupId, inGroup, locale, mentionBots, mentionConnectors, mentionGroups, mentionRoutines],
   );
   const currentBot = botId ? mentionBots.find((bot) => bot.id === botId) : undefined;
-  const displayName = safeDisplayName(currentBot?.name ?? name, inGroup ? t("Group") : t("Bot"));
+  // Until the chat's own roster arrives, the bot as the inbox last loaded it.
+  const inboxBot = useInboxBot(botId);
+  const titleBot = currentBot ?? inboxBot;
+  // Without a name yet (a notification can leave it out), the title shows a placeholder.
+  const titleName = currentBot?.name ?? name ?? inboxBot?.name;
+  const displayName = safeDisplayName(titleName, inGroup ? t("Group") : t("Bot"));
   const composerPrompt = displayName ? t("Message {name}", { name: displayName }) : t("Message…");
   const notificationThreadId = snap?.threadId ?? requestedThreadId ?? currentBot?.threadId;
   activeThreadId.current = notificationThreadId;
-  const currentBotStatus = snap ? snap.run?.status : currentBot?.status;
+  const currentBotStatus = snap ? snap.run?.status : titleBot?.status;
+  // The group's members in its order, once the chat or its group list has loaded them; the
+  // title seats the inbox's copy until then.
+  const groupMembers = groupId
+    ? (snap?.members ?? mentionGroups.find((group) => group.id === groupId)?.members)
+    : undefined;
   // Only reply text being written replaces the footer; earlier sentences above a tool call don't.
   const hasLiveProgress = visibleMessages.some(
     (message) => message.id.startsWith("progress:") && liveMessageComposing(message.blocks),
@@ -918,166 +935,55 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
     return activeBotId.current === targetBotId && activeGroupId.current === targetGroupId;
   }
 
+  // The route draws the title from the screen's first frame; the chat feeds it its own data.
+  const titleComposing = Boolean(botId) && composingBots.split(",").includes(botId ?? "");
+  useLayoutEffect(
+    () =>
+      publishChatTitle(route.key, {
+        bot: titleBot,
+        status: currentBotStatus,
+        composing: titleComposing,
+        name: titleName,
+        members: groupMembers,
+        // The title opens the chat's own settings: the group's in a group, the bot's otherwise.
+        settings: chatSettingsRoute({ groupId, botId, readOnly }),
+      }),
+    [
+      route.key,
+      botId,
+      groupId,
+      readOnly,
+      titleBot,
+      currentBotStatus,
+      titleComposing,
+      titleName,
+      groupMembers,
+    ],
+  );
+
   useLayoutEffect(() => {
-    // The title opens the chat's own settings: the group's in a group, the bot's otherwise.
-    const titleSettings = chatSettingsRoute({ groupId, botId, readOnly });
     navigation.setOptions({
       title: displayName || t("Thread"),
       headerTitleAlign: "center",
       ...threadEdgeOptions(),
-      headerTitle: () => (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={
-            titleSettings
-              ? t(inGroup ? "Group settings" : "Chat settings")
-              : displayName || t("Thread")
-          }
-          disabled={!titleSettings}
-          onPress={() => {
-            if (titleSettings) router.push(titleSettings);
-          }}
-        >
-          <GlassSurface style={styles.titleCapsule} fallbackStyle={styles.titleCapsuleFill}>
-            {!inGroup && currentBot ? (
-              <BotAvatar
-                color={currentBot.color}
-                identity={currentBot.id}
-                size={28}
-                status={currentBotStatus}
-                composing={composingBots.split(",").includes(currentBot.id)}
-                muted={currentBot.notifyOnFinish === false}
-              />
-            ) : null}
-            <Text
-              maxFontSizeMultiplier={HEADER_TITLE_MAX_FONT_SCALE}
-              numberOfLines={1}
-              style={styles.title}
-            >
-              {displayName || t("Thread")}
-            </Text>
-          </GlassSurface>
-        </Pressable>
-      ),
-      ...(Platform.OS === "ios" && !readOnly && (!inGroup || iosAtLeast(26))
-        ? {
-            unstable_headerRightItems: () => [
-              inGroup
-                ? {
-                    type: "button" as const,
-                    label: t("Group settings"),
-                    accessibilityLabel: t("Group settings"),
-                    icon: { type: "sfSymbol" as const, name: "gearshape" },
-                    onPress: () =>
-                      router.push({
-                        pathname: "/group-settings",
-                        params: { groupId: groupId ?? "" },
-                      }),
-                  }
-                : {
-                    type: "menu" as const,
-                    label: t("Bot actions"),
-                    accessibilityLabel: t("Bot actions"),
-                    icon: { type: "sfSymbol" as const, name: "ellipsis" },
-                    disabled: !botId,
-                    menu: {
-                      items: botActions.map((action) => ({
-                        type: "action" as const,
-                        label: action.text,
-                        destructive: action.destructive,
-                        ...(action.text === t("Open computer")
-                          ? { icon: { type: "sfSymbol" as const, name: "desktopcomputer" } }
-                          : {}),
-                        onPress: action.onPress,
-                      })),
-                    },
-                  },
-            ],
-          }
-        : {}),
-      headerRight: () =>
-        inGroup ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={t("Group settings")}
-            hitSlop={8}
-            onPress={() =>
-              router.push({
-                pathname: "/group-settings",
-                params: { groupId: groupId ?? "" },
-              })
-            }
-          >
-            <NativeSymbol
-              ios="gearshape"
-              android="settings-outline"
-              size={21}
-              color={tokens.foreground}
-            />
-          </Pressable>
-        ) : (
-          <View style={styles.headerActions}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={t("Bot actions")}
-              hitSlop={8}
-              onPress={showBotActions}
-            >
-              <NativeSymbol
-                ios="ellipsis"
-                android="ellipsis-horizontal"
-                size={21}
-                color={tokens.foreground}
-              />
-            </Pressable>
-          </View>
-        ),
-      ...(split && !foldActive
-        ? {
-            headerBackVisible: false,
-            ...(iosAtLeast(26)
-              ? {
-                  unstable_headerLeftItems: () => [
-                    {
-                      type: "button" as const,
-                      label: inboxHidden ? t("Show chats") : t("Hide chats"),
-                      icon: { type: "sfSymbol" as const, name: "sidebar.left" },
-                      onPress: () => setInboxHidden(!inboxHidden),
-                    },
-                  ],
-                }
-              : {}),
-            headerLeft: () => (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={inboxHidden ? t("Show chats") : t("Hide chats")}
-                hitSlop={8}
-                onPress={() => setInboxHidden(!inboxHidden)}
-              >
-                <NativeSymbol
-                  ios={inboxHidden ? "sidebar.left" : "arrow.up.left.and.arrow.down.right"}
-                  android={inboxHidden ? "contract-outline" : "expand-outline"}
-                  size={21}
-                  color={tokens.foreground}
-                />
-              </Pressable>
-            ),
-          }
-        : // Folding back takes the list away, so the chat gets its back button again. Folded like
-          // a book, the list stays beside the chat, so it needs neither.
-          {
-            headerBackVisible: !split,
-            headerLeft: undefined,
-            ...(iosAtLeast(26) ? { unstable_headerLeftItems: () => [] } : {}),
-          }),
+      ...threadHeaderRight({
+        inGroup,
+        readOnly,
+        hasBot: Boolean(botId),
+        t,
+        color: tokens.foreground,
+        rowStyle: styles.headerActions,
+        onGroupSettings: () =>
+          router.push({ pathname: "/group-settings", params: { groupId: groupId ?? "" } }),
+        onBotActions: showBotActions,
+        menuActions: botActions,
+        computerLabel: t("Open computer"),
+      }),
       ...(readOnly
         ? trailingHeaderOptions(t("Restore"), () => void restoreConversation(), restoring)
         : {}),
     });
   }, [
-    split,
-    foldActive,
-    inboxHidden,
     readOnly,
     restoring,
     botId,
@@ -1177,6 +1083,7 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
       onPress: () =>
         void rpc("bots/archive", { botId })
           .then(() => {
+            removeFromSearchInbox(botId);
             notifyArchivedChatsChanged();
             leaveBot();
           })
@@ -1813,6 +1720,8 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
   }
 
   function followOwnSend() {
+    // Writing in the chat means the user has caught up, so the "New" divider goes.
+    setReadBoundary({ visit: readVisit.current.visit, seq: null });
     if (pinnedAroundRef.current || jumpScrollTarget.current) showLatest();
     performScroll(scrollBehavior.current.onOwnSend());
     publishThreadScrollState(scrollBehavior.current.state());
@@ -1967,6 +1876,7 @@ function Thread({ sessionEpoch, userId }: { sessionEpoch: number; userId: string
       const targetBotId = botId;
       const targetGroupId = groupId;
       if (readOnly || (!targetBotId && !targetGroupId) || !message.runId) return;
+      setReadBoundary({ visit: readVisit.current.visit, seq: null });
       await rpc("threads/answer", {
         ...(targetGroupId ? { groupId: targetGroupId } : { botId: targetBotId! }),
         runId: message.runId,
@@ -3286,7 +3196,7 @@ function previewMessageText(message: MobileMessage): string {
     .flatMap((block) => {
       if (block.kind === "channel_message" && block.text) {
         return [
-          `${messagingProviderLabel(block.provider, block.transport)} · ${block.fromLabel}: ${block.text}`,
+          `${block.fromLabel} (${messagingProviderLabel(block.provider, block.transport)}): ${block.text}`,
         ];
       }
       if (block.kind === "text" && block.text) {
@@ -4124,8 +4034,10 @@ const MessageBubbleContent = memo(function MessageBubbleContent({
         {...actionProps}
         style={{ width: "100%", paddingVertical: 4, alignItems: "center" }}
       >
+        <Text style={{ color: tokens.mutedForeground, fontSize: 12, textAlign: "center" }}>
+          {messagingProviderLabel(channelMessage.provider, channelMessage.transport)}
+        </Text>
         <Text style={{ color: tokens.mutedForeground, fontSize: 13.5, textAlign: "center" }}>
-          {messagingProviderLabel(channelMessage.provider, channelMessage.transport)} ·{" "}
           {channelMessage.fromLabel}: {channelMessage.text}
         </Text>
       </Pressable>
@@ -4229,6 +4141,8 @@ const MessageBubbleContent = memo(function MessageBubbleContent({
               ) : canAnswer && onAnswer ? (
                 <AskActions
                   actions={askBlock.actions}
+                  site={askBlock.site}
+                  approval={isApprovalAskBlock(askBlock)}
                   instructions={askBlock.instructionUpdate?.after}
                   accessibilityActions={actionProps.accessibilityActions}
                   onAccessibilityAction={actionProps.onAccessibilityAction}
@@ -4276,7 +4190,7 @@ const MessageBubbleContent = memo(function MessageBubbleContent({
     .flatMap((block) => {
       if (block.kind === "channel_message" && block.text) {
         return [
-          `${messagingProviderLabel(block.provider, block.transport)} · ${block.fromLabel}: ${block.text}`,
+          `${block.fromLabel} (${messagingProviderLabel(block.provider, block.transport)}): ${block.text}`,
         ];
       }
       return block.kind === "text" && block.text ? [block.text] : [];

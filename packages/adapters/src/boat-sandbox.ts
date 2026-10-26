@@ -27,6 +27,7 @@ import type {
   TerminalRequest,
 } from "@rakazo/adapter-kit";
 import {
+  SandboxDamagedError,
   SandboxRateLimitError,
   SandboxUnavailableError,
   SandboxUnresponsiveError,
@@ -37,6 +38,7 @@ import { BoatApiError, boatResponseError, callerSignal, wrapBoatCall } from "./b
 import { normalizeWorkspacePath, shellQuote, workspacePath } from "./computer-support.js";
 import {
   PORTABLE_TRANSFER_BATCH_BYTES,
+  SKIPPED_BROWSER_PROFILE_DIRECTORIES,
   shouldSkipPortableWorkspaceFile,
 } from "./computer-workspace.js";
 import { LinuxDesktop, PREPARE_LINUX_DESKTOP, VERIFY_LINUX_DESKTOP } from "./linux-desktop.js";
@@ -50,6 +52,8 @@ const BOAT_WORKSPACE = "/home/user/rakazo-home";
 const BOAT_BROWSER_PROFILES = `${BOAT_WORKSPACE}/.browser-profiles`;
 /** Outside the workspace so checkpoints never carry it. Boat runs every command as `user`. */
 const BOAT_COMMAND_ENV = "/home/user/.rakazo-command-env";
+/** Workspace listings too large for command output; outside the workspace for the same reason. */
+const BOAT_LISTING_PREFIX = "/tmp/rakazo-workspace-listing-";
 const BOAT_READY_TIMEOUT_MS = 5 * 60_000;
 const BOAT_RECOVER_POLL_MAX_MS = 15_000;
 const BOAT_API_COMMAND_TIMEOUT_SECONDS = 600;
@@ -418,7 +422,7 @@ export class BoatSandboxProvider implements SandboxProvider {
         context.signal,
       );
       if (result.exitCode !== 0) {
-        throw new Error(result.stderr || result.stdout || "could not prepare Boat workspace");
+        throw new Error(`could not prepare Boat workspace (${commandFailure(result)})`);
       }
       const runtime = await this.runCommand(
         id,
@@ -565,10 +569,10 @@ export class BoatSandboxProvider implements SandboxProvider {
       60_000,
       context.signal,
     );
-    if (result.exitCode !== 0) {
-      throw new Error(result.stderr || result.stdout || "could not list Boat workspace");
+    if (result.exitCode !== 0 || result.timedOut) {
+      throw new Error(`could not list Boat workspace (${commandStatus(result)})`);
     }
-    return parseBoatFileEntries(result.stdout);
+    return parseBoatFileEntries(Buffer.from(result.stdout, "base64"));
   }
 
   async readFile(
@@ -844,9 +848,7 @@ export class BoatSandboxProvider implements SandboxProvider {
         signal,
       );
       if (result.exitCode !== 0) {
-        throw new Error(
-          result.stderr || result.stdout || "could not prepare Boat command environment",
-        );
+        throw new Error(`could not prepare Boat command environment (${commandFailure(result)})`);
       }
     }
     await this.whenRunnable(id, signal, () =>
@@ -901,7 +903,7 @@ export class BoatSandboxProvider implements SandboxProvider {
       context.signal,
     );
     if (result.exitCode !== 0) {
-      throw new Error(result.stderr || result.stdout || "could not set Boat file permissions");
+      throw new Error(`could not set Boat file permissions (${commandFailure(result)})`);
     }
   }
 
@@ -938,17 +940,21 @@ export class BoatSandboxProvider implements SandboxProvider {
     id: string,
     context: AdapterContext,
   ): Promise<ComputerFileEntry[]> {
+    // A whole workspace can list more than Boat keeps of a command's output, so the listing is
+    // written to a file and downloaded like any other.
+    const listingFile = `${BOAT_LISTING_PREFIX}${randomUUID()}`;
     const result = await this.runCommand(
       id,
-      listBoatWorkspaceFilesCommand(),
+      listBoatWorkspaceFilesCommand(listingFile),
       undefined,
       60_000,
       context.signal,
     );
-    if (result.exitCode !== 0) {
-      throw new Error(result.stderr || result.stdout || "could not enumerate Boat workspace");
+    if (result.exitCode !== 0 || result.timedOut) {
+      throw new Error(`could not enumerate Boat workspace (${commandStatus(result)})`);
     }
-    return parseBoatFileEntries(result.stdout).filter(
+    const listing = await this.readRemoteFile(id, listingFile, context.signal);
+    return parseBoatFileEntries(listing).filter(
       (entry) => entry.kind === "file" && !shouldSkipPortableWorkspaceFile(entry.path),
     );
   }
@@ -1084,6 +1090,9 @@ export class BoatSandboxProvider implements SandboxProvider {
       const result = isFinishedCommand(response)
         ? commandResponse(response)
         : await this.pollCommand(id, response.processId, timeoutMs + 10_000, signal);
+      if (result.exitCode !== 0 && systemDamaged(result.stderr)) {
+        throw new SandboxDamagedError({ cause: new Error(commandFailure(result)) });
+      }
       if (result.exitCode !== 124 || result.timedOut) return result;
       const completed = await this.rawCommand(id, `test -f ${shellQuote(marker)}`, 10);
       if (completed.exitCode === 0) {
@@ -1175,6 +1184,25 @@ function commandFailure(result: BoatCommandResult): string {
   return last ? `exit ${result.exitCode}: ${last}` : `exit ${result.exitCode}`;
 }
 
+/**
+ * Boat's runner starts each command with `systemd-run` and sources the machine's environment
+ * before our command line runs. These failures come from that, so the machine's system files are
+ * missing or broken; the command itself never started.
+ */
+const BOAT_SYSTEM_DAMAGED =
+  /^(?:Executable not found in \$PATH: "systemd-run"|ENOENT: no such file or directory, posix_spawn 'systemd-run'|environment: line \d+: \/usr\/bin\/[\w.-]+: cannot execute: required file not found)$/m;
+
+function systemDamaged(stderr: string): boolean {
+  return BOAT_SYSTEM_DAMAGED.test(stderr);
+}
+
+/** How a listing command ended. Its output is file names, never an error message. */
+function commandStatus(result: BoatCommandResult): string {
+  if (result.timedOut) return "timed out";
+  if (result.exitCode === BOAT_LISTING_UNREADABLE) return "an entry could not be read";
+  return `exit ${result.exitCode}`;
+}
+
 /** Each step of bringing back a sandbox that stopped answering; none is a failure by itself. */
 function logRecovery(
   step: "wait" | "answered" | "deferred" | "force_stop" | "resumed" | "gone",
@@ -1242,6 +1270,7 @@ function boatClient(api: BoatSandboxSdk, apiKey: string): BoatSandboxSdk {
           operation,
           outcome: error instanceof SandboxRateLimitError ? "rate_limited" : "failed",
           durationMs: Math.round(performance.now() - started),
+          error,
         });
         throw error;
       }
@@ -1412,49 +1441,85 @@ function sourceEnvironmentCommand(envFile: string, argv: string): string {
   return `exec 3< ${file} || exit 1; rm -f -- ${file}; . /dev/fd/3 || exit 1; exec 3<&-; ${argv}`;
 }
 
+/**
+ * One NUL-terminated record per entry, so any file name survives: type, size, mode, path. A
+ * single `find` walks the tree; a subprocess per entry made a large workspace outlast the
+ * listing timeout.
+ */
+const BOAT_LISTING_FORMAT = "%y\\t%s\\t%m\\t%p\\0";
+/** Exit status of a listing that met an entry it could not read. */
+const BOAT_LISTING_UNREADABLE = 3;
+
+/**
+ * Runs `find` with its records on fd 3 and its errors captured. It exits 1 for any error, but
+ * an entry that vanished mid-walk leaves the rest of the listing intact, as do the `skippable`
+ * errors a caller names. Anything else, such as an unreadable entry or a listing it could not
+ * finish writing, fails the listing.
+ */
+function boatListingWalk(findArguments: string, skippable: string[] = []): string {
+  const tolerated = ["No such file or directory", ...skippable]
+    .map((error) => `-e ${shellQuote(`${error}$`)}`)
+    .join(" ");
+  return [
+    `errors=$(find ${findArguments} -printf '${BOAT_LISTING_FORMAT}' 2>&1 >&3 3>&-)`,
+    "status=$?",
+    'if [ "$status" -eq 1 ]; then',
+    `  if ! printf '%s\\n' "$errors" | grep -qv ${tolerated}; then status=0;`,
+    `  elif printf '%s\\n' "$errors" | grep -q 'Permission denied$'; then status=${BOAT_LISTING_UNREADABLE}; fi`,
+    "fi",
+    'exit "$status"',
+  ].join("\n");
+}
+
+/** Lists a directory's files and folders, following links as the file browser shows them. */
 function listBoatFilesCommand(directory: string): string {
   return [
     "set -o pipefail",
     `directory=${shellQuote(directory)}`,
-    'test -d "$directory"',
-    'find "$directory" -mindepth 1 -maxdepth 1 -print0 | sort -z | while IFS= read -r -d "" entry; do',
-    '  if [ -d "$entry" ]; then kind=dir; elif [ -f "$entry" ]; then kind=file; else continue; fi',
-    '  encoded=$(printf %s "$entry" | base64 -w0)',
-    '  size=$(stat -c %s "$entry")',
-    '  if [ "$kind" = file ] && [ -x "$entry" ]; then executable=1; else executable=0; fi',
-    '  printf \'%s\\t%s\\t%s\\t%s\\n\' "$encoded" "$kind" "$size" "$executable"',
-    "done",
+    'test -d "$directory" || exit 2',
+    "{",
+    "exec 3>&1",
+    // A link that loops is left out, like a broken one.
+    boatListingWalk('-L "$directory" -mindepth 1 -maxdepth 1 \\( -type f -o -type d \\)', [
+      "Too many levels of symbolic links",
+    ]),
+    "} | base64 -w0",
   ].join("\n");
 }
 
-function listBoatWorkspaceFilesCommand(): string {
+/** Lists every workspace file into `listingFile`, without the browser caches exports skip. */
+function listBoatWorkspaceFilesCommand(listingFile: string): string {
+  const skipped = [...SKIPPED_BROWSER_PROFILE_DIRECTORIES]
+    .map((name) => `-name ${shellQuote(name)}`)
+    .join(" -o ");
   return [
-    "set -o pipefail",
-    `find ${shellQuote(BOAT_WORKSPACE)} -type f -print0 | sort -z | while IFS= read -r -d "" entry; do`,
-    '  encoded=$(printf %s "$entry" | base64 -w0)',
-    '  size=$(stat -c %s "$entry")',
-    '  if [ -x "$entry" ]; then executable=1; else executable=0; fi',
-    '  printf \'%s\\tfile\\t%s\\t%s\\n\' "$encoded" "$size" "$executable"',
-    "done",
+    // Listings an interrupted export left behind.
+    `find /tmp -maxdepth 1 -name '${path.basename(BOAT_LISTING_PREFIX)}*' -mmin +10 -delete 2>/dev/null`,
+    `exec 3> ${shellQuote(listingFile)} || exit 2`,
+    boatListingWalk(
+      `${shellQuote(BOAT_WORKSPACE)} -mindepth 1 \\( -type d -path ${shellQuote(`${BOAT_BROWSER_PROFILES}/*`)} \\( ${skipped} \\) -prune \\) -o -type f`,
+    ),
   ].join("\n");
 }
 
-function parseBoatFileEntries(output: string): ComputerFileEntry[] {
-  return output
-    .split("\n")
-    .filter(Boolean)
-    .flatMap((line): ComputerFileEntry[] => {
-      const [encoded, kind, size, executable] = line.split("\t");
-      if (!encoded || (kind !== "file" && kind !== "dir")) return [];
-      const absolute = Buffer.from(encoded, "base64").toString("utf8");
+function parseBoatFileEntries(listing: Uint8Array): ComputerFileEntry[] {
+  return Buffer.from(listing)
+    .toString("utf8")
+    .split("\0")
+    .flatMap((record): ComputerFileEntry[] => {
+      const match = /^([fd])\t(\d+)\t([0-7]+)\t(.+)$/s.exec(record);
+      if (!match) return [];
+      const [, type, size, mode, absolute = ""] = match;
       if (!absolute.startsWith(`${BOAT_WORKSPACE}/`)) return [];
-      const child = normalizeWorkspacePath(absolute.slice(BOAT_WORKSPACE.length + 1));
+      const kind = type === "d" ? "dir" : "file";
       return [
         {
-          path: child,
+          path: normalizeWorkspacePath(absolute.slice(BOAT_WORKSPACE.length + 1)),
           kind,
-          size: Number(size) || 0,
-          ...(kind === "file" && executable === "1" ? { executable: true } : {}),
+          size: Number(size),
+          ...(kind === "file" && (Number.parseInt(mode ?? "0", 8) & 0o111) !== 0
+            ? { executable: true }
+            : {}),
         },
       ];
     })

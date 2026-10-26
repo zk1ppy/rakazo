@@ -863,6 +863,8 @@ export interface MessagingCapabilities {
 export interface MessagingPlatformDescriptor {
   provider: string;
   capabilities: MessagingCapabilities;
+  /** The line people message to reach this deployment (a phone number), when it has one. */
+  address?: string;
 }
 
 /** Send into an existing conversation, addressed by its opaque thread id. */

@@ -19,7 +19,8 @@ import { LocalAgentHomeStore } from "./home.js";
 
 export const PORTABLE_TRANSFER_BATCH_BYTES = 8 * 1024 * 1024;
 
-const skippedBrowserProfileDirectories = new Set([
+/** Browser profile directories the browser rebuilds on its own; exports skip them. */
+export const SKIPPED_BROWSER_PROFILE_DIRECTORIES: ReadonlySet<string> = new Set([
   "Cache",
   "Code Cache",
   "CacheStorage",
@@ -70,8 +71,24 @@ export function shouldSkipPortableWorkspaceFile(relative: string) {
   const segments = relative.split("/");
   const name = segments.at(-1) ?? "";
   return (
-    segments.some((segment) => skippedBrowserProfileDirectories.has(segment)) ||
+    segments.some((segment) => SKIPPED_BROWSER_PROFILE_DIRECTORIES.has(segment)) ||
     skippedBrowserProfileFiles.has(name)
+  );
+}
+
+/** The computer already reads and writes the server's home directory, so there is nothing to copy. */
+async function homeIsMounted(
+  home: AgentHomeStore,
+  sandbox: SandboxProvider,
+  computer: ComputerRef,
+  context: AdapterContext,
+) {
+  if (!(home instanceof LocalAgentHomeStore)) return false;
+  if (computer.kind === "docker") return true;
+  // Object-backed homes must hydrate and export even when a claim was configured.
+  if (home.describe().id !== "local-fs") return false;
+  return (
+    computer.kind === "kubernetes" && (await sandbox.hasMountedHome?.(computer, context)) === true
   );
 }
 
@@ -82,7 +99,7 @@ export async function restoreComputerWorkspace(
   computer: ComputerRef,
   context: AdapterContext,
 ): Promise<void> {
-  if (computer.kind === "docker" && home instanceof LocalAgentHomeStore) return;
+  if (await homeIsMounted(home, sandbox, computer, context)) return;
   await sandbox.importWorkspace(computer, home.exportHome(homeKey, context), context);
 }
 
@@ -302,20 +319,50 @@ async function listTeamBotEntries(
   return stdout.split("\n").filter(Boolean);
 }
 
+/**
+ * Folders of the space's deleted bots, as `bots/<id>` and `.browser-profiles/<name>`. A Team
+ * Computer that has not removed them yet must not save them back into its stored home.
+ */
+export async function deletedTeamBotFolders(
+  prisma: Pick<PrismaClient, "botDeletion">,
+  computer: { scope: string; spaceId: string },
+): Promise<Set<string> | undefined> {
+  if (computer.scope !== "team") return undefined;
+  const deleted = await prisma.botDeletion.findMany({
+    where: { spaceId: computer.spaceId },
+    select: { id: true },
+  });
+  const folders = new Set<string>();
+  for (const { id } of deleted) {
+    if (isTeamBotFolderName(id)) folders.add(`bots/${id}`);
+    const profile = teamBrowserProfileName(id);
+    if (profile) folders.add(`.browser-profiles/${profile}`);
+  }
+  return folders;
+}
+
 export async function checkpointComputerWorkspace(
   home: AgentHomeStore,
   sandbox: SandboxProvider,
   homeKey: string,
   computer: ComputerRef,
   context: AdapterContext,
+  /** Read after the export, just before saving, so a deletion during the export still counts. */
+  excludedFolders?: () => Promise<ReadonlySet<string> | undefined>,
 ): Promise<string> {
-  if (computer.kind === "docker" && home instanceof LocalAgentHomeStore) {
+  if (
+    home instanceof LocalAgentHomeStore &&
+    (await homeIsMounted(home, sandbox, computer, context))
+  ) {
     return home.revise(homeKey);
   }
   const staging = await mkdtemp(path.join(tmpdir(), "rakazo-workspace-"));
   try {
     for await (const file of sandbox.exportWorkspace(computer, context)) {
       await writePortableFile(staging, file);
+    }
+    for (const folder of (await excludedFolders?.()) ?? []) {
+      await rm(path.join(staging, folder), { recursive: true, force: true });
     }
     return await home.commit(homeKey, staging, context);
   } finally {
@@ -326,7 +373,7 @@ export async function checkpointComputerWorkspace(
 /** Remote exports quiesce browsers, so a run must not checkpoint while peers are driving them. */
 export async function checkpointRunComputerWorkspace(
   deps: { home: AgentHomeStore; sandbox: SandboxProvider; prisma: PrismaClient },
-  computerRecord: { id: string; homeKey: string; scope: string },
+  computerRecord: { id: string; homeKey: string; scope: string; spaceId: string },
   computer: ComputerRef,
   context: AdapterContext,
 ): Promise<string | undefined> {
@@ -370,7 +417,7 @@ export async function checkpointRunComputerWorkspace(
 
 export async function checkpointAndRecordComputerWorkspace(
   deps: { home: AgentHomeStore; sandbox: SandboxProvider; prisma: PrismaClient },
-  computerRecord: { id: string; homeKey: string },
+  computerRecord: { id: string; homeKey: string; scope: string; spaceId: string },
   computer: ComputerRef,
   context: AdapterContext,
 ): Promise<string> {
@@ -381,6 +428,7 @@ export async function checkpointAndRecordComputerWorkspace(
     computerRecord.homeKey,
     computer,
     context,
+    () => deletedTeamBotFolders(deps.prisma, computerRecord),
   );
   await deps.prisma.computer.updateMany({
     where: { id: computerRecord.id },

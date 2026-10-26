@@ -84,11 +84,8 @@ class LoggerImpl implements Logger {
 
   private emit(level: EmitLevel, message: string, bindings?: LogBindings, error?: unknown): void {
     if (LOG_LEVELS[level] < LOG_LEVELS[this.level]) return;
-    const merged = redactBindings({
-      ...this.localBindings,
-      ...getLogContext(),
-      ...bindings,
-    });
+    const combined = { ...this.localBindings, ...getLogContext(), ...bindings };
+    const merged = redactBindings(combined);
     const event: LogEvent = {
       timestamp: new Date().toISOString(),
       level,
@@ -103,9 +100,11 @@ class LoggerImpl implements Logger {
     // ([tT]race_?[iI][dD]), not dotted trace.id. Keep the dotted fields and mirror them.
     copyTraceAlias(event, "trace.id", "trace_id");
     copyTraceAlias(event, "span.id", "span_id");
-    if (error !== undefined) event.error = serializeError(error);
+    // A failure passed as an `error` binding, at any level, is serialized like `error()`'s.
+    const failure = error ?? combined.error;
+    if (failure !== undefined) event.error = serializeError(failure);
     if (level === "error" && merged["error.report"] !== false) {
-      markReportedError(error);
+      markReportedError(failure);
       enrichLogContext({ "error.reported": true });
     }
     for (const sink of this.sinks) {

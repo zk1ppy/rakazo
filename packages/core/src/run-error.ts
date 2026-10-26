@@ -1,3 +1,4 @@
+import type { RunErrorKind } from "@rakazo/contracts";
 import { COMPUTER_RATE_LIMIT_ERROR } from "@rakazo/contracts";
 import { stuckWorkStatusMessages } from "./stuck-work.js";
 
@@ -141,26 +142,21 @@ export function parseModelFallbackFailure(
 }
 
 /**
- * Whose problem a failed run is. Every kind except "output" is the user's provider account,
- * key, plan or model choice; "output" is a model that returned nothing usable.
- */
-export type RunErrorKind =
-  | "key"
-  | "credit"
-  | "spending"
-  | "rate"
-  | "auth"
-  | "access"
-  | "model"
-  | "context"
-  | "output";
-
-/**
- * Fixed failure strings from the model runtime's stop-reason mapping and from provider APIs
- * that reject a model's malformed tool call or empty reply. Never matched against model prose.
+ * Fixed failure strings from the model runtime's stop-reason mapping (including a stop reason
+ * it does not know yet, such as Gemini's MALFORMED_RESPONSE, and a refusal), from Anthropic's
+ * policy blocks, and from provider APIs that reject a model's malformed tool call or empty
+ * reply. Never matched against model prose.
  */
 const MODEL_OUTPUT_FAILURE =
-  /^(?:Provider (?:finish_reason|stopped with): |Provider returned an empty response\b|Failed to parse tool call arguments as JSON\b|Tool call validation failed\b)/;
+  /^(?:Provider (?:finish_reason|stopped with): |Unhandled stop reason: |Provider returned an empty response\b|Failed to parse tool call arguments as JSON\b|Tool call validation failed\b|The model refused to complete the request\b|This request (?:triggered restrictions on [^\n.]{1,80} and )?was blocked (?:under|as it seems to violate) Anthropic's )/;
+
+/**
+ * Fetch refuses to send a key that is not a valid header value, such as one pasted with a code
+ * sample around it or with non-Latin characters. Its message quotes the key, so it is checked
+ * before anything reads that text.
+ */
+const MALFORMED_KEY_HEADER =
+  /^(?:TypeError: )?(?:Headers\.append: "[\s\S]*" is an invalid header value\.|Cannot convert argument to a ByteString because the character at index \d+ has a value of \d+ which is greater than 255\.)$/;
 
 /** The provider says the selected model is gone or cannot serve this kind of request. */
 const MODEL_UNAVAILABLE =
@@ -219,6 +215,16 @@ export function normalizeRunError(
       details,
       recovery: "model",
       kind: "context",
+    };
+  }
+  if (MALFORMED_KEY_HEADER.test(trimmed)) {
+    return {
+      summary: translate("{provider} rejected the API key. Check your connection settings.", {
+        provider: translate("Your model provider"),
+      }),
+      details,
+      recovery: "connection",
+      kind: "auth",
     };
   }
   const error = asRecord(record.error);
@@ -332,7 +338,7 @@ export function normalizeRunError(
   } else if (
     status === 401 ||
     ((status === 403 ||
-      /(?:invalid|incorrect)[_ -](?:api[_ -])?key|api[_ -]?key[_ -](?:invalid|expired)|authentication_error/i.test(
+      /(?:invalid|incorrect)[_ -](?:api[_ -])?key|api[_ -]?key[_ -](?:invalid|expired)|authentication_error|\bauthentication token has expired\b/i.test(
         signals,
       )) &&
       /auth|unauthorized|invalid|key/i.test(signals))

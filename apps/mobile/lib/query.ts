@@ -24,24 +24,27 @@ export const queryClient = new QueryClient({
  * The server, signed-in session, and space a read belongs to. A session change (sign-in,
  * sign-out, server switch) also clears the cache, so data never crosses an auth boundary.
  */
-function scopeKey(): string[] {
+function scopeKey(spaceId?: string): string[] {
   return [
     `server:${currentApiBase()}`,
     `session:${currentSessionGeneration()}`,
-    `space:${selectedSpaceId() ?? ""}`,
+    `space:${spaceId ?? selectedSpaceId() ?? ""}`,
   ];
 }
 
-/** One rpc read in the current scope. Its answer is only cached under the scope it was sent in. */
-export function rpcQuery<T>(proc: string, input?: object) {
-  const scope = scopeKey();
+/**
+ * One rpc read in the current scope. Its answer is only cached under the scope it was sent in.
+ * A `spaceId` sends it to that Space instead of the selected one.
+ */
+export function rpcQuery<T>(proc: string, input?: object, spaceId?: string) {
+  const scope = scopeKey(spaceId);
   const queryKey = [...scope, proc, input ?? {}] as unknown as DataTag<QueryKey, T, Error>;
   const queryFn: QueryFunction<T> = async ({ signal }) => {
-    if (scopeKey().join("\n") !== scope.join("\n"))
+    if (scopeKey(spaceId).join("\n") !== scope.join("\n"))
       throw new Error(t("Something went wrong. Try again."));
-    const requestContext = await captureApiRequestContext();
+    const requestContext = await captureApiRequestContext(spaceId);
     const answer = await rpc<T>(proc, input, { signal, requestContext });
-    if (scopeKey().join("\n") !== scope.join("\n"))
+    if (scopeKey(spaceId).join("\n") !== scope.join("\n"))
       throw new Error(t("Something went wrong. Try again."));
     return answer;
   };

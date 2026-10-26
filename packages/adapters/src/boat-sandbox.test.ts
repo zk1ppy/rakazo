@@ -3,6 +3,7 @@ import type { FileUrlResponse, SandboxStateEnum } from "@boatdev/sdk";
 import { ResponseError } from "@boatdev/sdk";
 import type { ComputerRef } from "@rakazo/adapter-kit";
 import {
+  SandboxDamagedError,
   SandboxRateLimitError,
   SandboxUnavailableError,
   SandboxUnresponsiveError,
@@ -54,6 +55,13 @@ async function boat() {
   return { api, provider, computer };
 }
 
+/** Files an export read through the artifact route, without the workspace listing itself. */
+function workspaceReads(artifactRaw: { mock: { calls: [{ path: string }, ...unknown[]][] } }) {
+  return artifactRaw.mock.calls
+    .map(([request]) => request.path)
+    .filter((path) => path.startsWith("/home/user/rakazo-home/"));
+}
+
 function reconnect(provider: BoatSandboxProvider, computer: ComputerRef, savedAt?: Date) {
   return provider.provision(
     {
@@ -85,8 +93,10 @@ describe("BoatSandboxProvider", () => {
         { operation: "resume", outcome: "rate_limited" },
       ]);
       for (const event of sink.events) {
+        const failed = event.outcome !== "accepted";
         expect(Object.keys(event).sort()).toEqual([
           "durationMs",
+          ...(failed ? ["error"] : []),
           "level",
           "message",
           "operation",
@@ -96,6 +106,7 @@ describe("BoatSandboxProvider", () => {
           "timestamp",
         ]);
         expect(event.message).toBe("sandbox.start");
+        if (failed) expect(event.error).toMatchObject({ name: "SandboxRateLimitError" });
       }
     } finally {
       installLogger(createLogger({ service: "test", level: "off", sinks: [] }));
@@ -715,6 +726,54 @@ describe("BoatSandboxProvider", () => {
     });
   });
 
+  it.each([
+    'Executable not found in $PATH: "systemd-run"',
+    "ENOENT: no such file or directory, posix_spawn 'systemd-run'",
+    "environment: line 7: /usr/bin/grep: cannot execute: required file not found\nenvironment: line 8: /usr/bin/grep: cannot execute: required file not found",
+  ])("reports a machine that cannot start programs as damaged: %s", async (stderr) => {
+    vi.spyOn(FakeBoatApi.prototype, "command").mockResolvedValue({
+      ok: true,
+      type: "command.finished",
+      success: false,
+      exitCode: 1,
+      stdout: "",
+      stderr,
+      timedOut: false,
+    });
+    const { provider, computer } = await boat();
+
+    await expect(provider.prepare(computer, context)).rejects.toBeInstanceOf(SandboxDamagedError);
+    const events = [];
+    const run = provider.execute(computer, { argv: ["ls"] }, context);
+    await expect(
+      (async () => {
+        for await (const event of run) events.push(event);
+      })(),
+    ).rejects.toBeInstanceOf(SandboxDamagedError);
+  });
+
+  it("leaves a command's own failure to start a program to the command", async () => {
+    vi.spyOn(FakeBoatApi.prototype, "command").mockResolvedValue({
+      ok: true,
+      type: "command.finished",
+      success: false,
+      exitCode: 126,
+      stdout: "",
+      stderr: "bash: ./run.sh: cannot execute: required file not found\n",
+      timedOut: false,
+    });
+    const { provider, computer } = await boat();
+
+    const events = [];
+    for await (const event of provider.execute(computer, { argv: ["./run.sh"] }, context)) {
+      events.push(event);
+    }
+    expect(events).toEqual([
+      { type: "stderr", data: "bash: ./run.sh: cannot execute: required file not found\n" },
+      { type: "exit", code: 126 },
+    ]);
+  });
+
   it("replaces a sandbox whose data expires between the lookup and the resume", async () => {
     const lookup = FakeBoatApi.prototype.get;
     const get = vi.spyOn(FakeBoatApi.prototype, "get");
@@ -951,22 +1010,23 @@ describe("BoatSandboxProvider", () => {
     ]);
     expect(Buffer.from(exported[0]!.content).equals(content)).toBe(true);
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(artifactRaw).toHaveBeenCalledExactlyOnceWith(
-      { sandboxId: computer.id, path: "/home/user/rakazo-home/notes.txt" },
-      { signal: context.signal },
-    );
+    expect(workspaceReads(artifactRaw)).toEqual(["/home/user/rakazo-home/notes.txt"]);
   });
 
   it("downloads a file the artifact route could not send before Boat's proxy timed out", async () => {
+    const read = FakeBoatApi.prototype.artifactRaw;
     const artifactRaw = vi.spyOn(FakeBoatApi.prototype, "artifactRaw");
     const { api, provider, computer } = await boat();
     api.files(computer.id).set("/home/user/rakazo-home/report.pdf", {
       content: Buffer.from("slow but small"),
       executable: false,
     });
-    artifactRaw.mockRejectedValueOnce(
-      boatError(502, "sandbox_direct_failed", "Request timeout after 74997ms"),
-    );
+    artifactRaw.mockImplementation(async function (this: FakeBoatApi, request) {
+      if (request.path.endsWith("/report.pdf")) {
+        throw boatError(502, "sandbox_direct_failed", "Request timeout after 74997ms");
+      }
+      return read.call(this, request);
+    });
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(async (url) => api.serveDownload(String(url)));
@@ -976,7 +1036,7 @@ describe("BoatSandboxProvider", () => {
 
     expect(Buffer.from(exported[0]!.content).toString()).toBe("slow but small");
     // The sandbox already had the request; resending it would only time out again.
-    expect(artifactRaw).toHaveBeenCalledOnce();
+    expect(workspaceReads(artifactRaw)).toEqual(["/home/user/rakazo-home/report.pdf"]);
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
@@ -996,6 +1056,92 @@ describe("BoatSandboxProvider", () => {
     expect(error).toBeInstanceOf(SandboxUnresponsiveError);
     expect(isSandboxGoneError(error)).toBe(false);
     expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("lists the workspace in one walk to a file, without browser caches", async () => {
+    const command = vi.spyOn(FakeBoatApi.prototype, "command");
+    const { api, provider, computer } = await boat();
+    const files = api.files(computer.id);
+    const odd = "notes/tab\there/new\nline.txt";
+    files.set(`/home/user/rakazo-home/${odd}`, { content: Buffer.from("odd"), executable: false });
+    files.set("/home/user/rakazo-home/bin/tool", { content: Buffer.from("x"), executable: true });
+
+    const exported = [];
+    for await (const file of provider.exportWorkspace(computer, context)) exported.push(file);
+
+    expect(exported.map((file) => [file.path, file.executable])).toEqual([
+      ["bin/tool", true],
+      [odd, undefined],
+    ]);
+    const listing = command.mock.calls
+      .map(([request]) => ("commandRequest" in request ? request.commandRequest.command : ""))
+      .map((wrapped) => String(parse(wrapped).at(-1)))
+      .find((script) => script.includes("exec 3> "));
+    expect(listing).toContain("-printf");
+    expect(listing).not.toContain("while");
+    expect(listing).toContain("-name 'Code Cache'");
+    expect(listing).toContain("-prune");
+    // Only an entry that vanished mid-walk is tolerated; other find errors fail the listing.
+    expect(listing).toContain("grep -qv -e 'No such file or directory$'");
+  });
+
+  it.each([
+    ["exit 1", { exitCode: 1, timedOut: false }, "could not list Boat workspace (exit 1)"],
+    ["timeout", { exitCode: 124, timedOut: true }, "could not list Boat workspace (timed out)"],
+  ])("reports a failed directory listing by its %s, not its output", async (_, ending, message) => {
+    const output = `${Buffer.from("/home/user/rakazo-home/private.txt").toString("base64")}\tfile\t1\t0\n`;
+    const run = FakeBoatApi.prototype.command;
+    vi.spyOn(FakeBoatApi.prototype, "command").mockImplementation(async function (
+      this: FakeBoatApi,
+      request,
+    ) {
+      if (!request.commandRequest.command.includes("directory=")) return run.call(this, request);
+      return {
+        ok: true,
+        type: "command.finished",
+        success: false,
+        stdout: output.repeat(1_000),
+        stderr: "",
+        ...ending,
+      };
+    });
+    const { provider, computer } = await boat();
+
+    const error = await provider
+      .listFiles(computer, "", context)
+      .catch((failure: Error) => failure);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(message);
+  });
+
+  it("reports a workspace listing that timed out without its partial output", async () => {
+    const output = `${Buffer.from("/home/user/rakazo-home/private.txt").toString("base64")}\tfile\t1\t0\n`;
+    const run = FakeBoatApi.prototype.command;
+    vi.spyOn(FakeBoatApi.prototype, "command").mockImplementation(async function (
+      this: FakeBoatApi,
+      request,
+    ) {
+      if (!request.commandRequest.command.includes("exec 3> ")) return run.call(this, request);
+      return {
+        ok: true,
+        type: "command.finished",
+        success: false,
+        exitCode: 124,
+        stdout: output.repeat(1_000),
+        stderr: "",
+        timedOut: true,
+      };
+    });
+    const { provider, computer } = await boat();
+
+    const error = await (async () => {
+      for await (const _file of provider.exportWorkspace(computer, context)) {
+        // Nothing is listed.
+      }
+    })().catch((failure: Error) => failure);
+
+    expect((error as Error).message).toBe("could not enumerate Boat workspace (timed out)");
   });
 
   it("exports files over the artifact limit through a private download URL", async () => {

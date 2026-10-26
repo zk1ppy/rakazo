@@ -272,6 +272,22 @@ export function isAllowedStdioCommand(command: string, allowed: readonly string[
   return trimmed.length > 0 && allowed.includes(trimmed);
 }
 
+/** The deployment's stdio settings, as MCP_STDIO_ENABLED and MCP_STDIO_ALLOWED_COMMANDS set them. */
+export type McpStdioPolicy = { stdioEnabled?: boolean; allowedCommands?: readonly string[] };
+
+/** Whether this deployment can run any stdio MCP server. */
+export function mcpStdioAvailable(policy: McpStdioPolicy): boolean {
+  return policy.stdioEnabled === true && (policy.allowedCommands?.length ?? 0) > 0;
+}
+
+/** Why this deployment can't run a stdio server with `command`, or undefined when it can. */
+export function mcpStdioRefusal(command: string, policy: McpStdioPolicy): string | undefined {
+  if (!mcpStdioAvailable(policy)) return "Stdio MCP servers aren't available here";
+  if (!isAllowedStdioCommand(command, policy.allowedCommands ?? []))
+    return "This stdio command isn't allowed here";
+  return undefined;
+}
+
 function stdioParams(options: McpStdioOptions): StdioServerParameters {
   if (!isAllowedStdioCommand(options.command, options.allowedCommands)) {
     throw new Error("MCP stdio command is not in the configured allowlist");

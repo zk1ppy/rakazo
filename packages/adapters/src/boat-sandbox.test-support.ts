@@ -491,17 +491,22 @@ export class FakeBoatApi implements BoatSandboxSdk {
         const [child, ...rest] = filePath.slice(root.length + 1).split("/");
         children.set(`${root}/${child}`, rest.length ? "dir" : "file");
       }
-      if (!children.size) return finished({ exitCode: 1, stderr: "No such directory\n" });
+      if (!children.size) return finished({ exitCode: 2 });
       return finished({
-        stdout: [...children]
-          .map(([entry, kind]) => listing(entry, kind, box.files.get(entry)))
-          .join(""),
+        stdout: Buffer.from(
+          [...children].map(([entry, kind]) => listing(entry, kind, box.files.get(entry))).join(""),
+        ).toString("base64"),
       });
     }
-    if (command.includes("find ") && command.includes("-type f")) {
-      return finished({
-        stdout: [...box.files].map(([filePath, file]) => listing(filePath, "file", file)).join(""),
+    // The whole-workspace listing goes to a file the adapter then downloads.
+    const listingFile = command.match(/^exec 3> (.*) \|\| exit 2$/m)?.[1];
+    if (listingFile !== undefined) {
+      const records = [...box.files].map(([filePath, file]) => listing(filePath, "file", file));
+      box.files.set(String(parse(listingFile)[0]), {
+        content: Buffer.from(records.join("")),
+        executable: false,
       });
+      return finished({});
     }
 
     const parsed = parse(command, (name) => box.env[name] ?? "");
@@ -562,8 +567,9 @@ function listing(
   kind: "file" | "dir",
   file?: { content: Uint8Array; executable: boolean },
 ): string {
-  const encoded = Buffer.from(absolute).toString("base64");
-  return `${encoded}\t${kind}\t${file?.content.byteLength ?? 0}\t${file?.executable ? 1 : 0}\n`;
+  const size = file?.content.byteLength ?? 0;
+  const mode = kind === "dir" || file?.executable ? "755" : "644";
+  return `${kind === "dir" ? "d" : "f"}\t${size}\t${mode}\t${absolute}\0`;
 }
 
 function finished(result: Partial<CommandResponse>): CommandResponse {

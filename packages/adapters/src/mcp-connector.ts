@@ -60,7 +60,7 @@ import {
 } from "./mcp-package-installer.js";
 import type { McpServerHealthUpdate } from "./mcp-server-health.js";
 import { recordMcpServerHealth } from "./mcp-server-health.js";
-import { isAllowedStdioCommand, McpSession } from "./mcp-transport.js";
+import { McpSession, mcpStdioRefusal } from "./mcp-transport.js";
 import type { RemoteTransportDependencies } from "./remote-mcp.js";
 
 type SessionEntry = {
@@ -1000,12 +1000,11 @@ export class McpConnector implements ConnectorProvider {
       };
       let accessTokenExpiresAtMs: number | undefined;
       if (server.transport === "stdio") {
-        if (!this.options.stdioEnabled) throw new Error("MCP stdio is disabled");
         const command = String(server.command ?? "");
-        const allowedCommands = this.options.allowedCommands ?? [];
         // The allowlist names the configured launcher (`npx`), checked before any install.
-        if (!isAllowedStdioCommand(command, allowedCommands))
-          throw new Error("MCP stdio command is not in the configured allowlist");
+        // Only a deployment change or an edit to the server fixes a refusal, so wait for one.
+        const refusal = mcpStdioRefusal(command, this.options);
+        if (refusal) throw new McpConnectFailure(refusal, "reconnect");
         const npx = parseNpxLaunch(command, args);
         let installedBin: InstalledMcpBin | undefined;
         if (npx) {
@@ -1114,7 +1113,7 @@ export class McpConnector implements ConnectorProvider {
           args: npx ? npx.binArgs : args,
           installedBin,
           env: launchEnv,
-          allowedCommands,
+          allowedCommands: this.options.allowedCommands ?? [],
           signal: context.signal,
           timeoutMs: this.options.startupTimeoutMs ?? DEFAULT_MCP_STDIO_STARTUP_TIMEOUT_MS,
         });

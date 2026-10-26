@@ -37,7 +37,7 @@ import {
 } from "@rakazo/core";
 import * as Clipboard from "expo-clipboard";
 import { useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AccessibilityInfo,
   ActivityIndicator,
@@ -58,7 +58,6 @@ import { NativeSwitch } from "../../components/native-switch";
 import { Checkmark } from "../../components/row-accessories";
 import { SettingsRow } from "../../components/settings-group";
 import type { MobileMe, MobileModel, MobileModelCredential } from "../../lib/api";
-import { rpc } from "../../lib/api";
 import { mobileTokens } from "../../lib/appearance";
 import { useI18n } from "../../lib/i18n";
 import {
@@ -68,6 +67,7 @@ import {
 } from "../../lib/model-auth";
 import { modelConnectionRequest } from "../../lib/model-connection-request";
 import { native, useThemedStyles } from "../../lib/native";
+import { ACCOUNT_SETTINGS, settingsRpc } from "../../lib/settings-target";
 import { thinkingLevelLabel } from "../../lib/thinking-level";
 import { errorText } from "../../lib/user-error";
 
@@ -101,6 +101,9 @@ export default function ModelConnection() {
   const { requestId = "" } = useLocalSearchParams<{ requestId?: string }>();
   const [request] = useState(() => modelConnectionRequest(requestId));
   const makeDefault = request?.makeDefault ?? false;
+  const target = request?.target ?? ACCOUNT_SETTINGS;
+  // A Space's override connects through that Space, where makeDefault and sign-in apply.
+  const rpc = useMemo(() => settingsRpc(target), [target]);
   // A new connection is managed by its id once it is saved, so later saves update it.
   const [credentialId, setCredentialId] = useState(request?.credentialId ?? null);
   const credentialIdRef = useRef(credentialId);
@@ -187,7 +190,7 @@ export default function ModelConnection() {
       setOauthPending(false);
     });
     if (loginId) void rpc("models/cancelOAuth", { loginId }).catch(() => undefined);
-  }, []);
+  }, [rpc]);
 
   const cancelInFlightWork = useCallback(() => {
     modelProbe.invalidate();
@@ -270,7 +273,7 @@ export default function ModelConnection() {
       setGatewayId(nextCredential?.gatewayId ?? "");
       return nextMe;
     },
-    [request, t],
+    [request, rpc, t],
   );
 
   useFocusEffect(
@@ -501,6 +504,7 @@ export default function ModelConnection() {
               supportsImages,
               maxImagesPerPrompt: maxImagesPerPromptInput,
               makeDefault,
+              scope: target.scope,
               apiKey: apiKey.trim() || undefined,
               label: selected.providerName ?? selected.provider,
               credentialId: credentialIdRef.current,
@@ -516,6 +520,7 @@ export default function ModelConnection() {
               ...(!savingLimitOnly || modelChanged ? { thinkingLevel: stagedThinking } : {}),
               ...(!savingLimitOnly || modelChanged ? { minReasoningEffort: stagedMinEffort } : {}),
               makeDefault,
+              scope: target.scope,
               maxTokens: parsedMaxTokens ?? null,
               label: selected.providerName ?? selected.provider,
               credentialId: credentialIdRef.current,
@@ -537,7 +542,7 @@ export default function ModelConnection() {
   }
 
   async function finishSubscriptionSignIn(loginId: string, controller: AbortController) {
-    await waitForModelOAuth(loginId, controller.signal);
+    await waitForModelOAuth(loginId, controller.signal, rpc);
     if (controller.signal.aborted) return;
     const saved = await rpc<MobileModelCredential>(
       "models/finishOAuth",
@@ -589,8 +594,10 @@ export default function ModelConnection() {
             selected.thinkingLevels,
           ) as ThinkingLevel | null,
           makeDefault,
+          scope: target.scope,
           label: selected.providerName ?? selected.provider,
           credentialId: credentialIdRef.current,
+          codePage: true,
         },
         { signal: controller.signal },
       );
@@ -1096,17 +1103,13 @@ export default function ModelConnection() {
                   <Pressable onPress={() => void Linking.openURL(oauth.verificationUri)}>
                     <Text style={styles.link}>{oauth.verificationUri}</Text>
                   </Pressable>
-                  <Text style={styles.secondary}>
-                    {t("The final page may not load. Paste its URL or code here.")}
-                  </Text>
+                  <Text style={styles.secondary}>{t("Then paste the code here.")}</Text>
                   <TextInput
                     accessibilityLabel={t("Authorization code")}
                     value={pasteCode}
                     onChangeText={setPasteCode}
                     autoCapitalize="none"
                     autoCorrect={false}
-                    placeholder={t("http://localhost:53692/callback?code=…")}
-                    placeholderTextColor={native.secondaryLabel}
                     style={[styles.keyInput, styles.nestedInput]}
                   />
                   <NativeActionButton

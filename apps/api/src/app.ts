@@ -34,6 +34,7 @@ import {
   createBackgroundJobHandlers,
   createCloudAgentConnection,
   createConnectorStack,
+  createIdleComputerSweeper,
   createJobReconciler,
   createMessagingContextLoader,
   createMessagingTeamChatHistory,
@@ -47,7 +48,6 @@ import {
   createTicketChangeNotifier,
   createWebProvider,
   deploymentModelUsageLookup,
-  destroyBot,
   EmailEmulator,
   ExpoPushProvider,
   GraphileJobPublisher,
@@ -118,6 +118,7 @@ import { requestLogging } from "@rakazo/logging/hono";
 import { MarkdownMemoryStore } from "@rakazo/memory";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { deleteAccountContent } from "./account-deletion.js";
 import { mountAppAssociation, nativePasskeys } from "./app-association.js";
 import { storeInboundAttachment } from "./artifacts.js";
 import { createBillingService } from "./billing.js";
@@ -353,7 +354,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     env.mcpAllowPrivateEndpoint,
   );
   const memoryProviders = new SpaceMemoryProviderResolver(prisma, secrets, jobs);
-  const oauthLogins = new PiOAuthLogins();
+  const oauthLogins = new PiOAuthLogins(undefined, { prisma, secrets });
   const home = createAgentHomeStore(env.dataDir, prisma);
   const artifacts = createArtifactStore(env.dataDir, prisma);
   const memory = new MarkdownMemoryStore(prisma);
@@ -488,34 +489,17 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     beforeDeleteUser: async (userId) => {
       // First, so a provider failure aborts deletion before anything is destroyed.
       await billing?.cancelForDeletedUser(userId);
-      const bots = await prisma.bot.findMany({
-        where: { userId },
-        select: { id: true, userId: true, spaceId: true, name: true, archivedAt: true },
-      });
-      await Promise.all(
-        bots.map((bot) =>
-          destroyBot(
-            {
-              prisma,
-              sandbox,
-              home,
-              jobs,
-              artifacts,
-              dataDir: env.dataDir,
-              messagingInstallations,
-            },
-            bot,
-            {
-              operationId: `account-delete:${userId}`,
-              traceId: `account-delete:${userId}`,
-              spaceId: bot.spaceId,
-              userId,
-              botId: bot.id,
-              signal: new AbortController().signal,
-            },
-            { deleteMemories: true },
-          ),
-        ),
+      await deleteAccountContent(
+        {
+          prisma,
+          sandbox,
+          home,
+          jobs,
+          artifacts,
+          dataDir: env.dataDir,
+          messagingInstallations,
+        },
+        userId,
       );
       await removePiUserSessions(env.dataDir, userId);
       await pushTokens
@@ -588,6 +572,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     secretStore: secrets,
     secretHttp: remoteConnectors,
     mcpAllowPrivateEndpoint: env.mcpAllowPrivateEndpoint,
+    mcpStdio: { stdioEnabled: env.mcpStdioEnabled, allowedCommands: env.mcpStdioAllowedCommands },
     deploymentModelKey: env.deploymentModelKey,
     deploymentModelConfigured: env.deploymentModelConfigured,
     dataDir: env.dataDir,
@@ -642,6 +627,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
           prisma,
           securityEventRetentionDays(),
         ),
+        reconcileIdleComputers: createIdleComputerSweeper({ prisma, jobs }),
       })
     : undefined;
   reconciler?.start();
@@ -677,6 +663,11 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     messaging: {
       enabled: Boolean(messaging),
       providers: messaging?.platforms().map((platform) => platform.provider) ?? [],
+      addresses: Object.fromEntries(
+        (messaging?.platforms() ?? []).flatMap((platform) =>
+          platform.address ? [[platform.provider, platform.address]] : [],
+        ),
+      ),
       openSignup: env.messagingOpenSignup,
     },
     env: {
@@ -806,7 +797,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
           c.req.query("state") ?? "",
           c.req.query("code") ?? "",
         );
-        return c.redirect(new URL("/app?messaging", env.webOrigin).toString());
+        return c.redirect(new URL("/app?settings=messaging", env.webOrigin).toString());
       } catch {
         return c.text("Slack connection failed. Return to Rakazo and try again.", 400);
       }

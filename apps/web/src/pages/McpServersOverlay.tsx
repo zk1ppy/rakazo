@@ -75,10 +75,13 @@ function oauthActionLabel(server: McpServer, pending: boolean): string {
 export function McpServersOverlay({
   onClose,
   editServerId,
+  stdioEnabled,
 }: {
   onClose: () => void;
   /** Opens with this server's form, as an import's setup checklist does. */
   editServerId?: string;
+  /** Whether this deployment runs stdio servers. */
+  stdioEnabled: boolean;
 }) {
   const { t } = useLingui();
   const [editing, setEditing] = useState<McpServer | null>(null);
@@ -190,6 +193,7 @@ export function McpServersOverlay({
 
   function resetForm() {
     setEditing(null);
+    if (!stdioEnabled) setTransport("streamable_http");
     setName("");
     setEndpoint("");
     setSecret("");
@@ -491,7 +495,9 @@ export function McpServersOverlay({
                   <TabsList className="w-full">
                     <TabsTrigger value="streamable_http">HTTP</TabsTrigger>
                     <TabsTrigger value="sse">SSE</TabsTrigger>
-                    <TabsTrigger value="stdio">STDIO</TabsTrigger>
+                    {stdioEnabled || editing?.transport === "stdio" ? (
+                      <TabsTrigger value="stdio">STDIO</TabsTrigger>
+                    ) : null}
                   </TabsList>
                 </Tabs>
                 {transport === "stdio" ? (

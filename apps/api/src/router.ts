@@ -96,7 +96,12 @@ export interface RouterDeps {
   dataDir: string;
   /** Present when the external messaging surface is enabled. */
   messagingInstallations?: MessagingInstallations;
-  messaging?: { enabled: boolean; providers: string[]; openSignup: boolean };
+  messaging?: {
+    enabled: boolean;
+    providers: string[];
+    addresses: Record<string, string>;
+    openSignup: boolean;
+  };
   /** Present only when the deployment bills; self-hosted installs leave it unset. */
   billing?: BillingService;
   env: {

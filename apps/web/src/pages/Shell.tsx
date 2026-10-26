@@ -23,7 +23,7 @@ import type {
   VoiceStatus,
 } from "@rakazo/contracts";
 import { ATTACHMENT_MAX_COUNT, attachmentMaxBytes, attachmentSizeLabel } from "@rakazo/contracts";
-import type { ComposerMention, ReadBoundary } from "@rakazo/core";
+import type { AgentImportReader, ComposerMention, ReadBoundary } from "@rakazo/core";
 import {
   accountDisplay,
   answerableAskMessageIds,
@@ -32,6 +32,7 @@ import {
   buildComposerMentionOptions,
   chatUserBubbleColors,
   createChatQueues,
+  createScreenReconnects,
   dismissableAskMessageIds,
   foldPeerReplies,
   inferAttachmentMimeType,
@@ -43,9 +44,12 @@ import {
   reorderBotTo,
   resolveComposerSendPlan,
   runThreadSubscription,
+  SCREEN_RECONNECT_DELAY_MS,
+  screenProbeUrl,
   searchHitThreadTarget,
   settleReadBoundary,
   speechFromBlocks,
+  waitForScreenPage,
   withLiveStreamingProgress,
 } from "@rakazo/core";
 import type { GroupAvatarMember } from "@rakazo/ui-web";
@@ -104,7 +108,6 @@ import { SidebarFooter } from "../components/SidebarFooter";
 import type { ActivityListFilters } from "../lib/activity-list-filters";
 import { emptyActivityFilters } from "../lib/activity-list-filters";
 import { readActivityMode, writeActivityMode } from "../lib/activity-mode";
-import type { DroppedAgent } from "../lib/agent-drop";
 import type { ArtifactTarget } from "../lib/artifact-open";
 import { authClient } from "../lib/auth";
 import { autoReadStillWanted } from "../lib/auto-read";
@@ -140,16 +143,19 @@ import {
 } from "../lib/composer-enter-to-send-pref";
 import {
   bootComputerOnce,
+  createScreenRefocus,
   embeddableScreenUrl,
   isProxiedScreenUrl,
   loadComputerScreen,
   probeScreen,
+  probeScreenStatus,
   SCREEN_FRAME_LOAD_TIMEOUT_MS,
   screenFrameError,
   screenFrameMessage,
   screenFrameStarted,
 } from "../lib/computer-screen";
 import { connectedAppMarks } from "../lib/connected-apps";
+import { cronLabels } from "../lib/cron";
 import { scheduleFocusPrompt } from "../lib/focus-prompt";
 import { localTimezone } from "../lib/local-timezone";
 import {
@@ -233,7 +239,6 @@ import {
   DeleteSpaceDialog,
   NewBotSectionDialog,
   NewSpaceDialog,
-  PickerInfoDialog,
   RenameBotSectionDialog,
 } from "./shell/dialogs";
 import type { RosterDropTarget } from "./shell/roster-drop";
@@ -264,9 +269,6 @@ function readAloud(text: string, opts: { botId: string; messageId: string }) {
 
 const BotContextMenu = lazyOverlay(() =>
   import("./BotContextMenu").then((module) => module.BotContextMenu),
-);
-const MessagingSettingsOverlay = lazyOverlay(() =>
-  import("./MessagingSettingsOverlay").then((module) => module.MessagingSettingsOverlay),
 );
 const SettingsOverlay = lazyOverlay(() =>
   import("./SettingsOverlay").then((module) => module.SettingsOverlay),
@@ -314,7 +316,7 @@ export function ShellPage() {
 }
 
 function SpaceShell() {
-  const { t } = useLingui();
+  const { t, i18n } = useLingui();
   const { botId, groupId } = useParams();
   const [shellSpaceId] = useState(selectedSpaceId);
   const [rpc] = useState(() => createSpaceRpc(shellSpaceId));
@@ -427,7 +429,9 @@ function SpaceShell() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [modelFocusRequest, setModelFocusRequest] = useState(0);
   const [panel, setPanelState] = useState<Panel>(null);
-  const [droppedAgent, setDroppedAgent] = useState<DroppedAgent | null>(null);
+  const [droppedAgent, setDroppedAgent] = useState<AgentImportReader | null>(null);
+  // Back returns to the New bot dialog only when the import was opened from it.
+  const [importFromDialog, setImportFromDialog] = useState(false);
   const [restoredPanelKey, setRestoredPanelKey] = useState<string | null>(null);
   const panelStorageKeyRef = useRef<string | null>(null);
   const observedPanelKey = useRef<string | null>(null);
@@ -580,7 +584,6 @@ function SpaceShell() {
   const miniSidebar = botsSidebarCollapsed && !isMobileSidebar;
   const [newSpaceOpen, setNewSpaceOpen] = useState(false);
   const [createBotOpen, setCreateBotOpen] = useState(false);
-  const [pickerInfoTopic, setPickerInfoTopic] = useState<"group" | "space" | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
 
   useEffect(() => {
@@ -708,11 +711,23 @@ function SpaceShell() {
   const [screenFrame, setScreenFrame] = useState<HTMLIFrameElement | null>(null);
   const [screenLoadError, setScreenLoadError] = useState<string | null>(null);
   const screenFrameReported = useRef(false);
+  // A screen that drops after connecting loads again by itself now and then, through the proxy's
+  // full check, by remounting its frame.
+  // Each bot's screen has its own allowance.
+  const screenReconnects = useRef(createScreenReconnects());
+  const screenReconnect = () => screenReconnects.current.for(computerBotIdRef.current ?? "");
+  const [screenFrameKey, setScreenFrameKey] = useState(0);
+  // Typing goes back into a reconnected screen that had the keyboard when it dropped.
+  const screenRefocus = useRef(createScreenRefocus());
+  useEffect(() => {
+    screenRefocus.current.forget();
+  }, [screenUrl, computerOpen]);
   useEffect(() => {
     // Only a mounted frame resets the error: its own failure unmounts it, and Retry remounts it.
     if (!screenFrame) return;
     setScreenLoadError(null);
     screenFrameReported.current = false;
+    screenReconnect().loaded();
     const url = embeddableScreenUrl(screenUrl);
     if (!isProxiedScreenUrl(url)) return;
     let cancelled = false;
@@ -731,16 +746,60 @@ function SpaceShell() {
   useEffect(() => {
     if (!screenFrame) return;
     const fallback = t`Could not connect to the computer screen`;
+    let reconnect: ReturnType<typeof setTimeout> | undefined;
+    const stopped = new AbortController();
     const onMessage = (event: MessageEvent) => {
       if (event.source !== screenFrame.contentWindow) return;
       const message = screenFrameMessage(event.data);
       if (!message) return;
       if (screenFrameStarted(message)) screenFrameReported.current = true;
-      setScreenLoadError(screenFrameError(message, fallback));
+      if (
+        message.rakazoScreen === "connected" &&
+        screenRefocus.current.connected(document.activeElement, screenFrame, document.body)
+      ) {
+        screenFrame.focus();
+        screenFrame.contentWindow?.postMessage({ rakazoScreenFocus: true }, "*");
+      }
+      if (screenReconnect().report(message.rakazoScreen) === "reconnect") {
+        screenRefocus.current.dropped(document.activeElement === screenFrame);
+        clearTimeout(reconnect);
+        const url = embeddableScreenUrl(screenUrl);
+        reconnect = setTimeout(() => {
+          // Wait out an API that can't be reached, so the one reconnect isn't spent on it.
+          void waitForScreenPage(
+            async (signal) =>
+              isProxiedScreenUrl(url) ? probeScreenStatus(screenProbeUrl(url), fetch, signal) : 200,
+            { signal: stopped.signal },
+          ).then((outcome) => {
+            if (outcome === "cancelled") return;
+            if (outcome === "timeout") {
+              screenRefocus.current.forget();
+              setScreenLoadError(fallback);
+            }
+            // A refusal shows once the new frame's own check runs.
+            else setScreenFrameKey((key) => key + 1);
+          });
+        }, SCREEN_RECONNECT_DELAY_MS);
+        return;
+      }
+      const error = screenFrameError(message, fallback);
+      if (error) screenRefocus.current.forget();
+      setScreenLoadError(error);
+    };
+    // Moving to anything else in the app (the chat box, say) keeps the keyboard there.
+    const onFocusIn = (event: FocusEvent) => {
+      if (event.target !== screenFrame) screenRefocus.current.forget();
     };
     window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [screenFrame]);
+    document.addEventListener("focusin", onFocusIn);
+    return () => {
+      // Closing the screen or a new screen URL (taking or releasing control) cancels a reconnect.
+      stopped.abort();
+      clearTimeout(reconnect);
+      window.removeEventListener("message", onMessage);
+      document.removeEventListener("focusin", onFocusIn);
+    };
+  }, [screenFrame, screenUrl]);
   useEffect(() => {
     if (!computerOpen) {
       setComputerViewport(null);
@@ -790,7 +849,7 @@ function SpaceShell() {
   );
   const readVisibleGroups = useRef(new Set<string>());
   // What the user had read up to when the open chat was opened; the "New" divider
-  // follows it for the rest of the visit. Each open of a chat is a new visit.
+  // follows it until they write in the chat or leave it. Each open of a chat is a new visit.
   const readVisit = useRef<{ chat: string | null; visit: number }>({ chat: null, visit: 0 });
   const [readBoundary, setReadBoundary] = useState<ReadBoundary | null>(null);
   // A chat's markRead calls run one at a time so the request that opened it answers first.
@@ -799,6 +858,10 @@ function SpaceShell() {
     setReadBoundary((current) =>
       settleReadBoundary(current, readVisit.current.visit, { visit, seq }),
     );
+  }, []);
+  // Writing in the chat means the user has caught up, so the divider goes.
+  const clearReadBoundary = useCallback(() => {
+    setReadBoundary({ visit: readVisit.current.visit, seq: null });
   }, []);
   const notifiedBrowserEvents = useRef(new Set<string>());
   const pendingBrowserNotifications = useRef(new Map<string, PendingBrowserNotification>());
@@ -2225,8 +2288,9 @@ function SpaceShell() {
           botName: routine.botName,
         })),
         connectors: mentionConnectors,
+        cronLabels: cronLabels(i18n.locale),
       }),
-    [bots, groupId, groups, inGroup, mentionConnectors, mentionRoutines],
+    [bots, groupId, groups, i18n.locale, inGroup, mentionConnectors, mentionRoutines],
   );
   const shellReady =
     initialBotsLoaded &&
@@ -2303,6 +2367,7 @@ function SpaceShell() {
       const botId = activeBotId.current;
       const groupId = activeGroupId.current;
       if (!botId && !groupId) return;
+      clearReadBoundary();
       await rpc.threads.answer({
         ...(groupId ? { groupId } : { botId: botId! }),
         runId: message.runId ?? "",
@@ -2425,6 +2490,7 @@ function SpaceShell() {
       sendingRef.current = true;
       setSending(true);
       setSendError(null);
+      clearReadBoundary();
       const dropDelayedSetup = () => {
         // Only after successful engagement so a failed upload/send keeps the setup card.
         if (initialBotTarget && focusPromptBotIdRef.current === initialBotTarget) {
@@ -2904,6 +2970,23 @@ function SpaceShell() {
     }
   }, [computer?.busyBotName]);
 
+  // Opening the computer while its bot was running was refused as busy; boot it once the run
+  // ends, or the open window is left on a stopped computer with nothing to press.
+  const computerBlockedByRun = computerTakeoverBlocked(computer, snapshot?.run?.status);
+  useEffect(() => {
+    if (computerBlockedByRun) return;
+    const botId = computer?.botId;
+    if (!botId || !computerOpenRef.current || computerBotIdRef.current !== botId) return;
+    if (activeBotId.current !== botId) return;
+    if (computer.state !== "stopped" && computer.state !== "suspended") return;
+    void bootComputer({
+      botId,
+      takeControl: false,
+      showProgress: true,
+      force: true,
+    }).catch(() => undefined);
+  }, [computerBlockedByRun]);
+
   useEffect(() => {
     if (panel !== "routine") {
       leaveRoutine();
@@ -3379,7 +3462,6 @@ function SpaceShell() {
           navigate={navigate}
           setNewSpaceOpen={setNewSpaceOpen}
           setCreateBotOpen={setCreateBotOpen}
-          setPickerInfoTopic={setPickerInfoTopic}
         />
         {miniSidebar || !(activityMode || searchOpen || query) ? null : (
           <InputGroup
@@ -3657,7 +3739,7 @@ function SpaceShell() {
             <div className="grid flex-1 place-items-center">
               <Button onClick={() => setCreateBotOpen(true)}>
                 <Plus size={16} aria-hidden="true" />
-                <Trans>Create new Bot</Trans>
+                <Trans>New bot</Trans>
               </Button>
             </div>
           ) : (
@@ -3740,6 +3822,7 @@ function SpaceShell() {
               onOpenComputer={onOpenComputer}
               onOpenImport={() => {
                 setDroppedAgent(null);
+                setImportFromDialog(false);
                 setPanel("import-agent");
               }}
               onOpenImportSetup={(target) => {
@@ -3770,6 +3853,7 @@ function SpaceShell() {
               enterToSend={enterToSend}
               onImportAgent={(agent) => {
                 setDroppedAgent(agent);
+                setImportFromDialog(false);
                 setPanel("import-agent");
               }}
               activeName={inGroup ? (activeGroup?.name ?? activeSnapshot?.groupName) : active?.name}
@@ -3890,6 +3974,7 @@ function SpaceShell() {
                 computer={computer}
                 computerOpen={computerOpen}
                 embeddedScreenUrl={embeddedScreenUrl}
+                screenFrameKey={screenFrameKey}
                 screenFrameRef={setScreenFrame}
                 computerScreenError={computerScreenError}
                 computerBooting={computerBooting}
@@ -3960,7 +4045,7 @@ function SpaceShell() {
                 onBack={() => {
                   setDroppedAgent(null);
                   setPanel(null);
-                  setCreateBotOpen(true);
+                  if (importFromDialog) setCreateBotOpen(true);
                 }}
                 onCancel={() => {
                   setDroppedAgent(null);
@@ -4184,6 +4269,7 @@ function SpaceShell() {
             onImport={() => {
               setCreateBotOpen(false);
               setDroppedAgent(null);
+              setImportFromDialog(true);
               setPanel("import-agent");
             }}
           />
@@ -4203,10 +4289,6 @@ function SpaceShell() {
               window.location.assign("/onboarding");
             }}
           />
-        ) : null}
-
-        {pickerInfoTopic ? (
-          <PickerInfoDialog topic={pickerInfoTopic} onClose={() => setPickerInfoTopic(null)} />
         ) : null}
 
         {clearTarget ? (
@@ -4247,10 +4329,11 @@ function SpaceShell() {
           />
         ) : null}
         {overlay?.kind === "mcp" ? (
-          <McpServersOverlay editServerId={overlay.serverId} onClose={() => setOverlay(null)} />
-        ) : null}
-        {overlay?.kind === "messaging" ? (
-          <MessagingSettingsOverlay onClose={() => setOverlay(null)} />
+          <McpServersOverlay
+            editServerId={overlay.serverId}
+            stdioEnabled={bootstrapMe?.mcpStdioEnabled === true}
+            onClose={() => setOverlay(null)}
+          />
         ) : null}
       </Suspense>
 
@@ -4264,8 +4347,7 @@ function SpaceShell() {
               await removeSpace(spaceId);
               if (alive.current) setOverlay(null);
             }}
-            currentSpaceId={currentSpaceId}
-            onSpaceChange={(spaceId) => setOverlay({ ...overlay, spaceId })}
+            onOpenSpace={(spaceId) => setOverlay({ ...overlay, section: "space", spaceId })}
             name={session.data?.user.name ?? ""}
             onNameSaved={async () => {
               await session.refetch({ query: { disableCookieCache: true } });
@@ -4281,7 +4363,6 @@ function SpaceShell() {
               setBootstrapMe((prev) => (prev ? { ...prev, sandboxProvider } : prev))
             }
             messagingEnabled={messagingSurfaceEnabled}
-            onOpenMessaging={() => setOverlay({ kind: "messaging" })}
             timezone={bootstrapMe?.timezone ?? null}
             onTimezoneChange={async (timezone) => {
               const nextMe = await rpc.preferences.update({ timezone });
@@ -4334,6 +4415,7 @@ function SpaceShell() {
           runStatus={snapshot?.run?.status}
           sendError={sendError}
           embeddedScreenUrl={embeddedScreenUrl}
+          screenFrameKey={screenFrameKey}
           screenFrameRef={setScreenFrame}
           computerScreenError={computerScreenError}
           computerBooting={computerBooting}
@@ -4341,6 +4423,7 @@ function SpaceShell() {
           onStopRun={() => void stopRun()}
           onRelease={releaseComputer}
           onTakeControl={() => void openComputer(computerBot.id, true)}
+          onStart={() => void openComputer(computerBot.id)}
           onRefreshTeaching={refreshActiveTeaching}
           onRefreshComputer={async () => {
             await refreshComputerFor(computerBot.id);

@@ -277,6 +277,10 @@ describe("normalizeRunError", () => {
       '401: {"message":"Missing Authentication header","code":401}',
       '401 {"status":401,"title":"Unauthorized","detail":"Invalid unsecured/JWS/JWE header: Invalid JSON object"}',
       'xai API error (400): 400 "Incorrect API key provided. You can obtain an API key from the console."',
+      "Your authentication token has expired. Please try refreshing it.",
+      // A key pasted with code around it; the code's words are not provider signals.
+      'Headers.append: "Bearer example-key\nclient = Client(timeout=30, credits=5, rate_limit=1)" is an invalid header value.',
+      "Cannot convert argument to a ByteString because the character at index 0 has a value of 48120 which is greater than 255.",
       google({
         code: 400,
         message: "API key not valid. Please pass a valid API key.",
@@ -345,6 +349,10 @@ describe("normalizeRunError", () => {
     it.each([
       "Provider finish_reason: error",
       "Provider stopped with: MALFORMED_FUNCTION_CALL",
+      "Unhandled stop reason: MALFORMED_RESPONSE",
+      "The model refused to complete the request",
+      "This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage Policy. To learn more, see the refusals guide.",
+      "This request was blocked as it seems to violate Anthropic's Terms of Service restrictions on reverse engineering or duplicating model outputs.",
       "Provider returned an empty response",
       "Failed to parse tool call arguments as JSON",
       '400: {"message":"Failed to parse tool call arguments as JSON","code":"tool_use_failed"}',

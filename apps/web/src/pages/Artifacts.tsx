@@ -726,8 +726,7 @@ function ArtifactRow({
           {bot ? (
             <>
               <BotAvatar color={bot.color} identity={bot.id} size={14} status={bot.status} />
-              <span className="max-w-[140px] truncate">{bot.name}</span>
-              <span aria-hidden="true">·</span>
+              <span className="me-1 max-w-[140px] truncate">{bot.name}</span>
             </>
           ) : null}
           <span>{formatRelativeTime(artifact.createdAt)}</span>
@@ -853,7 +852,7 @@ function PreviewPane({
           >
             {versions.map((entry) => (
               <NativeSelectOption key={entry.id} value={entry.id}>
-                {`v${entry.version} · ${formatRelativeTime(entry.createdAt)}`}
+                {`v${entry.version} (${formatRelativeTime(entry.createdAt)})`}
               </NativeSelectOption>
             ))}
           </NativeSelect>
